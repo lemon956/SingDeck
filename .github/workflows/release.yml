@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify frontend
+        run: pnpm check
+
+      - name: Verify helper
+        run: pnpm helper:test
+
+      - name: Build helper
+        run: cargo build --release --manifest-path helper/Cargo.toml
+
+      - name: Package release assets
+        run: |
+          tag_name="${GITHUB_REF_NAME//\//-}"
+          mkdir -p release-artifacts
+          tar -czf "release-artifacts/singdeck-web-${tag_name}.tar.gz" -C dist .
+          cp helper/target/release/singdeck-helper "release-artifacts/singdeck-helper-linux-x86_64-${tag_name}"
+          (cd release-artifacts && sha256sum * > SHA256SUMS)
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-artifacts/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-artifacts/* \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag
+          fi
