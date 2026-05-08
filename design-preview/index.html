@@ -1,0 +1,1418 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SingDeck Proxies Preview</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+        --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        --bg: #050607;
+        --rail: #080a0b;
+        --panel: #121617;
+        --panel-soft: #161b1c;
+        --tile: #0b0e0f;
+        --tile-hover: #111617;
+        --line: rgba(213, 230, 232, 0.11);
+        --line-strong: rgba(213, 230, 232, 0.22);
+        --text: #e7edef;
+        --muted: #8b989e;
+        --faint: #59666b;
+        --green: #4edb8c;
+        --green-soft: rgba(78, 219, 140, 0.13);
+        --yellow: #e6c24d;
+        --yellow-soft: rgba(230, 194, 77, 0.13);
+        --red: #f2665e;
+        --red-soft: rgba(242, 102, 94, 0.13);
+        --violet: #756fff;
+        --violet-soft: rgba(117, 111, 255, 0.16);
+        --blue: #73b8ff;
+        --radius: 8px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+      }
+
+      body {
+        margin: 0;
+        background:
+          linear-gradient(90deg, rgba(255, 255, 255, 0.023) 1px, transparent 1px),
+          linear-gradient(180deg, rgba(255, 255, 255, 0.017) 1px, transparent 1px),
+          var(--bg);
+        background-size: 44px 44px;
+        color: var(--text);
+        font-family: var(--font-sans);
+        letter-spacing: 0;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      button {
+        color: inherit;
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: 224px minmax(0, 1fr);
+        height: 100vh;
+        overflow: hidden;
+      }
+
+      .sidebar {
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        border-right: 1px solid var(--line);
+        background: rgba(7, 9, 10, 0.96);
+        min-width: 0;
+      }
+
+      .brand {
+        display: grid;
+        gap: 12px;
+        padding: 14px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .brand-main {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .logo {
+        display: grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        color: #07110c;
+        border-radius: 8px;
+        background: var(--green);
+        font-size: 12px;
+        font-weight: 850;
+      }
+
+      .brand strong {
+        display: block;
+        font-size: 14px;
+        line-height: 1.2;
+      }
+
+      .brand span,
+      .muted {
+        color: var(--muted);
+      }
+
+      .brand span {
+        display: block;
+        margin-top: 2px;
+        font-size: 12px;
+      }
+
+      .controller {
+        display: grid;
+        gap: 8px;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+      }
+
+      .kv {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .label {
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .mono {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: var(--font-mono);
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 23px;
+        padding: 0 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.035);
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .pill.ok {
+        border-color: rgba(78, 219, 140, 0.32);
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .pill.warn {
+        border-color: rgba(230, 194, 77, 0.35);
+        background: var(--yellow-soft);
+        color: var(--yellow);
+      }
+
+      .pill.bad {
+        border-color: rgba(242, 102, 94, 0.35);
+        background: var(--red-soft);
+        color: var(--red);
+      }
+
+      .nav {
+        display: grid;
+        align-content: start;
+        gap: 5px;
+        padding: 10px;
+        overflow: auto;
+      }
+
+      .nav button {
+        display: grid;
+        grid-template-columns: 24px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 9px;
+        min-height: 37px;
+        padding: 0 9px;
+        border: 1px solid transparent;
+        border-radius: 7px;
+        background: transparent;
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .nav button:hover {
+        border-color: var(--line);
+        background: rgba(255, 255, 255, 0.035);
+      }
+
+      .nav button.active {
+        border-color: rgba(78, 219, 140, 0.32);
+        background: var(--green-soft);
+      }
+
+      .nav-ico {
+        display: grid;
+        place-items: center;
+        width: 23px;
+        height: 23px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .nav button.active .nav-ico {
+        border-color: rgba(78, 219, 140, 0.36);
+        color: var(--green);
+      }
+
+      .nav-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .nav-count {
+        color: var(--faint);
+        font-family: var(--font-mono);
+        font-size: 11px;
+      }
+
+      .telemetry {
+        display: grid;
+        gap: 8px;
+        padding: 12px;
+        border-top: 1px solid var(--line);
+      }
+
+      .metric {
+        display: grid;
+        gap: 5px;
+        padding: 9px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+      }
+
+      .metric-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .metric b {
+        font-family: var(--font-mono);
+        font-size: 13px;
+      }
+
+      .spark {
+        width: 100%;
+        height: 31px;
+        color: var(--green);
+      }
+
+      .spark.blue {
+        color: var(--blue);
+      }
+
+      .main {
+        display: grid;
+        grid-template-rows: 52px minmax(0, 1fr);
+        min-width: 0;
+        height: 100vh;
+      }
+
+      .topbar {
+        display: grid;
+        grid-template-columns: minmax(160px, 1fr) minmax(260px, 520px) auto;
+        align-items: center;
+        gap: 12px;
+        padding: 9px 14px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(7, 9, 10, 0.82);
+        backdrop-filter: blur(14px);
+      }
+
+      .page-title {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 15px;
+        line-height: 1;
+      }
+
+      .subtitle {
+        overflow: hidden;
+        color: var(--muted);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12px;
+      }
+
+      .search {
+        display: grid;
+        grid-template-columns: 24px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 7px;
+        height: 34px;
+        padding: 0 10px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #050708;
+      }
+
+      .search input {
+        min-width: 0;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: var(--text);
+      }
+
+      .search input::placeholder {
+        color: var(--faint);
+      }
+
+      .top-actions {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 7px;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        height: 32px;
+        padding: 0 10px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--panel);
+        color: var(--text);
+        cursor: pointer;
+        font-size: 12px;
+      }
+
+      .btn:hover {
+        border-color: var(--line-strong);
+        background: var(--panel-soft);
+      }
+
+      .btn.primary {
+        border-color: rgba(78, 219, 140, 0.34);
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .seg {
+        display: inline-grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        height: 32px;
+        min-width: 214px;
+        padding: 3px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #07090a;
+      }
+
+      .seg button,
+      .basis button {
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 12px;
+      }
+
+      .seg button.active,
+      .basis button.active {
+        background: var(--panel-soft);
+        color: var(--green);
+      }
+
+      .content {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 316px;
+        gap: 12px;
+        min-height: 0;
+        padding: 12px;
+        overflow: hidden;
+      }
+
+      .board {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 10px;
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .overview-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .summary {
+        display: grid;
+        gap: 8px;
+        min-width: 0;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(18, 22, 23, 0.9);
+      }
+
+      .summary strong {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 15px;
+      }
+
+      .summary .label {
+        text-transform: uppercase;
+      }
+
+      .groups {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-content: start;
+        gap: 10px;
+        min-width: 0;
+        min-height: 0;
+        overflow: auto;
+        scrollbar-color: rgba(213, 230, 232, 0.32) transparent;
+      }
+
+      .group {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(18, 22, 23, 0.92);
+        overflow: hidden;
+      }
+
+      .group.selected {
+        border-color: rgba(78, 219, 140, 0.38);
+      }
+
+      .group.compact {
+        min-height: 142px;
+      }
+
+      .group-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        padding: 10px 11px 8px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .group-title {
+        display: flex;
+        align-items: baseline;
+        gap: 7px;
+        min-width: 0;
+      }
+
+      .group-title strong {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 14px;
+      }
+
+      .group-title span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .group-now {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 0;
+        margin-top: 7px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .group-actions {
+        display: flex;
+        align-items: flex-start;
+        justify-content: flex-end;
+        gap: 6px;
+        opacity: 0.5;
+        transition: opacity 140ms ease;
+      }
+
+      .group:hover .group-actions,
+      .group.selected .group-actions {
+        opacity: 1;
+      }
+
+      .quiet-btn {
+        display: inline-grid;
+        place-items: center;
+        width: 30px;
+        height: 28px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: rgba(255, 255, 255, 0.02);
+        color: var(--muted);
+        cursor: pointer;
+      }
+
+      .quiet-btn:hover {
+        border-color: var(--line-strong);
+        color: var(--text);
+      }
+
+      .mode-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 21px;
+        padding: 0 7px;
+        border: 1px solid rgba(230, 194, 77, 0.34);
+        border-radius: 999px;
+        color: var(--yellow);
+        background: var(--yellow-soft);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        text-transform: uppercase;
+      }
+
+      .mode-chip.delay {
+        border-color: rgba(78, 219, 140, 0.32);
+        color: var(--green);
+        background: var(--green-soft);
+      }
+
+      .nodes {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
+        gap: 7px;
+        max-height: 306px;
+        padding: 10px 11px;
+        overflow: auto;
+        scrollbar-color: rgba(213, 230, 232, 0.28) transparent;
+      }
+
+      .group.compact .nodes {
+        max-height: none;
+        grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+      }
+
+      .node {
+        position: relative;
+        display: grid;
+        gap: 7px;
+        min-height: 58px;
+        min-width: 0;
+        padding: 8px;
+        border: 1px solid rgba(213, 230, 232, 0.075);
+        border-radius: 7px;
+        background: rgba(6, 8, 9, 0.9);
+        cursor: pointer;
+        transition:
+          transform 140ms ease,
+          border-color 140ms ease,
+          background 140ms ease;
+      }
+
+      .node:hover {
+        transform: translateY(-1px);
+        border-color: var(--line-strong);
+        background: var(--tile-hover);
+      }
+
+      .node.active {
+        border-color: rgba(117, 111, 255, 0.72);
+        background: linear-gradient(180deg, rgba(117, 111, 255, 0.9), rgba(86, 81, 213, 0.78));
+        color: white;
+      }
+
+      .node-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 7px;
+        min-width: 0;
+      }
+
+      .node-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12px;
+        font-weight: 760;
+      }
+
+      .latency {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 44px;
+        height: 21px;
+        padding: 0 7px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.035);
+        font-family: var(--font-mono);
+        font-size: 11px;
+      }
+
+      .latency.good {
+        border-color: rgba(78, 219, 140, 0.35);
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .latency.slow {
+        border-color: rgba(230, 194, 77, 0.38);
+        background: var(--yellow-soft);
+        color: var(--yellow);
+      }
+
+      .latency.bad {
+        border-color: rgba(242, 102, 94, 0.38);
+        background: var(--red-soft);
+        color: var(--red);
+      }
+
+      .node.active .latency {
+        border-color: rgba(255, 255, 255, 0.28);
+        background: rgba(0, 0, 0, 0.22);
+        color: rgba(255, 255, 255, 0.86);
+      }
+
+      .node-bottom {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        min-width: 0;
+      }
+
+      .proto {
+        overflow: hidden;
+        color: var(--muted);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 11px;
+      }
+
+      .node.active .proto {
+        color: rgba(255, 255, 255, 0.75);
+      }
+
+      .score-mark {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 27px;
+        height: 18px;
+        border-radius: 6px;
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.045);
+        font-family: var(--font-mono);
+        font-size: 10px;
+      }
+
+      .score-mark.good {
+        color: var(--green);
+        background: var(--green-soft);
+      }
+
+      .score-mark.slow {
+        color: var(--yellow);
+        background: var(--yellow-soft);
+      }
+
+      .score-mark.bad {
+        color: var(--red);
+        background: var(--red-soft);
+      }
+
+      .footer-note {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 11px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .quality {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 12px 11px;
+      }
+
+      .dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--faint);
+      }
+
+      .dot.good {
+        background: var(--green);
+      }
+
+      .dot.slow {
+        background: var(--yellow);
+      }
+
+      .dot.bad {
+        background: var(--red);
+      }
+
+      .bars {
+        display: flex;
+        align-items: center;
+        height: 8px;
+        margin: 13px 11px 14px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .bars span:nth-child(1) {
+        width: 20%;
+        height: 100%;
+        background: var(--green);
+      }
+
+      .bars span:nth-child(2) {
+        width: 18%;
+        height: 100%;
+        background: var(--yellow);
+      }
+
+      .bars span:nth-child(3) {
+        width: 28%;
+        height: 100%;
+        background: var(--red);
+      }
+
+      .bars span:nth-child(4) {
+        flex: 1;
+        height: 100%;
+        background: rgba(213, 230, 232, 0.22);
+      }
+
+      .inspector {
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr) auto;
+        min-width: 0;
+        min-height: 0;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(18, 22, 23, 0.94);
+        overflow: hidden;
+      }
+
+      .inspector-head {
+        display: grid;
+        gap: 8px;
+        padding: 13px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .inspector-title {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .inspector-title strong {
+        font-size: 15px;
+      }
+
+      .inspector-summary {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 7px;
+        padding: 11px 13px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .mini-stat {
+        display: grid;
+        gap: 4px;
+        min-width: 0;
+        padding: 9px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: rgba(6, 8, 9, 0.55);
+      }
+
+      .mini-stat b {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+      }
+
+      .form {
+        display: grid;
+        align-content: start;
+        gap: 12px;
+        padding: 13px;
+        overflow: auto;
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+        min-width: 0;
+      }
+
+      .field label {
+        color: var(--muted);
+        font-size: 10px;
+        text-transform: uppercase;
+      }
+
+      .input,
+      .select,
+      .number {
+        width: 100%;
+        height: 31px;
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        outline: 0;
+        background: #060809;
+        color: var(--text);
+        font-size: 12px;
+      }
+
+      .input,
+      .number {
+        padding: 0 9px;
+      }
+
+      .select {
+        padding: 0 7px;
+      }
+
+      .basis {
+        display: inline-grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        height: 31px;
+        padding: 3px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #07090a;
+      }
+
+      .check-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 7px;
+      }
+
+      .check {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 31px;
+        padding: 0 8px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: rgba(255, 255, 255, 0.025);
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .check input {
+        width: 13px;
+        height: 13px;
+        accent-color: var(--green);
+      }
+
+      .inspector-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 12px 13px;
+        border-top: 1px solid var(--line);
+      }
+
+      .node.testing::after {
+        content: "";
+        position: absolute;
+        inset: -1px;
+        border-radius: 7px;
+        background: linear-gradient(90deg, transparent, rgba(78, 219, 140, 0.42), transparent);
+        opacity: 0;
+        animation: scan 1.1s linear infinite;
+        pointer-events: none;
+      }
+
+      @keyframes scan {
+        0% {
+          opacity: 0;
+          transform: translateX(-35%);
+        }
+        35%,
+        65% {
+          opacity: 1;
+        }
+        100% {
+          opacity: 0;
+          transform: translateX(35%);
+        }
+      }
+
+      .drawer {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        display: grid;
+        gap: 8px;
+        width: min(360px, calc(100vw - 36px));
+        padding: 12px;
+        border: 1px solid rgba(115, 184, 255, 0.28);
+        border-radius: var(--radius);
+        background: rgba(11, 14, 15, 0.96);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.48);
+        transform: translateY(140%);
+        transition: transform 180ms ease;
+        z-index: 10;
+      }
+
+      .drawer.show {
+        transform: translateY(0);
+      }
+
+      .drawer strong {
+        font-size: 13px;
+      }
+
+      .drawer p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      @media (max-width: 1380px) {
+        .content {
+          grid-template-columns: minmax(0, 1fr);
+          overflow: auto;
+        }
+
+        .inspector {
+          min-height: 420px;
+        }
+      }
+
+      @media (max-width: 980px) {
+        .app {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          display: none;
+        }
+
+        .topbar {
+          grid-template-columns: 1fr;
+          height: auto;
+        }
+
+        .overview-strip,
+        .groups {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <section class="brand">
+          <div class="brand-main">
+            <div class="logo">SD</div>
+            <div>
+              <strong>SingDeck</strong>
+              <span>local sing-box console</span>
+            </div>
+          </div>
+          <div class="controller">
+            <div class="kv">
+              <span class="label">Controller</span>
+              <span class="pill ok">ready</span>
+            </div>
+            <div class="mono">http://127.0.0.1:9527</div>
+          </div>
+        </section>
+
+        <nav class="nav" aria-label="Navigation">
+          <button><span class="nav-ico">O</span><span class="nav-title">Overview</span><span class="nav-count"></span></button>
+          <button class="active"><span class="nav-ico">P</span><span class="nav-title">Proxies</span><span class="nav-count">74</span></button>
+          <button><span class="nav-ico">C</span><span class="nav-title">Connections</span><span class="nav-count">130</span></button>
+          <button><span class="nav-ico">L</span><span class="nav-title">Logs</span><span class="nav-count">800</span></button>
+          <button><span class="nav-ico">J</span><span class="nav-title">Config</span><span class="nav-count"></span></button>
+          <button><span class="nav-ico">R</span><span class="nav-title">Rules / Controller</span><span class="nav-count">18</span></button>
+          <button><span class="nav-ico">⚙</span><span class="nav-title">Settings</span><span class="nav-count"></span></button>
+        </nav>
+
+        <section class="telemetry">
+          <div class="metric">
+            <div class="metric-head"><span class="label">Downlink</span><b>18.4 MiB/s</b></div>
+            <svg class="spark" viewBox="0 0 168 32" aria-hidden="true">
+              <path d="M2 25 L16 22 L28 24 L42 16 L54 18 L68 9 L82 13 L96 6 L110 9 L124 4 L138 8 L152 5 L166 6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" />
+              <path d="M2 32 L2 25 L16 22 L28 24 L42 16 L54 18 L68 9 L82 13 L96 6 L110 9 L124 4 L138 8 L152 5 L166 6 L166 32 Z" fill="currentColor" opacity=".12" />
+            </svg>
+          </div>
+          <div class="metric">
+            <div class="metric-head"><span class="label">Uplink</span><b>2.7 MiB/s</b></div>
+            <svg class="spark blue" viewBox="0 0 168 32" aria-hidden="true">
+              <path d="M2 23 L15 20 L29 22 L43 17 L57 20 L71 12 L85 16 L99 11 L113 14 L127 8 L141 10 L155 7 L166 9" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" />
+            </svg>
+          </div>
+          <div class="metric">
+            <div class="metric-head"><span class="label">Connections</span><b>130</b></div>
+            <div class="kv"><span class="label">Mode</span><span class="pill">tun</span></div>
+          </div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="page-title">
+            <h1>Proxies</h1>
+            <span class="subtitle">strategy wall and node control</span>
+          </div>
+          <label class="search">
+            <span class="label">⌕</span>
+            <input id="search" placeholder="Search proxy group or node..." />
+            <span class="pill">Regex</span>
+          </label>
+          <div class="top-actions">
+            <div class="seg" aria-label="Filter">
+              <button class="active" data-filter="all">All</button>
+              <button data-filter="fast">Fast</button>
+              <button data-filter="bad">Bad</button>
+            </div>
+            <span class="pill ok">API authenticated</span>
+            <button id="testAll" class="btn primary">Test visible</button>
+          </div>
+        </header>
+
+        <section class="content">
+          <div class="board">
+            <div class="overview-strip">
+              <div class="summary">
+                <span class="label">Active selector</span>
+                <strong>🇭🇰 香港 08</strong>
+              </div>
+              <div class="summary">
+                <span class="label">Healthy nodes</span>
+                <strong>7 / 74</strong>
+              </div>
+              <div class="summary">
+                <span class="label">Strategy groups</span>
+                <strong>7 groups</strong>
+              </div>
+              <div class="summary">
+                <span class="label">Default test URL</span>
+                <strong class="mono">https://github.com</strong>
+              </div>
+            </div>
+
+            <section class="groups">
+              <article class="group selected" data-group="select" data-mode="score" data-current="🇭🇰 香港 08" data-url="https://github.com" data-score="96" data-delay="144ms" data-scheme="Balanced" data-auto="On" data-schedule="On" data-interval="15">
+                <div class="group-head">
+                  <div>
+                    <div class="group-title"><strong>select</strong><span>Selector · 30/75</span></div>
+                    <div class="group-now"><span>Current</span><span class="pill ok">🇭🇰 香港 08</span><span class="mode-chip">score</span><span class="pill ok">96</span><span class="pill ok">144ms</span></div>
+                  </div>
+                  <div class="group-actions">
+                    <button class="quiet-btn test-group" title="Test group">↯</button>
+                    <button class="quiet-btn inspect-group" title="Configure group">⚙</button>
+                  </div>
+                </div>
+                <div class="nodes">
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 0.5x | 福利使用</span><span class="latency">--</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark">--</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 01</span><span class="latency good">144</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark good">96</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 02</span><span class="latency slow">700</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark slow">66</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 04</span><span class="latency bad">1582</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark bad">28</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 05</span><span class="latency">--</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark">--</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 06</span><span class="latency bad">4255</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark bad">0</span></div></button>
+                  <button class="node active"><div class="node-top"><span class="node-name">🇭🇰 香港 08</span><span class="latency">active</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark good">100</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 10</span><span class="latency bad">2329</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark bad">22</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇸🇬 新加坡 02</span><span class="latency">--</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark">--</span></div></button>
+                </div>
+                <div class="footer-note"><span>Score mode shows score as a secondary corner marker.</span><span>parallel 5</span></div>
+              </article>
+
+              <article class="group" data-group="urltest" data-mode="delay" data-current="🇭🇰 香港 01" data-url="https://github.com" data-score="--" data-delay="66ms" data-scheme="Unavailable" data-auto="On" data-schedule="On" data-interval="15">
+                <div class="group-head">
+                  <div>
+                    <div class="group-title"><strong>urltest</strong><span>Selector · 29/74</span></div>
+                    <div class="group-now"><span>Current</span><span class="pill ok">🇭🇰 香港 01</span><span class="mode-chip delay">delay</span><span class="pill ok">66ms</span></div>
+                  </div>
+                  <div class="group-actions">
+                    <button class="quiet-btn test-group" title="Test group">↯</button>
+                    <button class="quiet-btn inspect-group" title="Configure group">⚙</button>
+                  </div>
+                </div>
+                <div class="nodes">
+                  <button class="node active"><div class="node-top"><span class="node-name">🇭🇰 香港 01</span><span class="latency">active</span></div><div class="node-bottom"><span class="proto">trojan / udp</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 02</span><span class="latency good">74</span></div><div class="node-bottom"><span class="proto">trojan / udp</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 04</span><span class="latency good">71</span></div><div class="node-bottom"><span class="proto">trojan / udp</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 05</span><span class="latency good">63</span></div><div class="node-bottom"><span class="proto">trojan / udp</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 08</span><span class="latency good">60</span></div><div class="node-bottom"><span class="proto">trojan / udp</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇹🇼 台湾 01</span><span class="latency slow">158</span></div><div class="node-bottom"><span class="proto">trojan / udp</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇯🇵 日本 01</span><span class="latency slow">248</span></div><div class="node-bottom"><span class="proto">trojan / udp</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇯🇵 日本 04</span><span class="latency slow">180</span></div><div class="node-bottom"><span class="proto">trojan / udp</span></div></button>
+                </div>
+                <div class="footer-note"><span>Delay mode keeps cards clean and hides score.</span><span>74 nodes</span></div>
+              </article>
+
+              <article class="group" data-group="download-node" data-mode="score" data-current="🇭🇰 香港 01" data-url="https://dl.google.com/generate_204" data-score="100" data-delay="144ms" data-scheme="Latency" data-auto="On" data-schedule="On" data-interval="15">
+                <div class="group-head">
+                  <div>
+                    <div class="group-title"><strong>download-node</strong><span>Selector · 13/26</span></div>
+                    <div class="group-now"><span>Current</span><span class="pill ok">🇭🇰 香港 01</span><span class="mode-chip">score</span><span class="pill ok">100</span><span class="pill ok">144ms</span></div>
+                  </div>
+                  <div class="group-actions">
+                    <button class="quiet-btn test-group" title="Test group">↯</button>
+                    <button class="quiet-btn inspect-group" title="Configure group">⚙</button>
+                  </div>
+                </div>
+                <div class="nodes">
+                  <button class="node active"><div class="node-top"><span class="node-name">🇭🇰 香港 01</span><span class="latency">active</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark good">100</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 02</span><span class="latency slow">700</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark slow">71</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇭🇰 香港 04</span><span class="latency bad">1582</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark bad">24</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇯🇵 日本 02</span><span class="latency bad">4165</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark bad">0</span></div></button>
+                  <button class="node"><div class="node-top"><span class="node-name">🇸🇬 新加坡 01</span><span class="latency">--</span></div><div class="node-bottom"><span class="proto">trojan / udp</span><span class="score-mark">--</span></div></button>
+                </div>
+              </article>
+
+              <article class="group compact" data-group="openai-us" data-mode="score" data-current="美国04-×1" data-url="https://api.openai.com" data-score="85" data-delay="334ms" data-scheme="Balanced" data-auto="On" data-schedule="On" data-interval="15">
+                <div class="group-head">
+                  <div>
+                    <div class="group-title"><strong>openai-us</strong><span>Selector · 5/5</span></div>
+                    <div class="group-now"><span>Current</span><span class="pill warn">美国04-×1</span><span class="mode-chip">score</span><span class="pill ok">85</span><span class="pill warn">334ms</span></div>
+                  </div>
+                  <div class="group-actions">
+                    <button class="quiet-btn test-group" title="Test group">↯</button>
+                    <button class="quiet-btn inspect-group" title="Configure group">⚙</button>
+                  </div>
+                </div>
+                <div class="quality"><span class="dot good"></span><span class="dot good"></span><span class="dot slow"></span><span class="dot bad"></span><span class="dot good"></span></div>
+              </article>
+
+              <article class="group compact" data-group="gemini-us" data-mode="score" data-current="Reality-1" data-url="https://generativelanguage.googleapis.com" data-score="77" data-delay="504ms" data-scheme="Balanced" data-auto="On" data-schedule="On" data-interval="15">
+                <div class="group-head">
+                  <div>
+                    <div class="group-title"><strong>gemini-us</strong><span>Selector · 5/5</span></div>
+                    <div class="group-now"><span>Current</span><span class="pill warn">Reality-1</span><span class="mode-chip">score</span><span class="pill warn">77</span><span class="pill warn">504ms</span></div>
+                  </div>
+                  <div class="group-actions">
+                    <button class="quiet-btn test-group" title="Test group">↯</button>
+                    <button class="quiet-btn inspect-group" title="Configure group">⚙</button>
+                  </div>
+                </div>
+                <div class="quality"><span class="dot slow"></span><span class="dot slow"></span><span class="dot bad"></span><span class="dot good"></span><span class="dot good"></span></div>
+              </article>
+
+              <article class="group compact" data-group="GLOBAL" data-mode="delay" data-current="select" data-url="https://github.com" data-score="--" data-delay="147ms" data-scheme="Unavailable" data-auto="Off" data-schedule="On" data-interval="15">
+                <div class="group-head">
+                  <div>
+                    <div class="group-title"><strong>GLOBAL</strong><span>Fallback · 35/86</span></div>
+                    <div class="group-now"><span>Current</span><span class="pill">select</span><span class="mode-chip delay">delay</span><span class="pill ok">147ms</span></div>
+                  </div>
+                  <div class="group-actions">
+                    <button class="quiet-btn test-group" title="Test group">↯</button>
+                    <button class="quiet-btn inspect-group" title="Configure group">⚙</button>
+                  </div>
+                </div>
+                <div class="bars"><span></span><span></span><span></span><span></span></div>
+              </article>
+            </section>
+          </div>
+
+          <aside class="inspector">
+            <div class="inspector-head">
+              <div class="inspector-title">
+                <strong id="inspectorName">select</strong>
+                <span id="inspectorMode" class="mode-chip">score</span>
+              </div>
+              <div class="muted">Selected strategy group configuration</div>
+            </div>
+
+            <div class="inspector-summary">
+              <div class="mini-stat"><span class="label">Current</span><b id="inspectorCurrent">🇭🇰 香港 08</b></div>
+              <div class="mini-stat"><span class="label">Metric</span><b id="inspectorMetric">96 / 144ms</b></div>
+              <div class="mini-stat"><span class="label">Auto switch</span><b id="inspectorAuto">On</b></div>
+              <div class="mini-stat"><span class="label">Schedule</span><b id="inspectorSchedule">On · 15 min</b></div>
+            </div>
+
+            <form class="form">
+              <div class="field">
+                <label>Selection basis</label>
+                <div class="basis">
+                  <button type="button" id="basisScore" class="active">Score</button>
+                  <button type="button" id="basisDelay">Delay</button>
+                </div>
+              </div>
+              <div class="field">
+                <label>Score scheme</label>
+                <select id="scheme" class="select">
+                  <option>Latency</option>
+                  <option selected>Balanced</option>
+                  <option>Availability</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Test URL</label>
+                <input id="testUrl" class="input" value="https://github.com" />
+              </div>
+              <div class="field">
+                <label>Automation</label>
+                <div class="check-grid">
+                  <label class="check"><input id="autoSwitch" type="checkbox" checked /> Auto switch</label>
+                  <label class="check"><input id="autoSchedule" type="checkbox" checked /> Schedule</label>
+                </div>
+              </div>
+              <div class="field">
+                <label>Probe interval minutes</label>
+                <input id="interval" class="number" value="15" />
+              </div>
+              <div class="field">
+                <label>Parallel requests</label>
+                <input class="number" value="5" />
+              </div>
+            </form>
+
+            <div class="inspector-actions">
+              <button id="inspectorTest" class="btn primary">Run score</button>
+              <button class="btn">Save settings</button>
+            </div>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <aside id="drawer" class="drawer" aria-live="polite">
+      <strong>Testing visible nodes</strong>
+      <p>Preview interaction: visible node cards pulse while the probe is running. The real app maps this to configured concurrency and group URL.</p>
+    </aside>
+
+    <script>
+      const search = document.querySelector("#search");
+      const drawer = document.querySelector("#drawer");
+      const allNodes = Array.from(document.querySelectorAll(".node"));
+      const filterButtons = Array.from(document.querySelectorAll(".seg button"));
+      const groups = Array.from(document.querySelectorAll(".group"));
+
+      const inspectorName = document.querySelector("#inspectorName");
+      const inspectorMode = document.querySelector("#inspectorMode");
+      const inspectorCurrent = document.querySelector("#inspectorCurrent");
+      const inspectorMetric = document.querySelector("#inspectorMetric");
+      const inspectorAuto = document.querySelector("#inspectorAuto");
+      const inspectorSchedule = document.querySelector("#inspectorSchedule");
+      const basisScore = document.querySelector("#basisScore");
+      const basisDelay = document.querySelector("#basisDelay");
+      const scheme = document.querySelector("#scheme");
+      const testUrl = document.querySelector("#testUrl");
+      const autoSwitch = document.querySelector("#autoSwitch");
+      const autoSchedule = document.querySelector("#autoSchedule");
+      const interval = document.querySelector("#interval");
+      const inspectorTest = document.querySelector("#inspectorTest");
+
+      function selectedGroup() {
+        return document.querySelector(".group.selected") || groups[0];
+      }
+
+      function renderInspector(group) {
+        const mode = group.dataset.mode || "score";
+        inspectorName.textContent = group.dataset.group;
+        inspectorMode.textContent = mode;
+        inspectorMode.classList.toggle("delay", mode === "delay");
+        inspectorCurrent.textContent = group.dataset.current;
+        inspectorMetric.textContent = mode === "score" ? `${group.dataset.score} / ${group.dataset.delay}` : group.dataset.delay;
+        inspectorAuto.textContent = group.dataset.auto;
+        inspectorSchedule.textContent = `${group.dataset.schedule} · ${group.dataset.interval} min`;
+        testUrl.value = group.dataset.url;
+        scheme.value = group.dataset.scheme === "Unavailable" ? "Balanced" : group.dataset.scheme;
+        scheme.disabled = group.dataset.scheme === "Unavailable" || mode === "delay";
+        autoSwitch.checked = group.dataset.auto === "On";
+        autoSchedule.checked = group.dataset.schedule === "On";
+        interval.value = group.dataset.interval;
+        basisScore.classList.toggle("active", mode === "score");
+        basisDelay.classList.toggle("active", mode === "delay");
+        inspectorTest.textContent = mode === "score" ? "Run score" : "Run delay";
+      }
+
+      function selectGroup(group) {
+        groups.forEach((item) => item.classList.remove("selected"));
+        group.classList.add("selected");
+        renderInspector(group);
+      }
+
+      function applySearch() {
+        const text = search.value.trim().toLowerCase();
+        groups.forEach((group) => {
+          group.style.display = group.textContent.toLowerCase().includes(text) ? "" : "none";
+        });
+      }
+
+      function applyFilter(kind) {
+        allNodes.forEach((node) => {
+          const hasGood = node.querySelector(".latency.good");
+          const hasBad = node.querySelector(".latency.bad");
+          node.style.display =
+            kind === "all" || (kind === "fast" && hasGood) || (kind === "bad" && hasBad) ? "" : "none";
+        });
+      }
+
+      function pulseNodes(group) {
+        const nodes = Array.from(group.querySelectorAll(".node")).slice(0, 20);
+        nodes.forEach((node, index) => {
+          window.setTimeout(() => node.classList.add("testing"), index * 60);
+          window.setTimeout(() => node.classList.remove("testing"), 1250 + index * 60);
+        });
+      }
+
+      search.addEventListener("input", applySearch);
+
+      filterButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          filterButtons.forEach((item) => item.classList.remove("active"));
+          button.classList.add("active");
+          applyFilter(button.dataset.filter);
+        });
+      });
+
+      groups.forEach((group) => {
+        group.addEventListener("click", (event) => {
+          if (event.target.closest(".test-group")) {
+            drawer.classList.add("show");
+            pulseNodes(group);
+            window.setTimeout(() => drawer.classList.remove("show"), 2100);
+            event.stopPropagation();
+            return;
+          }
+          selectGroup(group);
+        });
+      });
+
+      document.querySelector("#testAll").addEventListener("click", () => {
+        drawer.classList.add("show");
+        allNodes.filter((node) => node.offsetParent !== null).slice(0, 24).forEach((node, index) => {
+          window.setTimeout(() => node.classList.add("testing"), index * 45);
+          window.setTimeout(() => node.classList.remove("testing"), 1300 + index * 45);
+        });
+        window.setTimeout(() => drawer.classList.remove("show"), 2300);
+      });
+
+      [basisScore, basisDelay].forEach((button) => {
+        button.addEventListener("click", () => {
+          const group = selectedGroup();
+          const mode = button === basisScore ? "score" : "delay";
+          group.dataset.mode = mode;
+          renderInspector(group);
+        });
+      });
+
+      inspectorTest.addEventListener("click", () => {
+        drawer.classList.add("show");
+        pulseNodes(selectedGroup());
+        window.setTimeout(() => drawer.classList.remove("show"), 2100);
+      });
+
+      renderInspector(selectedGroup());
+    </script>
+  </body>
+</html>
