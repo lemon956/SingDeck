@@ -56,12 +56,11 @@ pub struct TrafficResponse {
     pub profile: String,
 }
 
-pub async fn read_traffic(http: &Client) -> TrafficResponse {
+pub async fn read_traffic(http: &Client, profile: &Path) -> TrafficResponse {
     let fetched_at = chrono::Local::now().to_rfc3339();
-    let profile = default_chrome_profile_path();
     let providers = vec![
-        fetch_haita(http, &profile, &fetched_at).await,
-        fetch_wmsxwd(http, &profile, &fetched_at).await,
+        fetch_haita(http, profile, &fetched_at).await,
+        fetch_wmsxwd(http, profile, &fetched_at).await,
     ];
 
     TrafficResponse {
@@ -69,6 +68,30 @@ pub async fn read_traffic(http: &Client) -> TrafficResponse {
         updated_at: fetched_at,
         profile: profile.display().to_string(),
     }
+}
+
+pub fn disabled_traffic_response(profile: &Path) -> TrafficResponse {
+    TrafficResponse {
+        providers: Vec::new(),
+        updated_at: chrono::Local::now().to_rfc3339(),
+        profile: profile.display().to_string(),
+    }
+}
+
+pub fn chrome_profile_path(value: &str) -> PathBuf {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return default_chrome_profile_path();
+    }
+    if trimmed == "~" {
+        return home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Some(home) = home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(trimmed)
 }
 
 pub fn parse_haita_dashboard(html: &str, fetched_at: &str) -> Result<TrafficSnapshot> {
@@ -713,5 +736,14 @@ mod tests {
             decode_chrome_local_storage_value(b"\x01browser-local-storage-token").unwrap(),
             "browser-local-storage-token"
         );
+    }
+
+    #[tokio::test]
+    async fn traffic_response_reports_supplied_chrome_profile_path() {
+        let profile = PathBuf::from("/tmp/singdeck-test-chrome-profile/Default");
+        let response = read_traffic(&Client::new(), &profile).await;
+
+        assert_eq!(response.profile, profile.display().to_string());
+        assert_eq!(response.providers.len(), 2);
     }
 }

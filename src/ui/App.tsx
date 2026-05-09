@@ -3,6 +3,7 @@ import {
   Cable,
   ChevronDown,
   ChevronRight,
+  Copy,
   FileJson,
   GitBranch,
   LayoutDashboard,
@@ -11,7 +12,8 @@ import {
   Search,
   Settings as SettingsIcon,
   ScrollText,
-  Wifi
+  Wifi,
+  X
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import { routeFromHash, type AppRoute } from '../core/navigation';
@@ -532,6 +534,7 @@ export function App() {
   const helper = useHelperStore();
   const [form, setForm] = useState(config);
   const [testingDefaultUrlDraft, setTestingDefaultUrlDraft] = useState(config.defaultTestUrl);
+  const [trafficProfileDraft, setTrafficProfileDraft] = useState('');
   const [activeRoute, setActiveRoute] = useState<AppRoute>(() => routeFromHash(window.location.hash));
   const [activeStrategyGroupName, setActiveStrategyGroupName] = useState<string | null>(null);
   const [railExpanded, setRailExpanded] = useState(() => localStorage.getItem('singdeck-rail-expanded') !== 'false');
@@ -539,6 +542,7 @@ export function App() {
   const [configQrOpen, setConfigQrOpen] = useState(false);
   const [configQrUrl, setConfigQrUrl] = useState('');
   const [configQrDataUrl, setConfigQrDataUrl] = useState('');
+  const [configQrCopied, setConfigQrCopied] = useState(false);
   const [settingsTransferMessage, setSettingsTransferMessage] = useState('');
   const [collapsedStrategyGroups, setCollapsedStrategyGroups] = useState<Set<string>>(() => new Set());
   const [strategyGroupOrder, setStrategyGroupOrder] = useState<string[]>(readStrategyGroupOrder);
@@ -564,6 +568,10 @@ export function App() {
   useEffect(() => {
     setTestingDefaultUrlDraft(helper.testingSettings?.defaultTestUrl ?? config.defaultTestUrl);
   }, [config.defaultTestUrl, helper.testingSettings?.defaultTestUrl]);
+
+  useEffect(() => {
+    setTrafficProfileDraft(helper.trafficSettings?.browserProfile ?? '');
+  }, [helper.trafficSettings?.browserProfile]);
 
   useEffect(() => {
     if (!helper.testingSettings) {
@@ -726,6 +734,7 @@ export function App() {
     [activeStrategyMembers, proxyQuery]
   );
   const helperServiceAvailable = Boolean(helper.health?.sqlite && !helper.error);
+  const trafficModuleEnabled = Boolean(helper.trafficSettings?.enabled);
   const helperDefaultTestUrl = helper.testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
   const helperDelayTestTimeoutMs =
     helper.testingSettings?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? DEFAULT_DELAY_TEST_TIMEOUT_MS;
@@ -898,7 +907,7 @@ export function App() {
   };
 
   useEffect(() => {
-    if (activeRoute !== 'overview' || !helperServiceAvailable) {
+    if (activeRoute !== 'overview' || !helperServiceAvailable || !trafficModuleEnabled) {
       return;
     }
 
@@ -908,7 +917,7 @@ export function App() {
     }, 5 * 60 * 1000);
 
     return () => window.clearInterval(timer);
-  }, [activeRoute, helperServiceAvailable]);
+  }, [activeRoute, helperServiceAvailable, trafficModuleEnabled]);
 
   useEffect(() => {
     if (activeRoute !== 'proxies' || !activeStrategyGroup?.name) {
@@ -948,6 +957,10 @@ export function App() {
       cancelled = true;
     };
   }, [configQrOpen, configQrUrl, singBoxRemoteProfileUri]);
+
+  useEffect(() => {
+    setConfigQrCopied(false);
+  }, [configQrUrl]);
 
   useEffect(() => {
     if (activeRoute !== 'overview' || !topologyChartRef.current) {
@@ -1052,6 +1065,25 @@ export function App() {
     void runGroupDelayOrProbe(activeStrategyGroup);
   };
 
+  const openConfigQr = async () => {
+    await helper.saveConfigPath();
+    setConfigQrUrl(helperConfigDownloadUrl);
+    setConfigQrOpen(true);
+  };
+
+  const copyConfigQrUrl = async () => {
+    if (!configQrUrl.trim()) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(configQrUrl);
+      setConfigQrCopied(true);
+      window.setTimeout(() => setConfigQrCopied(false), 1400);
+    } catch {
+      setConfigQrCopied(false);
+    }
+  };
+
   const exportSettings = () => {
     const content = serializeSettingsBackup({
       controller: {
@@ -1062,6 +1094,7 @@ export function App() {
         helperUrl: helper.helperUrl,
         configPath: helper.configPath,
         testingSettings: helper.testingSettings,
+        trafficSettings: helper.trafficSettings,
         groupConfigs: helper.groups.map((group) => ({ name: group.name, config: group.config }))
       },
       proxies: {
@@ -1103,6 +1136,10 @@ export function App() {
       if (backup.helper.testingSettings?.defaultTestUrl) {
         setTestingDefaultUrlDraft(backup.helper.testingSettings.defaultTestUrl);
         await helper.saveDefaultTestUrl(backup.helper.testingSettings.defaultTestUrl);
+      }
+      if (backup.helper.trafficSettings) {
+        setTrafficProfileDraft(backup.helper.trafficSettings.browserProfile);
+        await helper.saveTrafficSettings(backup.helper.trafficSettings);
       }
       for (const [group, url] of Object.entries(backup.proxies.groupTestUrls)) {
         proxies.setGroupTestUrl(group, url);
@@ -1276,10 +1313,7 @@ export function App() {
             <button
               className="ghost-action qr-action"
               disabled={!helperServiceAvailable}
-              onClick={() => {
-                setConfigQrUrl(helperConfigDownloadUrl);
-                setConfigQrOpen(true);
-              }}
+              onClick={() => void openConfigQr()}
               type="button"
             >
               <QrCode size={14} />
@@ -1298,26 +1332,57 @@ export function App() {
 
         {configQrOpen ? (
           <div className="qr-backdrop" onClick={() => setConfigQrOpen(false)}>
-            <section className="qr-panel" onClick={(event) => event.stopPropagation()} aria-label="Config QR code">
+            <section
+              className="qr-panel"
+              onClick={(event) => event.stopPropagation()}
+              aria-label="Config QR code"
+              aria-modal="true"
+              role="dialog"
+            >
               <div className="qr-head">
-                <strong>Config QR</strong>
-                <button className="ghost-action" onClick={() => setConfigQrOpen(false)} type="button">
-                  Close
+                <div className="qr-title">
+                  <strong>Config QR</strong>
+                  <span>{configQrUrlIsLocalOnly ? 'LAN helper URL required' : 'Remote profile import'}</span>
+                </div>
+                <button
+                  aria-label="Close config QR"
+                  className="ghost-action compact-icon-action qr-close"
+                  onClick={() => setConfigQrOpen(false)}
+                  type="button"
+                >
+                  <X size={15} />
                 </button>
               </div>
               <div className="qr-body">
-                <div className="qr-code-box">
+                <div className={`qr-code-box ${configQrUrlIsLocalOnly ? 'blocked' : ''}`}>
                   {configQrUrlIsLocalOnly ? (
                     <span className="qr-code-hint">LAN helper URL required</span>
                   ) : configQrDataUrl ? (
                     <img src={configQrDataUrl} alt="sing-box config download QR" />
-                  ) : null}
+                  ) : (
+                    <span className="qr-code-hint">Generating...</span>
+                  )}
                 </div>
-                <label className="qr-url-field">
-                  <span>Download URL</span>
-                  <input value={configQrUrl} onChange={(event) => setConfigQrUrl(event.target.value)} />
-                  {configQrUrlIsLocalOnly ? <small>Replace localhost with the helper machine LAN address.</small> : null}
-                </label>
+                <div className="qr-meta">
+                  <div className={`qr-state ${configQrUrlIsLocalOnly ? 'warn' : 'ok'}`}>
+                    <span aria-hidden="true" />
+                    {configQrUrlIsLocalOnly ? 'Needs LAN URL' : 'Ready to scan'}
+                  </div>
+                  <label className="qr-url-field">
+                    <span>Download URL</span>
+                    <input value={configQrUrl} onChange={(event) => setConfigQrUrl(event.target.value)} />
+                    {configQrUrlIsLocalOnly ? <small>Replace localhost with the helper machine LAN address.</small> : null}
+                  </label>
+                  <button
+                    className="ghost-action compact-icon-action qr-copy"
+                    disabled={!configQrUrl.trim()}
+                    onClick={() => void copyConfigQrUrl()}
+                    type="button"
+                  >
+                    <Copy size={14} />
+                    {configQrCopied ? 'Copied' : 'Copy URL'}
+                  </button>
+                </div>
               </div>
             </section>
           </div>
@@ -1342,6 +1407,7 @@ export function App() {
         </section>
 
         <section className="overview-widgets" aria-label="Runtime widgets">
+          {trafficModuleEnabled ? (
           <article className="overview-widget traffic-widget">
             <div className="widget-head traffic-widget-head">
               <span>Provider traffic</span>
@@ -1386,6 +1452,7 @@ export function App() {
               </div>
             )}
           </article>
+          ) : null}
           <article className="overview-widget">
             <div className="widget-head">
               <span>Rule hit ranking</span>
@@ -1526,7 +1593,33 @@ export function App() {
                     <input
                       placeholder="/etc/sing-box/config.json"
                       value={helper.configPath}
+                      onBlur={() => void helper.saveConfigPath()}
                       onChange={(event) => helper.updateSettings({ configPath: event.target.value })}
+                    />
+                  </label>
+                  <label className={`automation-option settings-toggle ${trafficModuleEnabled ? 'on' : ''}`}>
+                    <input
+                      checked={trafficModuleEnabled}
+                      type="checkbox"
+                      onChange={(event) =>
+                        void helper.saveTrafficSettings({
+                          enabled: event.target.checked,
+                          browserProfile: trafficProfileDraft || helper.trafficSettings?.browserProfile || ''
+                        })
+                      }
+                    />
+                    <span className="automation-switch" aria-hidden="true" />
+                    <span>
+                      <strong>Provider traffic</strong>
+                      <small>Show browser-backed usage cards on Overview</small>
+                    </span>
+                  </label>
+                  <label>
+                    <span>Chrome profile</span>
+                    <input
+                      placeholder="/home/user/.config/google-chrome/Default"
+                      value={trafficProfileDraft}
+                      onChange={(event) => setTrafficProfileDraft(event.target.value)}
                     />
                   </label>
                   <div className="helper-actions">
@@ -1535,6 +1628,22 @@ export function App() {
                     </button>
                     <button className="ghost-action" disabled={helper.loading} onClick={helper.syncController} type="button">
                       Sync controller
+                    </button>
+                    <button className="ghost-action" disabled={helper.loading} onClick={() => void helper.saveConfigPath()} type="button">
+                      Save config
+                    </button>
+                    <button
+                      className="ghost-action"
+                      disabled={helper.loading}
+                      onClick={() =>
+                        void helper.saveTrafficSettings({
+                          enabled: trafficModuleEnabled,
+                          browserProfile: trafficProfileDraft
+                        })
+                      }
+                      type="button"
+                    >
+                      Save traffic
                     </button>
                   </div>
                 </div>

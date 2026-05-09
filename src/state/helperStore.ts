@@ -4,12 +4,14 @@ import {
   DEFAULT_HELPER_URL,
   HelperApiClient,
   type HelperConfigResponse,
+  type HelperConfigSource,
   type HelperGroup,
   type HelperGroupConfig,
   type HelperGroupsResponse,
   type HelperHealth,
   type HelperScoresResponse,
   type HelperTestingSettings,
+  type HelperTrafficSettings,
   type HelperTrafficResponse
 } from '../core/helperApi';
 import { useControllerStore } from './controllerStore';
@@ -19,6 +21,7 @@ type HelperState = {
   configPath: string;
   health: HelperHealth | null;
   testingSettings: HelperTestingSettings | null;
+  trafficSettings: HelperTrafficSettings | null;
   groups: HelperGroup[];
   scoresByGroup: Record<string, HelperScoresResponse>;
   traffic: HelperTrafficResponse | null;
@@ -33,8 +36,11 @@ type HelperState = {
   checkHealth: () => Promise<void>;
   syncController: () => Promise<void>;
   loadTestingSettings: () => Promise<void>;
+  loadTrafficSettings: () => Promise<void>;
   saveDefaultTestUrl: (defaultTestUrl: string) => Promise<void>;
   saveDelayTestTimeout: (delayTestTimeoutMs: number) => Promise<void>;
+  saveConfigPath: () => Promise<void>;
+  saveTrafficSettings: (settings: HelperTrafficSettings) => Promise<void>;
   loadGroups: () => Promise<void>;
   saveGroupConfig: (group: string, config: HelperGroupConfig) => Promise<void>;
   probeGroup: (group: string, concurrency: number) => Promise<void>;
@@ -51,6 +57,7 @@ export const useHelperStore = create<HelperState>()(
       configPath: '',
       health: null,
       testingSettings: null,
+      trafficSettings: null,
       groups: [],
       scoresByGroup: {},
       traffic: null,
@@ -71,9 +78,11 @@ export const useHelperStore = create<HelperState>()(
         try {
           const health = await client().getJson<HelperHealth>('/api/v1/health');
           const testingSettings = await client().getJson<HelperTestingSettings>('/api/v1/settings/testing');
+          const trafficSettings = await client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic');
           set({
             health,
             testingSettings,
+            trafficSettings,
             loading: false,
             lastCheckedAt: new Date().toISOString(),
             error: health.error
@@ -97,7 +106,15 @@ export const useHelperStore = create<HelperState>()(
           });
           const health = await client().getJson<HelperHealth>('/api/v1/health');
           const testingSettings = await client().getJson<HelperTestingSettings>('/api/v1/settings/testing');
-          set({ health, testingSettings, loading: false, lastCheckedAt: new Date().toISOString(), error: health.error });
+          const trafficSettings = await client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic');
+          set({
+            health,
+            testingSettings,
+            trafficSettings,
+            loading: false,
+            lastCheckedAt: new Date().toISOString(),
+            error: health.error
+          });
         } catch (error) {
           set({ loading: false, error: formatHelperError(error), lastCheckedAt: new Date().toISOString() });
         }
@@ -106,6 +123,14 @@ export const useHelperStore = create<HelperState>()(
         try {
           const testingSettings = await client().getJson<HelperTestingSettings>('/api/v1/settings/testing');
           set({ testingSettings, error: null });
+        } catch (error) {
+          set({ error: formatHelperError(error) });
+        }
+      },
+      loadTrafficSettings: async () => {
+        try {
+          const trafficSettings = await client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic');
+          set({ trafficSettings, error: null });
         } catch (error) {
           set({ error: formatHelperError(error) });
         }
@@ -134,6 +159,24 @@ export const useHelperStore = create<HelperState>()(
             delayTestTimeoutMs
           });
           set({ testingSettings, error: null });
+        } catch (error) {
+          set({ error: formatHelperError(error) });
+        }
+      },
+      saveConfigPath: async () => {
+        try {
+          const response = await client().putJson<HelperConfigSource>('/api/v1/config/source', {
+            path: get().configPath.trim()
+          });
+          set({ configPath: response.path, error: null });
+        } catch (error) {
+          set({ error: formatHelperError(error) });
+        }
+      },
+      saveTrafficSettings: async (settings) => {
+        try {
+          const trafficSettings = await client().putJson<HelperTrafficSettings>('/api/v1/settings/traffic', settings);
+          set({ trafficSettings, traffic: trafficSettings.enabled ? get().traffic : null, trafficError: null, error: null });
         } catch (error) {
           set({ error: formatHelperError(error) });
         }
@@ -237,13 +280,14 @@ export const useHelperStore = create<HelperState>()(
         }
       },
       loadHelperConfigContent: async () => {
-        const { configPath } = get();
-        if (configPath.trim()) {
-          await client().putJson('/api/v1/config/source', { path: configPath.trim() });
-        }
+        await get().saveConfigPath();
         return client().getJson<HelperConfigResponse>('/api/v1/config');
       },
       loadTraffic: async () => {
+        if (!get().trafficSettings?.enabled) {
+          set({ traffic: null, trafficLoading: false, trafficError: null });
+          return;
+        }
         set({ trafficLoading: true, trafficError: null });
         try {
           const traffic = await client().getJson<HelperTrafficResponse>('/api/v1/traffic');
@@ -257,7 +301,8 @@ export const useHelperStore = create<HelperState>()(
       name: 'singdeck-helper',
       partialize: (state) => ({
         helperUrl: state.helperUrl,
-        configPath: state.configPath
+        configPath: state.configPath,
+        trafficSettings: state.trafficSettings
       })
     }
   )

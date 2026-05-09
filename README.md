@@ -177,6 +177,16 @@ The synchronized unit uses `BindsTo=sing-box.service`, `PartOf=sing-box.service`
 
 The helper database stores controller settings, secrets, group settings, scheduled probe timestamps, and probe samples. Do not commit it and do not share it as a deployment artifact.
 
+## Provider Traffic
+
+Provider Traffic is optional and is disabled by default. Enable it in Settings, then set the Chrome profile directory used for provider sessions, for example:
+
+```text
+/home/alice/.config/google-chrome/Default
+```
+
+The helper reads Chrome's `Cookies` or `Network/Cookies` SQLite database and `Local Storage/leveldb` under that directory. The directory is created by Chrome, not by SingDeck. If the helper runs as the `singdeck` system user, it cannot usually read a desktop user's Chrome profile or decrypt cookies through that user's keyring. For this module, either run the helper as the same desktop user that owns the Chrome profile, or point it at a readable profile directory.
+
 ## Verification
 
 Run frontend tests and production build:
@@ -214,4 +224,5 @@ Expected response fields include `ok`, `sqlite`, `controllerConfigured`, and `co
 - Controller is configured but unreachable: confirm the URL is reachable from the browser for frontend-only features, and from the helper host for helper features.
 - Config workspace cannot read the file: set the config path in Settings and make sure the helper process user can read it.
 - Scores do not appear: sync the controller to the helper, then load groups or manually probe a group.
-- Traffic workspace shows provider errors: check `SINGDECK_BROWSER_PROFILE` and make sure the relevant provider sessions exist in that Chrome profile.
+- Provider Traffic is hidden: enable it in Settings.
+- Traffic workspace shows provider errors: check the Chrome profile path in Settings and make sure the relevant provider sessions exist in that Chrome profile.

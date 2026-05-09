@@ -19,6 +19,10 @@ describe('settings backup', () => {
         helperUrl: 'http://127.0.0.1:9531',
         configPath: '/etc/sing-box/config.json',
         testingSettings: { defaultTestUrl: 'https://github.com', delayTestTimeoutMs: 5000 },
+        trafficSettings: {
+          enabled: true,
+          browserProfile: '/home/alice/.config/google-chrome/Default'
+        },
         groupConfigs: [
           {
             name: 'openai-us',
@@ -50,6 +54,7 @@ describe('settings backup', () => {
 
     expect(backup.schema).toBe('singdeck.settings.v1');
     expect(backup.helper.groupConfigs[0].config.autoSwitch).toBe(true);
+    expect(backup.helper.trafficSettings?.browserProfile).toBe('/home/alice/.config/google-chrome/Default');
     expect(backup.proxies.groupTestUrls['openai-us']).toBe('https://api.openai.com');
     expect(backup.ui.strategyGroupOrder).toEqual(['openai-us']);
   });

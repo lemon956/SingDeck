@@ -177,6 +177,16 @@ sudo systemctl restart sing-box.service
 
 helper 数据库会保存 controller 设置、secret、策略组设置、定时探测时间戳和探测样本。不要提交它，也不要把它作为部署产物分享。
 
+## Provider Traffic
+
+Provider Traffic 是可选模块，默认关闭。需要使用时，在 Settings 中打开开关，并设置保存 provider 登录状态的 Chrome profile 目录，例如：
+
+```text
+/home/alice/.config/google-chrome/Default
+```
+
+helper 会读取该目录下由 Chrome 创建的 `Cookies` 或 `Network/Cookies` SQLite 数据库，以及 `Local Storage/leveldb`。这个目录是 Chrome 生成的，不是 SingDeck 生成的。如果 helper 以 `singdeck` 系统用户运行，通常无法读取桌面用户的 Chrome profile，也无法通过该用户的 keyring 解密 cookie。要使用这个模块，建议让 helper 以拥有 Chrome profile 的同一个桌面用户运行，或指向一个 helper 可读取的 profile 目录。
+
 ## 校验
 
 运行前端测试和生产构建：
@@ -214,4 +224,5 @@ curl http://127.0.0.1:9531/api/v1/health
 - Controller 已配置但不可达：确认前端纯浏览器功能能从浏览器访问该 URL，helper 功能能从 helper 所在主机访问该 URL。
 - 配置工作区无法读取文件：在 Settings 中设置配置路径，并确认 helper 进程用户有读取权限。
 - 没有评分结果：先把 controller 同步到 helper，然后加载策略组或手动探测某个策略组。
-- 流量工作区显示 provider 错误：检查 `SINGDECK_BROWSER_PROFILE`，并确认相关 provider 的登录 session 存在于该 Chrome profile。
+- Provider Traffic 不显示：在 Settings 中打开该模块。
+- 流量工作区显示 provider 错误：检查 Settings 中的 Chrome profile 路径，并确认相关 provider 的登录 session 存在于该 Chrome profile。

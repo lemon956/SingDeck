@@ -33,6 +33,11 @@ const DEFAULT_PROBE_INTERVAL_SEC: i64 = 15 * 60;
 const MIN_PROBE_INTERVAL_SEC: i64 = 60;
 const MAX_PROBE_INTERVAL_SEC: i64 = 24 * 60 * 60;
 const FAILURE_PROBE_COOLDOWN_MS: i64 = 30 * 1000;
+const DEFAULT_CONFIG_PATHS: [&str; 3] = [
+    "/etc/sing-box/config.json",
+    "/etc/sing-box/config.jsonc",
+    "/usr/local/etc/sing-box/config.json",
+];
 
 #[derive(Clone)]
 struct AppState {
@@ -174,6 +179,13 @@ struct TestingSettingsInput {
     delay_test_timeout_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct TrafficSettings {
+    enabled: bool,
+    browser_profile: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConfigSourceRequest {
@@ -304,6 +316,10 @@ async fn main() -> Result<()> {
         .route(
             "/api/v1/settings/testing",
             get(testing_settings).put(save_testing_settings),
+        )
+        .route(
+            "/api/v1/settings/traffic",
+            get(traffic_settings).put(save_traffic_settings),
         )
         .route("/api/v1/groups", get(groups))
         .route("/api/v1/groups/:group/config", put(save_group_config))
@@ -467,6 +483,21 @@ async fn save_testing_settings(
     }))
 }
 
+async fn traffic_settings(
+    State(state): State<AppState>,
+) -> Result<Json<TrafficSettings>, AppError> {
+    Ok(Json(load_traffic_settings(&state)?))
+}
+
+async fn save_traffic_settings(
+    State(state): State<AppState>,
+    Json(input): Json<TrafficSettings>,
+) -> Result<Json<TrafficSettings>, AppError> {
+    let settings = normalize_traffic_settings(input);
+    save_traffic_settings_row(&state, &settings)?;
+    Ok(Json(settings))
+}
+
 async fn groups(State(state): State<AppState>) -> Result<Json<GroupsResponse>, AppError> {
     let controller = load_controller(&state)?;
     let proxies = fetch_proxies(&state, &controller).await?;
@@ -571,18 +602,7 @@ async fn apply_group(
 async fn read_config(State(state): State<AppState>) -> Result<Json<ConfigResponse>, AppError> {
     let loaded_at = Local::now().to_rfc3339();
     let configured = load_string_kv(&state, "config_path")?;
-    let candidates = configured
-        .into_iter()
-        .chain(
-            [
-                "/etc/sing-box/config.json",
-                "/etc/sing-box/config.jsonc",
-                "/usr/local/etc/sing-box/config.json",
-            ]
-            .into_iter()
-            .map(String::from),
-        )
-        .collect::<Vec<_>>();
+    let candidates = config_path_candidates(configured, detect_sing_box_config_paths());
 
     let mut last_error = None;
     for path in candidates {
@@ -622,12 +642,102 @@ async fn save_config_source(
 ) -> Result<Json<ConfigSourceRequest>, AppError> {
     let path = input.path.trim();
     if path.is_empty() {
-        return Err(AppError::bad_request("config path cannot be empty"));
+        delete_string_kv(&state, "config_path")?;
+        return Ok(Json(ConfigSourceRequest {
+            path: String::new(),
+        }));
     }
     save_string_kv(&state, "config_path", path)?;
     Ok(Json(ConfigSourceRequest {
         path: path.to_string(),
     }))
+}
+
+fn config_path_candidates(configured: Option<String>, detected: Vec<String>) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(path) = configured {
+        push_config_path_candidate(&mut candidates, path);
+    }
+    for path in detected {
+        push_config_path_candidate(&mut candidates, path);
+    }
+    for path in DEFAULT_CONFIG_PATHS {
+        push_config_path_candidate(&mut candidates, path);
+    }
+    candidates
+}
+
+fn push_config_path_candidate(candidates: &mut Vec<String>, path: impl AsRef<str>) {
+    let path = path.as_ref().trim();
+    if path.is_empty() || candidates.iter().any(|candidate| candidate == path) {
+        return;
+    }
+    candidates.push(path.to_string());
+}
+
+fn detect_sing_box_config_paths() -> Vec<String> {
+    sing_box_config_paths_from_proc()
+}
+
+fn sing_box_config_paths_from_proc() -> Vec<String> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(raw) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let args = proc_cmdline_args(&raw);
+        if !is_sing_box_process(&args) {
+            continue;
+        }
+        for path in sing_box_config_paths_from_args(&args) {
+            push_config_path_candidate(&mut candidates, path);
+        }
+    }
+    candidates
+}
+
+fn proc_cmdline_args(raw: &[u8]) -> Vec<String> {
+    raw.split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| std::str::from_utf8(part).ok())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn is_sing_box_process(args: &[String]) -> bool {
+    args.first()
+        .and_then(|arg| Path::new(arg).file_name())
+        .and_then(|name| name.to_str())
+        == Some("sing-box")
+}
+
+fn sing_box_config_paths_from_args(args: &[String]) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-c" || arg == "--config" {
+            if let Some(path) = args.get(index + 1) {
+                push_config_path_candidate(&mut candidates, path);
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("--config=") {
+            push_config_path_candidate(&mut candidates, path);
+        } else if let Some(path) = arg.strip_prefix("-c=") {
+            push_config_path_candidate(&mut candidates, path);
+        }
+        index += 1;
+    }
+    candidates
 }
 
 async fn read_config_raw(State(state): State<AppState>) -> Result<Response, AppError> {
@@ -661,7 +771,12 @@ async fn read_config_raw(State(state): State<AppState>) -> Result<Response, AppE
 async fn read_traffic(
     State(state): State<AppState>,
 ) -> Result<Json<traffic::TrafficResponse>, AppError> {
-    Ok(Json(traffic::read_traffic(&state.http).await))
+    let settings = load_traffic_settings(&state)?;
+    let profile = traffic::chrome_profile_path(&settings.browser_profile);
+    if !settings.enabled {
+        return Ok(Json(traffic::disabled_traffic_response(&profile)));
+    }
+    Ok(Json(traffic::read_traffic(&state.http, &profile).await))
 }
 
 async fn probe_node(
@@ -1247,6 +1362,41 @@ fn load_delay_test_timeout_ms(state: &AppState) -> Result<i64> {
         .unwrap_or(DEFAULT_DELAY_TEST_TIMEOUT_MS))
 }
 
+fn default_traffic_settings() -> TrafficSettings {
+    TrafficSettings {
+        enabled: false,
+        browser_profile: traffic::default_chrome_profile_path().display().to_string(),
+    }
+}
+
+fn normalize_traffic_settings(settings: TrafficSettings) -> TrafficSettings {
+    let browser_profile = settings.browser_profile.trim();
+    TrafficSettings {
+        enabled: settings.enabled,
+        browser_profile: if browser_profile.is_empty() {
+            default_traffic_settings().browser_profile
+        } else {
+            browser_profile.to_string()
+        },
+    }
+}
+
+fn load_traffic_settings(state: &AppState) -> Result<TrafficSettings> {
+    load_json_kv(state, "traffic_settings").map(|settings| {
+        settings
+            .map(normalize_traffic_settings)
+            .unwrap_or_else(default_traffic_settings)
+    })
+}
+
+fn save_traffic_settings_row(state: &AppState, settings: &TrafficSettings) -> Result<()> {
+    save_json_kv(
+        state,
+        "traffic_settings",
+        &normalize_traffic_settings(settings.clone()),
+    )
+}
+
 fn load_group_config(state: &AppState, group: &str) -> Result<GroupConfig> {
     let default_test_url = load_default_test_url(state)?;
     let db = state
@@ -1680,6 +1830,15 @@ fn save_string_kv(state: &AppState, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn delete_string_kv(state: &AppState, key: &str) -> Result<()> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| anyhow!("database lock poisoned"))?;
+    db.execute("DELETE FROM kv WHERE key = ?1", params![key])?;
+    Ok(())
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2001,6 +2160,25 @@ mod tests {
     }
 
     #[test]
+    fn traffic_settings_are_persisted_in_helper_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+        };
+        let settings = TrafficSettings {
+            enabled: true,
+            browser_profile: "/home/alice/.config/google-chrome/Default".to_string(),
+        };
+
+        save_traffic_settings_row(&state, &settings).unwrap();
+
+        assert_eq!(load_traffic_settings(&state).unwrap(), settings);
+    }
+
+    #[test]
     fn jitter_penalizes_spread() {
         let stable = vec![
             Sample {
@@ -2079,5 +2257,52 @@ mod tests {
             Some("http://10.0.0.12:9531/api/v1/config/raw".to_string())
         );
         assert_eq!(mobile_config_url_for_bind("127.0.0.1:9531", None), None);
+    }
+
+    #[test]
+    fn sing_box_config_paths_are_extracted_from_startup_args() {
+        assert_eq!(
+            sing_box_config_paths_from_args(&[
+                "/usr/bin/sing-box".to_string(),
+                "run".to_string(),
+                "-c".to_string(),
+                "/etc/sing-box/custom.json".to_string(),
+            ]),
+            vec!["/etc/sing-box/custom.json".to_string()]
+        );
+        assert_eq!(
+            sing_box_config_paths_from_args(&[
+                "sing-box".to_string(),
+                "--config".to_string(),
+                "/opt/sing-box/config.jsonc".to_string(),
+                "run".to_string(),
+            ]),
+            vec!["/opt/sing-box/config.jsonc".to_string()]
+        );
+        assert_eq!(
+            sing_box_config_paths_from_args(&[
+                "sing-box".to_string(),
+                "run".to_string(),
+                "--config=/srv/sing-box/config.json".to_string(),
+            ]),
+            vec!["/srv/sing-box/config.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn config_path_candidates_keep_settings_before_detected_and_defaults() {
+        assert_eq!(
+            config_path_candidates(
+                Some(" /custom/sing-box.json ".to_string()),
+                vec!["/runtime/sing-box.json".to_string()]
+            ),
+            vec![
+                "/custom/sing-box.json".to_string(),
+                "/runtime/sing-box.json".to_string(),
+                "/etc/sing-box/config.json".to_string(),
+                "/etc/sing-box/config.jsonc".to_string(),
+                "/usr/local/etc/sing-box/config.json".to_string(),
+            ]
+        );
     }
 }

@@ -13,7 +13,9 @@ describe('helper store', () => {
   beforeEach(() => {
     useHelperStore.setState({
       helperUrl: 'http://helper.local',
+      configPath: '',
       testingSettings: null,
+      trafficSettings: null,
       groups: [],
       scoresByGroup: {},
       loading: false,
@@ -144,5 +146,59 @@ describe('helper store', () => {
       defaultTestUrl: 'https://api.openai.com',
       delayTestTimeoutMs: 10000
     });
+  });
+
+  it('saves provider traffic settings through the helper API', async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/settings/traffic')) {
+          const body = init?.body ? JSON.parse(String(init.body)) : null;
+          requests.push({ url, body });
+          return jsonResponse(body);
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().saveTrafficSettings({
+      enabled: true,
+      browserProfile: '/home/alice/.config/google-chrome/Default'
+    });
+
+    expect(requests[0].body).toEqual({
+      enabled: true,
+      browserProfile: '/home/alice/.config/google-chrome/Default'
+    });
+    expect(useHelperStore.getState().trafficSettings).toEqual({
+      enabled: true,
+      browserProfile: '/home/alice/.config/google-chrome/Default'
+    });
+  });
+
+  it('saves config path through the helper API', async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/config/source')) {
+          const body = init?.body ? JSON.parse(String(init.body)) : null;
+          requests.push({ url, body });
+          return jsonResponse(body);
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    useHelperStore.getState().updateSettings({ configPath: ' /opt/sing-box/config.jsonc ' });
+
+    await useHelperStore.getState().saveConfigPath();
+
+    expect(requests[0].body).toEqual({ path: '/opt/sing-box/config.jsonc' });
+    expect(useHelperStore.getState().configPath).toBe('/opt/sing-box/config.jsonc');
+    expect(useHelperStore.getState().error).toBeNull();
   });
 });

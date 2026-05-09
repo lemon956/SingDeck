@@ -36,6 +36,11 @@ export type HelperTestingSettings = {
   delayTestTimeoutMs: number;
 };
 
+export type HelperTrafficSettings = {
+  enabled: boolean;
+  browserProfile: string;
+};
+
 export type HelperGroup = {
   name: string;
   kind: string;
@@ -82,6 +87,10 @@ export type HelperConfigResponse = {
   content: string;
   loadedAt: string;
   error: string | null;
+};
+
+export type HelperConfigSource = {
+  path: string;
 };
 
 export type HelperTrafficSnapshot = {

@@ -1,6 +1,6 @@
 import type { ControllerConfig, ValidationIssue } from './controller';
 import type { ConfigSnapshot } from './configWorkspace';
-import type { HelperGroupConfig, HelperTestingSettings } from './helperApi';
+import type { HelperGroupConfig, HelperTestingSettings, HelperTrafficSettings } from './helperApi';
 
 export const SETTINGS_BACKUP_SCHEMA = 'singdeck.settings.v1';
 
@@ -15,6 +15,7 @@ export type SettingsBackup = {
     helperUrl: string;
     configPath: string;
     testingSettings: HelperTestingSettings | null;
+    trafficSettings?: HelperTrafficSettings | null;
     groupConfigs: Array<{ name: string; config: HelperGroupConfig }>;
   };
   proxies: {
