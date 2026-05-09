@@ -5,7 +5,6 @@ import {
   ChevronRight,
   FileJson,
   GitBranch,
-  HardDrive,
   LayoutDashboard,
   QrCode,
   RefreshCw,
@@ -1180,7 +1179,7 @@ export function App() {
           onClick={() => setRailExpanded((expanded) => !expanded)}
           type="button"
         >
-          <HardDrive size={22} />
+          <img alt="" className="brand-symbol" src="./pwa-icon.svg" />
           <span>
             <strong>SingDeck</strong>
             <small>local sing-box console</small>
