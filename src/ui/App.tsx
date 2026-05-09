@@ -1032,7 +1032,7 @@ export function App() {
         tone: 'ok',
         text: state.configPath
           ? `Config source saved: ${state.configPath}`
-          : 'Config override cleared. Helper will auto-detect the sing-box startup config.'
+          : 'Config source cleared. Set Config path before loading config.'
       };
     });
 
@@ -1480,7 +1480,7 @@ export function App() {
               <button
                 className="ghost-action compact-icon-action"
                 disabled={!helperServiceAvailable || helper.trafficLoading}
-                onClick={() => void useHelperStore.getState().loadTraffic()}
+                onClick={() => void saveTrafficWithFeedback(trafficModuleEnabled, trafficProfileDraft)}
                 type="button"
               >
                 <RefreshCw size={13} />
@@ -1668,10 +1668,7 @@ export function App() {
                       checked={trafficModuleEnabled}
                       type="checkbox"
                       onChange={(event) =>
-                        void saveTrafficWithFeedback(
-                          event.target.checked,
-                          trafficProfileDraft || helper.trafficSettings?.browserProfile || ''
-                        )
+                        void saveTrafficWithFeedback(event.target.checked, trafficProfileDraft)
                       }
                     />
                     <span className="automation-switch" aria-hidden="true" />

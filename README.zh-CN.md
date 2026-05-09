@@ -75,7 +75,7 @@ pnpm helper:dev
 2. 填写 sing-box 中相同的 `secret`。
 3. 设置 helper URL，例如 `http://127.0.0.1:9531`。
 4. 同步或检查 helper。
-5. 如需读取配置文件，设置配置路径，例如 `/etc/sing-box/config.json` 或 `/etc/sing-box/config.jsonc`。
+5. 如需读取配置文件，请显式设置配置路径，例如 `/etc/sing-box/config.json` 或 `/etc/sing-box/config.jsonc`；helper 只会读取 Settings 中保存的这个路径。
 
 ## 前端部署
 
@@ -173,7 +173,6 @@ sudo systemctl restart sing-box.service
 | `SINGDECK_HELPER_BIND` | `0.0.0.0:9531` | helper HTTP API 的监听地址和端口。本机访问建议设为 `127.0.0.1:9531`。 |
 | `SINGDECK_HELPER_DB` | `singdeck-helper.db` | SQLite 状态数据库路径。部署环境建议放在 git 工作区之外。 |
 | `SINGDECK_HELPER_PUBLIC_URL` | 未设置 | 用来生成 `/api/v1/config/raw` 远程配置导入链接的公开 base URL。 |
-| `SINGDECK_BROWSER_PROFILE` | `~/.config/google-chrome/Default` | 流量工作区读取 provider cookie/localStorage 时使用的 Linux Chrome profile。 |
 
 helper 数据库会保存 controller 设置、secret、策略组设置、定时探测时间戳和探测样本。不要提交它，也不要把它作为部署产物分享。
 
@@ -185,7 +184,7 @@ Provider Traffic 是可选模块，默认关闭。需要使用时，在 Settings
 /home/alice/.config/google-chrome/Default
 ```
 
-helper 会读取该目录下由 Chrome 创建的 `Cookies` 或 `Network/Cookies` SQLite 数据库，以及 `Local Storage/leveldb`。这个目录是 Chrome 生成的，不是 SingDeck 生成的。如果 helper 以 `singdeck` 系统用户运行，通常无法读取桌面用户的 Chrome profile，也无法通过该用户的 keyring 解密 cookie。要使用这个模块，建议让 helper 以拥有 Chrome profile 的同一个桌面用户运行，或指向一个 helper 可读取的 profile 目录。
+helper 只会使用 Settings 中保存的 Chrome profile 路径，不会自动识别，也不会默认使用当前用户的 Chrome profile。helper 会读取该目录下由 Chrome 创建的 `Cookies` 或 `Network/Cookies` SQLite 数据库，以及 `Local Storage/leveldb`。这个目录是 Chrome 生成的，不是 SingDeck 生成的。如果 helper 以 `singdeck` 系统用户运行，通常无法读取桌面用户的 Chrome profile，也无法通过该用户的 keyring 解密 cookie。要使用这个模块，建议让 helper 以拥有 Chrome profile 的同一个桌面用户运行，或指向一个 helper 可读取的 profile 目录。
 
 ## 校验
 

@@ -75,7 +75,7 @@ Open the app, then go to Settings:
 2. Enter the same `secret` configured in sing-box.
 3. Set the helper URL, for example `http://127.0.0.1:9531`.
 4. Sync/check the helper.
-5. Optionally set the config path, for example `/etc/sing-box/config.json` or `/etc/sing-box/config.jsonc`.
+5. If you need config access, explicitly set the config path, for example `/etc/sing-box/config.json` or `/etc/sing-box/config.jsonc`; the helper only reads the path saved in Settings.
 
 ## Frontend Deployment
 
@@ -173,7 +173,6 @@ The synchronized unit uses `BindsTo=sing-box.service`, `PartOf=sing-box.service`
 | `SINGDECK_HELPER_BIND` | `0.0.0.0:9531` | Address and port for the helper HTTP API. Use `127.0.0.1:9531` for local-only access. |
 | `SINGDECK_HELPER_DB` | `singdeck-helper.db` | SQLite state database path. Store it outside the git checkout in deployed environments. |
 | `SINGDECK_HELPER_PUBLIC_URL` | unset | Public base URL used to build `/api/v1/config/raw` links for remote profile import. |
-| `SINGDECK_BROWSER_PROFILE` | `~/.config/google-chrome/Default` | Chrome profile used by the traffic workspace to read provider cookies/local storage on Linux. |
 
 The helper database stores controller settings, secrets, group settings, scheduled probe timestamps, and probe samples. Do not commit it and do not share it as a deployment artifact.
 
@@ -185,7 +184,7 @@ Provider Traffic is optional and is disabled by default. Enable it in Settings, 
 /home/alice/.config/google-chrome/Default
 ```
 
-The helper reads Chrome's `Cookies` or `Network/Cookies` SQLite database and `Local Storage/leveldb` under that directory. The directory is created by Chrome, not by SingDeck. If the helper runs as the `singdeck` system user, it cannot usually read a desktop user's Chrome profile or decrypt cookies through that user's keyring. For this module, either run the helper as the same desktop user that owns the Chrome profile, or point it at a readable profile directory.
+The helper only uses the Chrome profile path saved in Settings; it does not auto-detect or default to the current user's Chrome profile. It reads Chrome's `Cookies` or `Network/Cookies` SQLite database and `Local Storage/leveldb` under that directory. The directory is created by Chrome, not by SingDeck. If the helper runs as the `singdeck` system user, it cannot usually read a desktop user's Chrome profile or decrypt cookies through that user's keyring. For this module, either run the helper as the same desktop user that owns the Chrome profile, or point it at a readable profile directory.
 
 ## Verification
 

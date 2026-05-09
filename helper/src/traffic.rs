@@ -81,7 +81,7 @@ pub fn disabled_traffic_response(profile: &Path) -> TrafficResponse {
 pub fn chrome_profile_path(value: &str) -> PathBuf {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return default_chrome_profile_path();
+        return PathBuf::new();
     }
     if trimmed == "~" {
         return home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
@@ -277,18 +277,6 @@ fn provider_error(
 
 fn user_agent() -> &'static str {
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-}
-
-pub fn default_chrome_profile_path() -> PathBuf {
-    env::var("SINGDECK_BROWSER_PROFILE")
-        .map(PathBuf::from)
-        .ok()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| {
-            home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".config/google-chrome/Default")
-        })
 }
 
 pub fn read_chrome_cookie(profile: &Path, host_key: &str, name: &str) -> Result<String> {
@@ -745,5 +733,10 @@ mod tests {
 
         assert_eq!(response.profile, profile.display().to_string());
         assert_eq!(response.providers.len(), 2);
+    }
+
+    #[test]
+    fn chrome_profile_path_keeps_empty_value_unconfigured() {
+        assert!(chrome_profile_path("  ").as_os_str().is_empty());
     }
 }
