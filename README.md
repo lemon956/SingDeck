@@ -124,14 +124,14 @@ Create a state directory and run the binary:
 
 ```bash
 sudo mkdir -p /var/lib/singdeck
-sudo chown "$USER":"$USER" /var/lib/singdeck
 
-SINGDECK_HELPER_BIND=127.0.0.1:9531 \
-SINGDECK_HELPER_DB=/var/lib/singdeck/helper.db \
-./helper/target/release/singdeck-helper
+sudo env \
+  SINGDECK_HELPER_BIND=0.0.0.0:9531 \
+  SINGDECK_HELPER_DB=/var/lib/singdeck/helper.db \
+  ./helper/target/release/singdeck-helper
 ```
 
-The helper code default is `0.0.0.0:9531`, so set `SINGDECK_HELPER_BIND` explicitly unless you intentionally want LAN access. The helper has no built-in authentication and enables permissive CORS.
+The helper code default is `0.0.0.0:9531`. Keep that binding when phones or other LAN devices need to import the raw config URL. Use `127.0.0.1:9531` only for local-only access. The helper has no built-in authentication and enables permissive CORS.
 
 Systemd templates are provided under `deploy/systemd`:
 
@@ -142,7 +142,6 @@ Systemd templates are provided under `deploy/systemd`:
 Install the helper binary and environment file:
 
 ```bash
-id -u singdeck >/dev/null 2>&1 || sudo useradd --system --home /var/lib/singdeck --shell /usr/sbin/nologin singdeck
 sudo install -Dm755 helper/target/release/singdeck-helper /opt/singdeck/singdeck-helper
 sudo install -Dm640 deploy/systemd/singdeck-helper.env.example /etc/singdeck/helper.env
 ```
@@ -165,6 +164,8 @@ sudo systemctl restart sing-box.service
 ```
 
 The synchronized unit uses `BindsTo=sing-box.service`, `PartOf=sing-box.service`, `After=sing-box.service`, and `WantedBy=sing-box.service`. Starting `sing-box.service` also starts the helper; stopping or restarting sing-box propagates to the helper. If your sing-box unit has a different name, edit the template before installing it.
+
+The packaged systemd units run as root by default so the helper can read root-owned sing-box config files and Chrome profile paths explicitly configured in Settings.
 
 ## Helper Environment Variables
 

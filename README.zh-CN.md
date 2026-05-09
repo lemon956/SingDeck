@@ -124,14 +124,14 @@ cargo build --release --manifest-path helper/Cargo.toml
 
 ```bash
 sudo mkdir -p /var/lib/singdeck
-sudo chown "$USER":"$USER" /var/lib/singdeck
 
-SINGDECK_HELPER_BIND=127.0.0.1:9531 \
-SINGDECK_HELPER_DB=/var/lib/singdeck/helper.db \
-./helper/target/release/singdeck-helper
+sudo env \
+  SINGDECK_HELPER_BIND=0.0.0.0:9531 \
+  SINGDECK_HELPER_DB=/var/lib/singdeck/helper.db \
+  ./helper/target/release/singdeck-helper
 ```
 
-helper 代码默认监听 `0.0.0.0:9531`，因此除非你明确需要局域网访问，否则建议显式设置 `SINGDECK_HELPER_BIND`。helper 没有内置鉴权，并且 CORS 是放开的。
+helper 代码默认监听 `0.0.0.0:9531`。如果手机或其他局域网设备需要导入原始配置 URL，请保持这个监听地址；只有本机访问时才改成 `127.0.0.1:9531`。helper 没有内置鉴权，并且 CORS 是放开的。
 
 仓库在 `deploy/systemd` 下提供了 systemd 模板：
 
@@ -142,7 +142,6 @@ helper 代码默认监听 `0.0.0.0:9531`，因此除非你明确需要局域网�
 安装 helper 二进制和环境变量文件：
 
 ```bash
-id -u singdeck >/dev/null 2>&1 || sudo useradd --system --home /var/lib/singdeck --shell /usr/sbin/nologin singdeck
 sudo install -Dm755 helper/target/release/singdeck-helper /opt/singdeck/singdeck-helper
 sudo install -Dm640 deploy/systemd/singdeck-helper.env.example /etc/singdeck/helper.env
 ```
@@ -165,6 +164,8 @@ sudo systemctl restart sing-box.service
 ```
 
 同步 unit 使用了 `BindsTo=sing-box.service`、`PartOf=sing-box.service`、`After=sing-box.service` 和 `WantedBy=sing-box.service`。启动 `sing-box.service` 时会同时启动 helper；停止或重启 sing-box 时也会同步影响 helper。如果你的 sing-box unit 名称不同，请先修改模板再安装。
+
+仓库提供的 systemd unit 默认以 root 运行，这样 helper 可以读取 root 拥有的 sing-box 配置文件，以及 Settings 中显式配置的 Chrome profile 路径。
 
 ## helper 环境变量
 

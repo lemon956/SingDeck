@@ -7,8 +7,6 @@ PartOf=sing-box.service
 
 [Service]
 Type=simple
-User=singdeck
-Group=singdeck
 WorkingDirectory=/opt/singdeck
 EnvironmentFile=-/etc/singdeck/helper.env
 ExecStart=/opt/singdeck/singdeck-helper
