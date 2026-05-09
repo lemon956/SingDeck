@@ -1,46 +1,217 @@
 # SingDeck
 
-SingDeck is a local-first, single-controller sing-box dashboard. The frontend still talks directly to one `experimental.clash_api` endpoint, and an optional local helper service can provide node scoring plus read-only access to the running sing-box config file.
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+SingDeck is a local-first, single-controller sing-box dashboard. The web app talks directly to one `experimental.clash_api` endpoint from the browser. An optional local helper service adds node scoring, scheduled probes, config-file reading, raw config download, and provider traffic snapshots.
 
 ## Features
 
-- Single controller setup with zashboard-style URL startup parameters.
-- Connection detection with actionable auth/network/CORS-style failure buckets.
+- Single sing-box Clash API controller setup with zashboard-style URL startup parameters.
+- Connection detection with auth, network, CORS, and Private Network Access failure hints.
 - Runtime dashboard for version, mode, traffic rates, totals, and connection counts.
-- Proxy topology view with selector switching and per-node delay test URL overrides.
-- Local helper service for per-strategy-group node scoring and full config file display.
+- Proxy topology, selector switching, per-node delay tests, and per-group test URL overrides.
+- Optional helper service for strategy-group scoring, scheduled probes, auto-switching, and config-file access.
 - Connection browser with filtering and close actions.
 - Log workspace with level and text filters.
 - JSON config workspace with necessary sing-box dashboard checks, snapshots, import/export-ready content, and sensitive-field masking.
 - Client-side subscription parsing for common `ss://`, `trojan://`, and `vless://` links.
-- Advanced tools for simple route simulation, selector graph edges, Linux pasted-output diagnostics, and API compatibility shaping.
+- Advanced tools for route simulation, selector graph edges, Linux pasted-output diagnostics, and API compatibility shaping.
+
+## Architecture
+
+SingDeck can run in two modes:
+
+- Frontend-only mode: deploy the built `dist/` directory as a static site. The browser connects directly to the sing-box Clash API.
+- Frontend plus helper mode: run the static frontend and also run `singdeck-helper` near the sing-box instance. The helper stores local state in SQLite and calls the Clash API from the host machine.
+
+The frontend does not require a backend for basic runtime control. The helper is optional, but required for helper-based scoring, scheduled probes, auto-switching, direct config-file reads, raw config download, and the traffic workspace.
+
+## Prerequisites
+
+- Node.js and pnpm for the frontend.
+- Rust and Cargo for the helper service.
+- A running sing-box instance with `experimental.clash_api` enabled.
+- A reachable Clash API URL, for example `http://127.0.0.1:9090`.
+
+## sing-box Configuration
+
+Enable the Clash API in your sing-box config:
+
+```jsonc
+{
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:9090",
+      "secret": "change-this-secret"
+    }
+  }
+}
+```
+
+Use a `secret` whenever the controller is reachable outside the local machine. If the frontend runs on another host or device, the controller must be reachable from that browser, not just from the server hosting SingDeck.
 
 ## Development
+
+Install dependencies and start the Vite development server:
 
 ```bash
 pnpm install
 pnpm start
 ```
 
-The app is served by Vite and can be installed as a PWA in supported browsers.
+`pnpm start` runs Vite with `--host 0.0.0.0`. It is for development and local testing, not production serving.
 
-Run the helper service in a separate terminal when you want scoring or direct config file reading:
+Run the helper service in another terminal when you want helper features:
 
 ```bash
+SINGDECK_HELPER_BIND=127.0.0.1:9531 \
+SINGDECK_HELPER_DB=$HOME/.local/state/singdeck/helper.db \
 pnpm helper:dev
 ```
 
-The helper listens on `http://127.0.0.1:9531` by default. In Settings, set the helper URL and optionally set the config path, for example `/etc/sing-box/config.json` or `/etc/sing-box/config.jsonc`.
+Open the app, then go to Settings:
+
+1. Set the controller URL, for example `http://127.0.0.1:9090`.
+2. Enter the same `secret` configured in sing-box.
+3. Set the helper URL, for example `http://127.0.0.1:9531`.
+4. Sync/check the helper.
+5. Optionally set the config path, for example `/etc/sing-box/config.json` or `/etc/sing-box/config.jsonc`.
+
+## Frontend Deployment
+
+Build the static app:
+
+```bash
+pnpm install
+pnpm build
+```
+
+The production files are written to `dist/`. Serve that directory with any static host, such as nginx, Caddy, object storage, Pages, or a CDN.
+
+Example nginx site:
+
+```nginx
+server {
+  listen 80;
+  server_name singdeck.example.com;
+
+  root /var/www/singdeck/dist;
+  index index.html;
+
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+}
+```
+
+The Vite config uses `base: './'`, so the app can also be served from a subdirectory.
+
+For a local production preview:
+
+```bash
+pnpm preview
+```
+
+## Helper Deployment
+
+Build the helper binary:
+
+```bash
+cargo build --release --manifest-path helper/Cargo.toml
+```
+
+Create a state directory and run the binary:
+
+```bash
+sudo mkdir -p /var/lib/singdeck
+sudo chown "$USER":"$USER" /var/lib/singdeck
+
+SINGDECK_HELPER_BIND=127.0.0.1:9531 \
+SINGDECK_HELPER_DB=/var/lib/singdeck/helper.db \
+./helper/target/release/singdeck-helper
+```
+
+The helper code default is `0.0.0.0:9531`, so set `SINGDECK_HELPER_BIND` explicitly unless you intentionally want LAN access. The helper has no built-in authentication and enables permissive CORS.
+
+Systemd templates are provided under `deploy/systemd`:
+
+- `singdeck-helper.service`: standalone helper service.
+- `singdeck-helper.with-sing-box.service`: starts, stops, and restarts with `sing-box.service`.
+- `singdeck-helper.env.example`: shared helper environment file.
+
+Install the helper binary and environment file:
+
+```bash
+id -u singdeck >/dev/null 2>&1 || sudo useradd --system --home /var/lib/singdeck --shell /usr/sbin/nologin singdeck
+sudo install -Dm755 helper/target/release/singdeck-helper /opt/singdeck/singdeck-helper
+sudo install -Dm640 deploy/systemd/singdeck-helper.env.example /etc/singdeck/helper.env
+```
+
+For standalone startup:
+
+```bash
+sudo install -Dm644 deploy/systemd/singdeck-helper.service /etc/systemd/system/singdeck-helper.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now singdeck-helper.service
+```
+
+For startup synchronized with sing-box:
+
+```bash
+sudo install -Dm644 deploy/systemd/singdeck-helper.with-sing-box.service /etc/systemd/system/singdeck-helper.service
+sudo systemctl daemon-reload
+sudo systemctl enable singdeck-helper.service
+sudo systemctl restart sing-box.service
+```
+
+The synchronized unit uses `BindsTo=sing-box.service`, `PartOf=sing-box.service`, `After=sing-box.service`, and `WantedBy=sing-box.service`. Starting `sing-box.service` also starts the helper; stopping or restarting sing-box propagates to the helper. If your sing-box unit has a different name, edit the template before installing it.
+
+## Helper Environment Variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SINGDECK_HELPER_BIND` | `0.0.0.0:9531` | Address and port for the helper HTTP API. Use `127.0.0.1:9531` for local-only access. |
+| `SINGDECK_HELPER_DB` | `singdeck-helper.db` | SQLite state database path. Store it outside the git checkout in deployed environments. |
+| `SINGDECK_HELPER_PUBLIC_URL` | unset | Public base URL used to build `/api/v1/config/raw` links for remote profile import. |
+| `SINGDECK_BROWSER_PROFILE` | `~/.config/google-chrome/Default` | Chrome profile used by the traffic workspace to read provider cookies/local storage on Linux. |
+
+The helper database stores controller settings, secrets, group settings, scheduled probe timestamps, and probe samples. Do not commit it and do not share it as a deployment artifact.
 
 ## Verification
 
+Run frontend tests and production build:
+
 ```bash
 pnpm check
+```
+
+Run helper tests:
+
+```bash
 pnpm helper:test
 ```
 
-`pnpm check` runs the Vitest suite and a production build. `pnpm helper:test` runs the Rust helper unit tests.
+Check a running helper:
 
-## Local Use Notes
+```bash
+curl http://127.0.0.1:9531/api/v1/health
+```
 
-Set the controller URL to your sing-box Clash API endpoint, for example `http://127.0.0.1:9090`. If `secret` is configured in sing-box, enter the same value in SingDeck. URL parameters may also initialize the controller, but placing `secret` in a URL can leak it through browser history or shared links.
+Expected response fields include `ok`, `sqlite`, `controllerConfigured`, and `controllerReachable`.
+
+## Security Notes
+
+- The frontend stores controller settings in the current browser.
+- A `secret` in a URL parameter can leak through browser history, bookmarks, screenshots, and shared links. Prefer entering it in Settings.
+- Do not expose sing-box Clash API on `0.0.0.0` without a `secret`.
+- Do not expose the helper to the public internet. It has no authentication and can read configured local files.
+- Browser-to-controller requests may be blocked by CORS, HTTPS-to-HTTP mixed content rules, or Private Network Access restrictions. If SingDeck is hosted on a public HTTPS origin and the controller is private HTTP, test from the target browser.
+- If mobile devices need to import the raw config through the helper, bind the helper to a reachable LAN address and set `SINGDECK_HELPER_PUBLIC_URL`; protect that network path carefully.
+
+## Troubleshooting
+
+- Helper URL fails: confirm the helper is running and `curl http://127.0.0.1:9531/api/v1/health` works from the same machine as the browser.
+- Controller is configured but unreachable: confirm the URL is reachable from the browser for frontend-only features, and from the helper host for helper features.
+- Config workspace cannot read the file: set the config path in Settings and make sure the helper process user can read it.
+- Scores do not appear: sync the controller to the helper, then load groups or manually probe a group.
+- Traffic workspace shows provider errors: check `SINGDECK_BROWSER_PROFILE` and make sure the relevant provider sessions exist in that Chrome profile.

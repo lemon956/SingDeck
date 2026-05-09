@@ -3,3 +3,4 @@ dist
 *.tsbuildinfo
 helper/target
 .DS_Store
+singdeck-helper.db

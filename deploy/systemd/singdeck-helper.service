@@ -1,0 +1,18 @@
+[Unit]
+Description=SingDeck helper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=singdeck
+Group=singdeck
+WorkingDirectory=/opt/singdeck
+EnvironmentFile=-/etc/singdeck/helper.env
+ExecStart=/opt/singdeck/singdeck-helper
+Restart=on-failure
+RestartSec=3
+StateDirectory=singdeck
+
+[Install]
+WantedBy=multi-user.target

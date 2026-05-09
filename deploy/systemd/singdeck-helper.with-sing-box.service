@@ -1,0 +1,20 @@
+[Unit]
+Description=SingDeck helper bound to sing-box
+After=network-online.target sing-box.service
+Wants=network-online.target
+BindsTo=sing-box.service
+PartOf=sing-box.service
+
+[Service]
+Type=simple
+User=singdeck
+Group=singdeck
+WorkingDirectory=/opt/singdeck
+EnvironmentFile=-/etc/singdeck/helper.env
+ExecStart=/opt/singdeck/singdeck-helper
+Restart=on-failure
+RestartSec=3
+StateDirectory=singdeck
+
+[Install]
+WantedBy=sing-box.service
