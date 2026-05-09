@@ -63,6 +63,11 @@ const TRAFFIC_SPARKLINE_HEIGHT = 44;
 const DEFAULT_DELAY_TEST_TIMEOUT_MS = 5000;
 const STRATEGY_GROUP_ORDER_STORAGE_KEY = 'singdeck-strategy-group-order';
 
+type InlineStatus = {
+  tone: 'ok' | 'warn' | 'neutral';
+  text: string;
+};
+
 const sections = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard, navKey: 'O' },
   { id: 'proxies', label: 'Proxies', icon: GitBranch, navKey: 'P' },
@@ -516,6 +521,9 @@ export function App() {
   const [configQrUrl, setConfigQrUrl] = useState('');
   const [configQrDataUrl, setConfigQrDataUrl] = useState('');
   const [configQrCopied, setConfigQrCopied] = useState(false);
+  const [helperActionStatus, setHelperActionStatus] = useState<InlineStatus | null>(null);
+  const [helperPendingAction, setHelperPendingAction] = useState<string | null>(null);
+  const [localBehaviorStatus, setLocalBehaviorStatus] = useState<InlineStatus | null>(null);
   const [settingsTransferMessage, setSettingsTransferMessage] = useState('');
   const [collapsedStrategyGroups, setCollapsedStrategyGroups] = useState<Set<string>>(() => new Set());
   const [strategyGroupOrder, setStrategyGroupOrder] = useState<string[]>(readStrategyGroupOrder);
@@ -707,6 +715,7 @@ export function App() {
     [activeStrategyMembers, proxyQuery]
   );
   const helperServiceAvailable = Boolean(helper.health?.sqlite && !helper.error);
+  const helperActionBusy = Boolean(helperPendingAction) || helper.loading;
   const trafficModuleEnabled = Boolean(helper.trafficSettings?.enabled);
   const helperDefaultTestUrl = helper.testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
   const helperDelayTestTimeoutMs =
@@ -972,15 +981,93 @@ export function App() {
     chart.setOption(buildSankeyOption(topology), true);
   }, [activeRoute, topology]);
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const runHelperAction = async (action: string, pendingText: string, work: () => Promise<InlineStatus>) => {
+    setHelperPendingAction(action);
+    setHelperActionStatus({ tone: 'neutral', text: pendingText });
+    try {
+      setHelperActionStatus(await work());
+    } catch (error) {
+      setHelperActionStatus({
+        tone: 'warn',
+        text: error instanceof Error ? error.message : 'Helper action failed.'
+      });
+    } finally {
+      setHelperPendingAction(null);
+    }
+  };
+
+  const checkHelperWithFeedback = () =>
+    runHelperAction('check', 'Checking helper...', async () => {
+      await useHelperStore.getState().checkHealth();
+      const state = useHelperStore.getState();
+      if (state.error) {
+        return { tone: 'warn', text: state.error };
+      }
+      if (state.health?.mobileConfigUrl) {
+        return { tone: 'ok', text: `Helper ready. QR URL ${state.health.mobileConfigUrl}` };
+      }
+      return { tone: 'warn', text: 'Helper ready, but LAN QR URL is unavailable. Set SINGDECK_HELPER_PUBLIC_URL.' };
+    });
+
+  const syncControllerWithFeedback = () =>
+    runHelperAction('sync', 'Syncing controller...', async () => {
+      await useHelperStore.getState().syncController();
+      const state = useHelperStore.getState();
+      return state.error
+        ? { tone: 'warn', text: state.error }
+        : { tone: 'ok', text: 'Controller URL and secret saved to helper.' };
+    });
+
+  const saveConfigPathWithFeedback = () =>
+    runHelperAction('config', 'Saving config source...', async () => {
+      await useHelperStore.getState().saveConfigPath();
+      const state = useHelperStore.getState();
+      if (state.error) {
+        return { tone: 'warn', text: state.error };
+      }
+      return {
+        tone: 'ok',
+        text: state.configPath
+          ? `Config source saved: ${state.configPath}`
+          : 'Config override cleared. Helper will auto-detect the sing-box startup config.'
+      };
+    });
+
+  const saveTrafficWithFeedback = (enabled: boolean, browserProfile: string) =>
+    runHelperAction('traffic', enabled ? 'Saving and syncing traffic...' : 'Disabling provider traffic...', async () => {
+      await useHelperStore.getState().saveTrafficSettings({ enabled, browserProfile });
+      const state = useHelperStore.getState();
+      if (state.error) {
+        return { tone: 'warn', text: state.error };
+      }
+      if (!enabled) {
+        return { tone: 'ok', text: 'Provider traffic disabled.' };
+      }
+      if (state.trafficError) {
+        return { tone: 'warn', text: `Traffic profile saved, sync failed: ${state.trafficError}` };
+      }
+      return { tone: 'ok', text: 'Traffic profile saved and synced.' };
+    });
+
+  const saveLocalBehavior = async () => {
+    setLocalBehaviorStatus({ tone: 'neutral', text: 'Saving controller and test defaults...' });
     updateConfig(form);
     if (helperServiceAvailable) {
-      void helper.saveDelayTestTimeout(form.delayTestTimeoutMs ?? helperDelayTestTimeoutMs);
+      await useHelperStore.getState().saveDelayTestTimeout(form.delayTestTimeoutMs ?? helperDelayTestTimeoutMs);
     }
-    void detect().then(() => {
-      void runtime.refresh();
-    });
+    await detect();
+    await runtime.refresh();
+    const latestDetection = useControllerStore.getState().detection;
+    setLocalBehaviorStatus(
+      latestDetection?.ok
+        ? { tone: 'ok', text: 'Saved browser settings. Controller check passed.' }
+        : { tone: 'warn', text: latestDetection?.failure.detail ?? 'Saved browser settings. Controller check did not pass.' }
+    );
+  };
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void saveLocalBehavior();
   };
 
   const handleConfigFileLoad = (event: ChangeEvent<HTMLInputElement>) => {
@@ -1571,7 +1658,7 @@ export function App() {
                     <input
                       placeholder="/etc/sing-box/config.json"
                       value={helper.configPath}
-                      onBlur={() => void helper.saveConfigPath()}
+                      onBlur={() => void saveConfigPathWithFeedback()}
                       onChange={(event) => helper.updateSettings({ configPath: event.target.value })}
                     />
                   </label>
@@ -1580,10 +1667,10 @@ export function App() {
                       checked={trafficModuleEnabled}
                       type="checkbox"
                       onChange={(event) =>
-                        void helper.saveTrafficSettings({
-                          enabled: event.target.checked,
-                          browserProfile: trafficProfileDraft || helper.trafficSettings?.browserProfile || ''
-                        })
+                        void saveTrafficWithFeedback(
+                          event.target.checked,
+                          trafficProfileDraft || helper.trafficSettings?.browserProfile || ''
+                        )
                       }
                     />
                     <span className="automation-switch" aria-hidden="true" />
@@ -1599,32 +1686,48 @@ export function App() {
                       value={trafficProfileDraft}
                       onChange={(event) => setTrafficProfileDraft(event.target.value)}
                     />
+                    <small>Use the desktop Chrome profile that contains Cookies and Local Storage.</small>
                   </label>
                   <div className="helper-actions">
-                    <button className="ghost-action" disabled={helper.loading} onClick={helper.checkHealth} type="button">
-                      Check helper
-                    </button>
-                    <button className="ghost-action" disabled={helper.loading} onClick={helper.syncController} type="button">
-                      Sync controller
-                    </button>
-                    <button className="ghost-action" disabled={helper.loading} onClick={() => void helper.saveConfigPath()} type="button">
-                      Save config
+                    <button
+                      className="ghost-action"
+                      disabled={helperActionBusy}
+                      onClick={() => void checkHelperWithFeedback()}
+                      type="button"
+                    >
+                      {helperPendingAction === 'check' ? 'Checking...' : 'Check helper'}
                     </button>
                     <button
                       className="ghost-action"
-                      disabled={helper.loading}
-                      onClick={() =>
-                        void helper.saveTrafficSettings({
-                          enabled: trafficModuleEnabled,
-                          browserProfile: trafficProfileDraft
-                        })
-                      }
+                      disabled={helperActionBusy}
+                      onClick={() => void syncControllerWithFeedback()}
                       type="button"
                     >
-                      Save traffic
+                      {helperPendingAction === 'sync' ? 'Syncing...' : 'Sync controller'}
+                    </button>
+                    <button
+                      className="ghost-action"
+                      disabled={helperActionBusy}
+                      onClick={() => void saveConfigPathWithFeedback()}
+                      type="button"
+                    >
+                      {helperPendingAction === 'config' ? 'Saving...' : 'Save config'}
+                    </button>
+                    <button
+                      className="ghost-action"
+                      disabled={helperActionBusy}
+                      onClick={() => void saveTrafficWithFeedback(trafficModuleEnabled, trafficProfileDraft)}
+                      type="button"
+                    >
+                      {helperPendingAction === 'traffic' ? 'Saving...' : 'Save traffic'}
                     </button>
                   </div>
                 </div>
+                {helperActionStatus ? (
+                  <div className={`settings-inline-status ${helperActionStatus.tone}`}>
+                    {helperActionStatus.text}
+                  </div>
+                ) : null}
                 <div className="settings-note-grid compact-health">
                   {healthRow('SQLite', helper.health?.sqlite ? 'ready' : helper.error ? 'issue' : 'idle', helper.health?.sqlite ? 'ok' : helper.error ? 'warn' : 'neutral')}
                   {healthRow(
@@ -1732,7 +1835,7 @@ export function App() {
                   type="file"
                 />
                 {settingsTransferMessage ? (
-                  <div className="settings-inline-status">{settingsTransferMessage}</div>
+                  <div className="settings-inline-status ok">{settingsTransferMessage}</div>
                 ) : null}
               </article>
             </div>
@@ -1786,7 +1889,7 @@ export function App() {
             <article className="settings-card settings-wide">
               <div className="settings-card-head">
                 <h3>Local behavior</h3>
-                <span>current</span>
+                <span>browser settings</span>
               </div>
               <div className="settings-note-grid">
                 {healthRow('Security mode', 'local relaxed', 'blue')}
@@ -1795,9 +1898,19 @@ export function App() {
                 {healthRow('Test workers', String(form.delayTestConcurrency ?? 4), 'ok')}
                 {healthRow('Test timeout', `${form.delayTestTimeoutMs ?? helperDelayTestTimeoutMs} ms`, 'ok')}
               </div>
-              <button className="primary-action form-action" disabled={detecting} type="submit">
-                {detecting ? 'Checking...' : 'Save and check'}
-              </button>
+              <div className="settings-scope-note">
+                Saves controller URL, secret, note, test worker count, and test timeout in browser storage. If helper is ready, the timeout is mirrored to helper.
+              </div>
+              <div className="settings-save-row">
+                {localBehaviorStatus ? (
+                  <div className={`settings-inline-status ${localBehaviorStatus.tone}`}>
+                    {localBehaviorStatus.text}
+                  </div>
+                ) : null}
+                <button className="primary-action form-action" disabled={detecting} type="submit">
+                  {detecting ? 'Saving...' : 'Save controller settings'}
+                </button>
+              </div>
             </article>
           </form>
 

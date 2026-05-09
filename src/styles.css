@@ -2066,7 +2066,7 @@ h1 {
   min-width: 0;
 }
 
-.compact-form label span {
+.compact-form > label:not(.automation-option) > span:first-child {
   overflow: hidden;
   color: var(--muted);
   text-overflow: ellipsis;
@@ -2083,7 +2083,7 @@ h1 {
   background: rgba(7, 10, 11, 0.76);
 }
 
-.compact-form label small {
+.compact-form > label:not(.automation-option) > small {
   grid-column: 2;
   margin-top: -6px;
   color: var(--cyan);
@@ -2099,6 +2099,11 @@ h1 {
 .compact-form .settings-toggle {
   grid-column: 1 / -1;
   grid-template-columns: 34px minmax(0, 1fr);
+}
+
+.compact-form .settings-toggle small {
+  color: var(--muted);
+  line-height: 1.35;
 }
 
 .settings-note-grid {
@@ -2207,6 +2212,10 @@ h1 {
 
   .overview-widgets {
     grid-template-columns: 1fr;
+  }
+
+  .settings-save-row {
+    display: grid;
   }
 
   .traffic-widget {
@@ -3852,11 +3861,50 @@ body {
 .settings-inline-status {
   margin-top: 10px;
   padding: 8px 10px;
-  color: var(--green);
+  color: var(--muted);
   font-size: 12px;
-  border: 1px solid rgba(88, 216, 141, 0.22);
+  border: 1px solid rgba(135, 150, 146, 0.2);
   border-radius: 7px;
+  background: rgba(135, 150, 146, 0.06);
+}
+
+.settings-inline-status.ok {
+  color: var(--green);
+  border-color: rgba(88, 216, 141, 0.22);
   background: rgba(88, 216, 141, 0.06);
+}
+
+.settings-inline-status.warn {
+  color: var(--amber);
+  border-color: rgba(255, 191, 105, 0.22);
+  background: rgba(255, 191, 105, 0.06);
+}
+
+.settings-inline-status.neutral {
+  color: var(--muted);
+}
+
+.settings-scope-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-save-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-save-row .settings-inline-status {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.settings-save-row .form-action {
+  flex: 0 0 auto;
 }
 
 /* Layout repair: keep proxy rows compact and sidebar runtime widgets anchored. */
@@ -4679,13 +4727,14 @@ body {
   display: grid;
   gap: 3px;
   min-width: 0;
+  overflow: visible;
 }
 
 .automation-option strong,
 .automation-option small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .automation-option strong {
@@ -4696,6 +4745,7 @@ body {
 .automation-option small {
   color: var(--muted);
   font-size: 10px;
+  line-height: 1.35;
 }
 
 .automation-switch {

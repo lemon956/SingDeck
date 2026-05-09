@@ -1758,7 +1758,7 @@ fn mobile_config_url_for_bind(bind: &str, lan_ip: Option<String>) -> Option<Stri
     let host = if ip.is_unspecified() {
         lan_ip?
     } else if ip.is_loopback() {
-        return None;
+        lan_ip?
     } else {
         format_host(ip)
     };
@@ -2254,6 +2254,10 @@ mod tests {
         );
         assert_eq!(
             mobile_config_url_for_bind("0.0.0.0:9531", Some("10.0.0.12".to_string())),
+            Some("http://10.0.0.12:9531/api/v1/config/raw".to_string())
+        );
+        assert_eq!(
+            mobile_config_url_for_bind("127.0.0.1:9531", Some("10.0.0.12".to_string())),
             Some("http://10.0.0.12:9531/api/v1/config/raw".to_string())
         );
         assert_eq!(mobile_config_url_for_bind("127.0.0.1:9531", None), None);
