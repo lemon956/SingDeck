@@ -178,6 +178,53 @@ describe('helper store', () => {
     });
   });
 
+  it('syncs provider traffic immediately after enabling the module', async () => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        requests.push(url);
+        if (url.endsWith('/api/v1/settings/traffic')) {
+          return jsonResponse(JSON.parse(String(init?.body)));
+        }
+        if (url.endsWith('/api/v1/traffic')) {
+          return jsonResponse({
+            providers: [
+              {
+                id: 'haita',
+                name: 'Haita',
+                homepage: 'https://haita.io/dashboard',
+                planName: null,
+                usedUploadBytes: null,
+                usedDownloadBytes: null,
+                usedTotalBytes: null,
+                totalBytes: null,
+                remainingBytes: null,
+                usedRatio: null,
+                expireAt: null,
+                resetDay: null,
+                fetchedAt: '2026-05-09T15:30:00+08:00',
+                error: 'cookie missing'
+              }
+            ],
+            updatedAt: '2026-05-09T15:30:00+08:00',
+            profile: '/home/alice/.config/google-chrome/Default'
+          });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().saveTrafficSettings({
+      enabled: true,
+      browserProfile: '/home/alice/.config/google-chrome/Default'
+    });
+
+    expect(requests.some((url) => url.endsWith('/api/v1/traffic'))).toBe(true);
+    expect(useHelperStore.getState().traffic?.providers[0]?.name).toBe('Haita');
+  });
+
   it('saves config path through the helper API', async () => {
     const requests: Array<{ url: string; body: unknown }> = [];
     vi.stubGlobal(

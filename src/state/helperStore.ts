@@ -177,6 +177,9 @@ export const useHelperStore = create<HelperState>()(
         try {
           const trafficSettings = await client().putJson<HelperTrafficSettings>('/api/v1/settings/traffic', settings);
           set({ trafficSettings, traffic: trafficSettings.enabled ? get().traffic : null, trafficError: null, error: null });
+          if (trafficSettings.enabled) {
+            await get().loadTraffic();
+          }
         } catch (error) {
           set({ error: formatHelperError(error) });
         }

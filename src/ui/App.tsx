@@ -16,6 +16,7 @@ import {
   X
 } from 'lucide-react';
 import QRCode from 'qrcode';
+import { isLoopbackUrl, resolveConfigDownloadUrl } from '../core/configDownloadUrl';
 import { routeFromHash, type AppRoute } from '../core/navigation';
 import { summarizeTrafficProvider } from '../core/traffic';
 import { describeProbeActivity } from '../core/probeActivity';
@@ -301,34 +302,6 @@ function fallbackGroupConfig(testUrl: string): HelperGroupConfig {
     autoProbe: true,
     probeIntervalSec: 15 * 60
   };
-}
-
-function isLoopbackHost(hostname: string): boolean {
-  const host = hostname.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.startsWith('127.');
-}
-
-function isLoopbackUrl(value: string): boolean {
-  try {
-    return isLoopbackHost(new URL(value).hostname);
-  } catch {
-    return false;
-  }
-}
-
-function buildConfigDownloadUrl(helperUrl: string, pageHostname: string): string {
-  try {
-    const url = new URL(helperUrl);
-    if (isLoopbackHost(url.hostname) && pageHostname && !isLoopbackHost(pageHostname)) {
-      url.hostname = pageHostname;
-    }
-    url.pathname = '/api/v1/config/raw';
-    url.search = '';
-    url.hash = '';
-    return url.toString();
-  } catch {
-    return '';
-  }
 }
 
 function downloadTextFile(filename: string, content: string) {
@@ -738,10 +711,8 @@ export function App() {
   const helperDefaultTestUrl = helper.testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
   const helperDelayTestTimeoutMs =
     helper.testingSettings?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? DEFAULT_DELAY_TEST_TIMEOUT_MS;
-  const helperConfigDownloadUrl =
-    helper.health?.mobileConfigUrl ?? buildConfigDownloadUrl(helper.helperUrl, window.location.hostname);
   const singBoxRemoteProfileUri = buildSingBoxRemoteProfileUri(configQrUrl, 'SingDeck');
-  const configQrUrlIsLocalOnly = isLoopbackUrl(configQrUrl);
+  const configQrUrlNeedsLan = !configQrUrl.trim() || isLoopbackUrl(configQrUrl);
   const helperGroupByName = useMemo(() => new Map(helper.groups.map((group) => [group.name, group])), [helper.groups]);
   const activeHelperGroup = activeStrategyGroup ? helperGroupByName.get(activeStrategyGroup.name) : undefined;
   const activeHelperScores = activeStrategyGroup ? helper.scoresByGroup[activeStrategyGroup.name] : undefined;
@@ -1067,7 +1038,14 @@ export function App() {
 
   const openConfigQr = async () => {
     await helper.saveConfigPath();
-    setConfigQrUrl(helperConfigDownloadUrl);
+    await helper.checkHealth();
+    const liveHelper = useHelperStore.getState();
+    const nextUrl = resolveConfigDownloadUrl({
+      helperUrl: liveHelper.helperUrl,
+      mobileConfigUrl: liveHelper.health?.mobileConfigUrl,
+      pageHostname: window.location.hostname
+    });
+    setConfigQrUrl(nextUrl && !isLoopbackUrl(nextUrl) ? nextUrl : '');
     setConfigQrOpen(true);
   };
 
@@ -1342,7 +1320,7 @@ export function App() {
               <div className="qr-head">
                 <div className="qr-title">
                   <strong>Config QR</strong>
-                  <span>{configQrUrlIsLocalOnly ? 'LAN helper URL required' : 'Remote profile import'}</span>
+                  <span>{configQrUrlNeedsLan ? 'LAN helper URL required' : 'Remote profile import'}</span>
                 </div>
                 <button
                   aria-label="Close config QR"
@@ -1354,8 +1332,8 @@ export function App() {
                 </button>
               </div>
               <div className="qr-body">
-                <div className={`qr-code-box ${configQrUrlIsLocalOnly ? 'blocked' : ''}`}>
-                  {configQrUrlIsLocalOnly ? (
+                <div className={`qr-code-box ${configQrUrlNeedsLan ? 'blocked' : ''}`}>
+                  {configQrUrlNeedsLan ? (
                     <span className="qr-code-hint">LAN helper URL required</span>
                   ) : configQrDataUrl ? (
                     <img src={configQrDataUrl} alt="sing-box config download QR" />
@@ -1364,14 +1342,14 @@ export function App() {
                   )}
                 </div>
                 <div className="qr-meta">
-                  <div className={`qr-state ${configQrUrlIsLocalOnly ? 'warn' : 'ok'}`}>
+                  <div className={`qr-state ${configQrUrlNeedsLan ? 'warn' : 'ok'}`}>
                     <span aria-hidden="true" />
-                    {configQrUrlIsLocalOnly ? 'Needs LAN URL' : 'Ready to scan'}
+                    {configQrUrlNeedsLan ? 'Needs LAN URL' : 'Ready to scan'}
                   </div>
                   <label className="qr-url-field">
                     <span>Download URL</span>
                     <input value={configQrUrl} onChange={(event) => setConfigQrUrl(event.target.value)} />
-                    {configQrUrlIsLocalOnly ? <small>Replace localhost with the helper machine LAN address.</small> : null}
+                    {configQrUrlNeedsLan ? <small>Use the helper machine LAN address or SINGDECK_HELPER_PUBLIC_URL.</small> : null}
                   </label>
                   <button
                     className="ghost-action compact-icon-action qr-copy"
