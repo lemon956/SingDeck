@@ -49,10 +49,14 @@ jobs:
       - name: Package release assets
         run: |
           tag_name="${GITHUB_REF_NAME//\//-}"
+          web_dir="singdeck-web-${tag_name}"
           mkdir -p release-artifacts
-          tar -czf "release-artifacts/singdeck-web-${tag_name}.tar.gz" -C dist .
+          mkdir -p "release-staging/${web_dir}"
+          cp -R dist/. "release-staging/${web_dir}/"
+          tar -czf "release-artifacts/${web_dir}.tar.gz" -C release-staging "${web_dir}"
           tar -czf "release-artifacts/singdeck-systemd-${tag_name}.tar.gz" -C deploy systemd
           cp helper/target/release/singdeck-helper "release-artifacts/singdeck-helper-linux-x86_64-${tag_name}"
+          rm -rf release-staging
           (cd release-artifacts && sha256sum * > SHA256SUMS)
 
       - name: Create or update GitHub Release
