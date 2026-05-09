@@ -18,6 +18,7 @@ type ProxyState = {
   query: string;
   groupTestUrls: Record<string, string>;
   nodeTestUrls: Record<string, string>;
+  groupDelayResults: Record<string, number>;
   testingProxies: string[];
   testingAllNodes: boolean;
   loading: boolean;
@@ -41,6 +42,7 @@ export const useProxyStore = create<ProxyState>()(
       query: '',
       groupTestUrls: {},
       nodeTestUrls: {},
+      groupDelayResults: {},
       testingProxies: [],
       testingAllNodes: false,
       loading: false,
@@ -67,6 +69,7 @@ export const useProxyStore = create<ProxyState>()(
           const response = await client.getJson<ProxiesResponse>('/proxies');
           set({
             proxies: normalizeProxiesResponse(response),
+            groupDelayResults: {},
             loading: false,
             lastUpdatedAt: new Date().toISOString()
           });
@@ -130,12 +133,21 @@ export const useProxyStore = create<ProxyState>()(
         }));
 
         try {
+          let response: unknown;
           try {
-            await client.getJson(buildProxyGroupDelayPath(group, { timeout, url }));
+            response = await client.getJson(buildProxyGroupDelayPath(group, { timeout, url }));
           } catch {
-            await client.getJson(buildProxyDelayPath(group, { timeout, url }));
+            response = await client.getJson(buildProxyDelayPath(group, { timeout, url }));
           }
-          await get().refresh();
+          const delay = nativeGroupDelayFromResponse(response, group, get().proxies);
+          if (typeof delay === 'number') {
+            set((current) => ({
+              groupDelayResults: {
+                ...current.groupDelayResults,
+                [group]: delay
+              }
+            }));
+          }
         } catch (error) {
           set({ error: `Native URLTest refresh failed for ${group}: ${formatProxyError(error)}` });
         } finally {
@@ -271,6 +283,33 @@ async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T
 
 function proxyMapFrom(proxies: ProxyRecord[]): Map<string, ProxyRecord> {
   return new Map(proxies.map((proxy) => [proxy.name, proxy]));
+}
+
+function nativeGroupDelayFromResponse(response: unknown, group: string, proxies: ProxyRecord[]): number | null {
+  if (typeof response === 'number') {
+    return response;
+  }
+  if (!response || typeof response !== 'object') {
+    return null;
+  }
+
+  const values = response as Record<string, unknown>;
+  if (typeof values.delay === 'number') {
+    return values.delay;
+  }
+
+  const proxyMap = proxyMapFrom(proxies);
+  const groupProxy = proxyMap.get(group);
+  const candidates = [groupProxy?.now, groupProxy?.now ? resolveNowProxyName(groupProxy.now, proxyMap) : undefined, group]
+    .filter((value): value is string => Boolean(value));
+  for (const candidate of candidates) {
+    if (typeof values[candidate] === 'number') {
+      return values[candidate] as number;
+    }
+  }
+
+  const numericValues = Object.values(values).filter((value): value is number => typeof value === 'number');
+  return numericValues.length > 0 ? Math.min(...numericValues) : null;
 }
 
 function formatProxyError(error: unknown): string {

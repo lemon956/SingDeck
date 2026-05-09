@@ -742,13 +742,16 @@ export function App() {
       activeProbeExecution?.mode === 'native-urltest' &&
       proxies.testingProxies.includes(activeStrategyGroup.name)
   );
-  const activeSelectedDelay = activeStrategyGroup
-    ? proxyDelayByName.get(activeStrategyGroup.now) ?? activeStrategyGroup.delay
-    : null;
   const activeSelectedScore =
-    activeProbeExecution?.mode === 'helper-score' && activeStrategyGroup
+    activeProbeExecution?.mode !== 'native-urltest' && activeStrategyGroup
       ? activeHelperScoreByName.get(activeStrategyGroup.now)
       : undefined;
+  const activeSelectedDelay = activeStrategyGroup
+    ? activeSelectedScore?.delayMs ??
+      proxies.groupDelayResults[activeStrategyGroup.name] ??
+      proxyDelayByName.get(activeStrategyGroup.now) ??
+      activeStrategyGroup.delay
+    : null;
   const activeInspectorModel = buildProxyInspectorModel({
     group: activeStrategyGroup,
     config: activeGroupConfig,
@@ -1099,8 +1102,6 @@ export function App() {
     }
 
     await useHelperStore.getState().probeGroup(group.name, config.delayTestConcurrency ?? 4);
-    await proxies.refresh();
-    await useHelperStore.getState().loadGroups();
   };
 
   const runGroupDelayOrProbe = async (group: ProxyRecord | null) => {
@@ -1970,8 +1971,8 @@ export function App() {
                   const execution = resolveProbeExecution(proxy, rowConfig.mode);
                   const groupScores = helper.scoresByGroup[proxy.name]?.nodes ?? [];
                   const groupScoreByName = new Map(groupScores.map((score) => [score.name, score]));
-                  const selectedScore = execution.mode === 'helper-score' ? groupScoreByName.get(proxy.now) : undefined;
-                  const selectedDelayValue = selectedScore?.delayMs ?? selectedDelay;
+                  const selectedScore = execution.mode !== 'native-urltest' ? groupScoreByName.get(proxy.now) : undefined;
+                  const selectedDelayValue = selectedScore?.delayMs ?? proxies.groupDelayResults[proxy.name] ?? selectedDelay;
                   const selectedScoreTone = selectedScore ? nodeScoreTone(selectedScore, selectedDelay) : 'none';
                   const selectedDelayTone = delayTone(selectedDelayValue);
                   const isProbing = helper.probingGroups.includes(proxy.name);

@@ -34,6 +34,7 @@ describe('proxy store latency tests', () => {
       ],
       groupTestUrls: {},
       nodeTestUrls: {},
+      groupDelayResults: {},
       testingProxies: [],
       testingAllNodes: false,
       loading: false,
@@ -84,6 +85,39 @@ describe('proxy store latency tests', () => {
     expect(urls[0]).toBe(
       `http://controller.local/group/Auto/delay?timeout=10000&url=${encodeURIComponent(CONFIGURED_TEST_URL)}`
     );
+  });
+
+  it('keeps native group latency scoped to the tested group', async () => {
+    const urls: string[] = [];
+    useProxyStore.setState({
+      proxies: [
+        { name: 'Auto', type: 'URLTest', now: 'hk-1', all: ['hk-1', 'jp-1'], delay: 90 },
+        { name: 'Other', type: 'Selector', now: 'jp-1', all: ['hk-1', 'jp-1'], delay: 120 },
+        { name: 'hk-1', type: 'Trojan', now: '', all: [], delay: 48 },
+        { name: 'jp-1', type: 'Trojan', now: '', all: [], delay: 88 }
+      ],
+      groupDelayResults: { Other: 777 }
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.endsWith('/proxies')) {
+          return new Response('unexpected full refresh', { status: 500 });
+        }
+        return jsonResponse({ 'hk-1': 52, 'jp-1': 86 });
+      })
+    );
+
+    await useProxyStore.getState().testNativeGroupDelay('Auto');
+
+    expect(urls.some((url) => url.endsWith('/proxies'))).toBe(false);
+    expect(useProxyStore.getState().groupDelayResults).toEqual({
+      Auto: 52,
+      Other: 777
+    });
+    expect(useProxyStore.getState().proxies.find((proxy) => proxy.name === 'Other')?.delay).toBe(120);
   });
 
 });
