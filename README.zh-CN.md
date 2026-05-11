@@ -185,7 +185,7 @@ Provider Traffic 是可选模块，默认关闭。需要使用时，在 Settings
 /home/alice/.config/google-chrome/Default
 ```
 
-helper 只会使用 Settings 中保存的 Chrome profile 路径，不会自动识别，也不会默认使用当前用户的 Chrome profile。helper 会读取该目录下由 Chrome 创建的 `Cookies` 或 `Network/Cookies` SQLite 数据库，以及 `Local Storage/leveldb`。这个目录是 Chrome 生成的，不是 SingDeck 生成的。如果 helper 以 `singdeck` 系统用户运行，通常无法读取桌面用户的 Chrome profile，也无法通过该用户的 keyring 解密 cookie。要使用这个模块，建议让 helper 以拥有 Chrome profile 的同一个桌面用户运行，或指向一个 helper 可读取的 profile 目录。
+helper 只会使用 Settings 中保存的 Chrome profile 路径，不会自动识别，也不会默认使用当前用户的 Chrome profile。helper 会读取该目录下由 Chrome 创建的 `Cookies` 或 `Network/Cookies` SQLite 数据库，以及 `Local Storage/leveldb`。这个目录是 Chrome 生成的，不是 SingDeck 生成的。对于加密的 Chrome cookie，helper 会使用 `secret-tool`；当 helper 以 root 运行时，也会尝试通过 Chrome profile 所属用户的 DBus keyring 会话读取密钥。请保持桌面用户 keyring 已解锁，并在缺少 `secret-tool` 时安装 libsecret 工具包。
 
 ## 校验
 

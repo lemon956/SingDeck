@@ -185,7 +185,7 @@ Provider Traffic is optional and is disabled by default. Enable it in Settings, 
 /home/alice/.config/google-chrome/Default
 ```
 
-The helper only uses the Chrome profile path saved in Settings; it does not auto-detect or default to the current user's Chrome profile. It reads Chrome's `Cookies` or `Network/Cookies` SQLite database and `Local Storage/leveldb` under that directory. The directory is created by Chrome, not by SingDeck. If the helper runs as the `singdeck` system user, it cannot usually read a desktop user's Chrome profile or decrypt cookies through that user's keyring. For this module, either run the helper as the same desktop user that owns the Chrome profile, or point it at a readable profile directory.
+The helper only uses the Chrome profile path saved in Settings; it does not auto-detect or default to the current user's Chrome profile. It reads Chrome's `Cookies` or `Network/Cookies` SQLite database and `Local Storage/leveldb` under that directory. The directory is created by Chrome, not by SingDeck. For encrypted Chrome cookies, the helper uses `secret-tool`; when the helper runs as root, it also tries the Chrome profile owner's DBus keyring session. Keep the desktop user's keyring unlocked, and install the libsecret tools package if `secret-tool` is unavailable.
 
 ## Verification
 

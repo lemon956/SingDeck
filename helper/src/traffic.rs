@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::{fs::MetadataExt, process::CommandExt};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -309,7 +311,7 @@ pub fn read_chrome_cookie(profile: &Path, host_key: &str, name: &str) -> Result<
         return Ok(value);
     }
 
-    let secret = chrome_linux_secret()?;
+    let secret = chrome_linux_secret(profile)?;
     decrypt_chrome_linux_cookie_with_secret(&actual_host_key, &encrypted_value, &secret)
 }
 
@@ -434,7 +436,61 @@ fn open_copied_cookies_db(path: &Path) -> Result<Connection> {
     Connection::open_with_flags(copy_path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(Into::into)
 }
 
-fn chrome_linux_secret() -> Result<Vec<u8>> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SecretToolContext {
+    uid: Option<u32>,
+    gid: Option<u32>,
+    envs: Vec<(String, String)>,
+}
+
+impl SecretToolContext {
+    fn current() -> Self {
+        Self {
+            uid: None,
+            gid: None,
+            envs: Vec::new(),
+        }
+    }
+
+    fn apply(&self, command: &mut Command) {
+        for (key, value) in &self.envs {
+            command.env(key, value);
+        }
+        #[cfg(unix)]
+        {
+            if let Some(gid) = self.gid {
+                command.gid(gid);
+            }
+            if let Some(uid) = self.uid {
+                command.uid(uid);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn chrome_profile_owner_secret_context(profile: &Path) -> Option<SecretToolContext> {
+    let metadata = fs::metadata(profile).ok()?;
+    let uid = metadata.uid();
+    Some(SecretToolContext {
+        uid: Some(uid),
+        gid: Some(metadata.gid()),
+        envs: vec![
+            ("XDG_RUNTIME_DIR".to_string(), format!("/run/user/{uid}")),
+            (
+                "DBUS_SESSION_BUS_ADDRESS".to_string(),
+                format!("unix:path=/run/user/{uid}/bus"),
+            ),
+        ],
+    })
+}
+
+#[cfg(not(unix))]
+fn chrome_profile_owner_secret_context(_profile: &Path) -> Option<SecretToolContext> {
+    None
+}
+
+fn chrome_linux_secret(profile: &Path) -> Result<Vec<u8>> {
     let lookups: &[&[&str]] = &[
         &["lookup", "application", "chrome"],
         &["lookup", "application", "chromium"],
@@ -444,27 +500,38 @@ fn chrome_linux_secret() -> Result<Vec<u8>> {
             "chrome_libsecret_os_crypt_password_v2",
         ],
     ];
-
-    for args in lookups {
-        let output = Command::new("secret-tool").args(*args).output();
-        let Ok(output) = output else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
+    let mut contexts = vec![SecretToolContext::current()];
+    if let Some(context) = chrome_profile_owner_secret_context(profile) {
+        if !contexts.contains(&context) {
+            contexts.push(context);
         }
+    }
 
-        let mut secret = output.stdout;
-        while matches!(secret.last(), Some(b'\n' | b'\r')) {
-            secret.pop();
-        }
-        if !secret.is_empty() {
-            return Ok(secret);
+    for context in contexts {
+        for args in lookups {
+            let mut command = Command::new("secret-tool");
+            command.args(*args);
+            context.apply(&mut command);
+            let output = command.output();
+            let Ok(output) = output else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+
+            let mut secret = output.stdout;
+            while matches!(secret.last(), Some(b'\n' | b'\r')) {
+                secret.pop();
+            }
+            if !secret.is_empty() {
+                return Ok(secret);
+            }
         }
     }
 
     Err(anyhow!(
-        "Chrome cookie key not available from secret-tool; install libsecret tools or unlock keyring"
+        "Chrome cookie key not available from secret-tool; install libsecret tools or unlock the Chrome profile owner's keyring"
     ))
 }
 
@@ -699,6 +766,31 @@ mod tests {
         let decrypted = decrypt_chrome_linux_cookie_with_secret(host, &encrypted, secret).unwrap();
 
         assert_eq!(decrypted, "browser-cookie-value");
+    }
+
+    #[test]
+    fn chrome_secret_context_uses_profile_owner_runtime_bus() {
+        let profile = tempfile::tempdir().unwrap();
+        let context = chrome_profile_owner_secret_context(profile.path()).unwrap();
+        let metadata = fs::metadata(profile.path()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let uid = metadata.uid();
+            assert_eq!(context.uid, Some(uid));
+            assert_eq!(context.gid, Some(metadata.gid()));
+            assert_eq!(
+                context.envs,
+                vec![
+                    ("XDG_RUNTIME_DIR".to_string(), format!("/run/user/{uid}")),
+                    (
+                        "DBUS_SESSION_BUS_ADDRESS".to_string(),
+                        format!("unix:path=/run/user/{uid}/bus")
+                    ),
+                ]
+            );
+        }
     }
 
     #[test]
