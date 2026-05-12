@@ -4440,7 +4440,7 @@ body {
 
 .strategy-node-card.strategy-node-tile .node-line {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 7px;
   align-items: start;
   min-height: 31px;
@@ -4463,6 +4463,7 @@ body {
   min-width: 52px;
   min-height: 22px;
   padding: 0 7px;
+  flex: 0 0 auto;
   cursor: pointer;
 }
 
@@ -4484,6 +4485,10 @@ body {
 
 .strategy-node-card.strategy-node-tile .node-foot {
   min-height: 22px;
+}
+
+.strategy-node-card.strategy-node-tile .node-foot .delay-pill {
+  justify-self: end;
 }
 
 .score-mark {

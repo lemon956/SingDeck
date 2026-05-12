@@ -297,6 +297,17 @@ function formatScoreTooltip(score: HelperNodeScore): string {
   return parts.join(' / ');
 }
 
+function latestScoreUpdateAt(scores: HelperNodeScore[]): Date | null {
+  const timestamps = scores
+    .map((score) => (score.lastTestedAt ? Date.parse(score.lastTestedAt) : Number.NaN))
+    .filter(Number.isFinite);
+  if (timestamps.length === 0) {
+    return null;
+  }
+
+  return new Date(Math.max(...timestamps));
+}
+
 function fallbackGroupConfig(testUrl: string): HelperGroupConfig {
   return {
     testUrl,
@@ -1967,6 +1978,7 @@ export function App() {
                   const rowConfig = helperGroup?.config ?? fallbackGroupConfig(proxies.groupTestUrls[proxy.name] || helperDefaultTestUrl);
                   const execution = resolveProbeExecution(proxy, rowConfig.mode);
                   const groupScores = helper.scoresByGroup[proxy.name]?.nodes ?? [];
+                  const latestGroupUpdate = latestScoreUpdateAt(groupScores);
                   const groupScoreByName = new Map(groupScores.map((score) => [score.name, score]));
                   const selectedScore = execution.mode !== 'native-urltest' ? groupScoreByName.get(proxy.now) : undefined;
                   const selectedDelayValue = selectedScore?.delayMs ?? proxies.groupDelayResults[proxy.name] ?? selectedDelay;
@@ -2035,7 +2047,10 @@ export function App() {
                       >
                         <div className="strategy-card-title">
                           <strong>{proxy.name}</strong>
-                          <span>{proxy.type} · {proxy.all.length} nodes</span>
+                          <span title={latestGroupUpdate ? `Updated ${latestGroupUpdate.toLocaleString()}` : undefined}>
+                            {proxy.type} · {proxy.all.length} nodes
+                            {latestGroupUpdate ? ` · updated ${latestGroupUpdate.toLocaleTimeString()}` : ''}
+                          </span>
                         </div>
                         <div className="strategy-card-current">
                           <span>Current</span>
@@ -2165,17 +2180,6 @@ export function App() {
                                   <strong>{member.name}</strong>
                                   <span>{member.type} / {proxy.name}</span>
                                 </div>
-                                <button
-                                  aria-label={`Test ${member.name} delay`}
-                                  className={`delay-pill ${nodeDelayTone} ${isTesting ? 'testing' : ''}`}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    void proxies.testProxy(member.name, proxy.name, rowConfig.testUrl);
-                                  }}
-                                  type="button"
-                                >
-                                  {isTesting ? '...' : formatDelay(nodeDelay)}
-                                </button>
                               </div>
                               <div className="node-foot">
                                 <span className="node-meta">
@@ -2193,9 +2197,19 @@ export function App() {
                                   ) : (
                                     <span className={`node-status-dot ${nodeDelayTone}`} />
                                   )}
-                                  <span>{score?.lastTestedAt ? new Date(score.lastTestedAt).toLocaleTimeString() : member.type}</span>
+                                  <span>{member.type}</span>
                                 </span>
-                                <span className={`tag ${isCurrent ? 'ok' : ''}`}>{isCurrent ? 'active' : 'standby'}</span>
+                                <button
+                                  aria-label={`Test ${member.name} delay`}
+                                  className={`delay-pill ${nodeDelayTone} ${isTesting ? 'testing' : ''}`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void proxies.testProxy(member.name, proxy.name, rowConfig.testUrl);
+                                  }}
+                                  type="button"
+                                >
+                                  {isTesting ? '...' : formatDelay(nodeDelay)}
+                                </button>
                               </div>
                             </article>
                           );
