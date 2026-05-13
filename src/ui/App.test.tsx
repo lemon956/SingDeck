@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useControllerStore } from '../state/controllerStore';
 import { useHelperStore } from '../state/helperStore';
@@ -162,5 +162,85 @@ describe('App proxy workspace', () => {
     expect(groupTitle).not.toBeNull();
     expect(within(groupTitle as HTMLElement).getByText(new RegExp(`updated ${latestLabel}`))).toBeInTheDocument();
     expect(nodeCards.some((node) => within(node as HTMLElement).queryByText(latestLabel))).toBe(false);
+  });
+
+  it('refreshes proxy state after helper auto switch applies a probe result', async () => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        requests.push(url);
+        if (url.endsWith('/api/v1/groups/select/probe')) {
+          return new Response(
+            JSON.stringify({
+              group: 'select',
+              mode: 'score',
+              scheme: 'Balanced',
+              testUrl: groupConfig.testUrl,
+              recommended: 'jp-1',
+              applyError: null,
+              nodes: [
+                {
+                  name: 'jp-1',
+                  score: 95,
+                  delayMs: 42,
+                  components: { latency: 100, availability: 100, jitter: 100, freshness: 100 },
+                  lastTestedAt: '2026-05-13T08:00:00.000Z',
+                  error: null
+                }
+              ]
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        if (url.endsWith('/proxies')) {
+          return new Response(
+            JSON.stringify({
+              proxies: {
+                select: { type: 'Selector', now: 'jp-1', all: ['hk-1', 'jp-1'], history: [{ delay: 42 }] },
+                'hk-1': { type: 'Trojan', history: [{ delay: 48 }] },
+                'jp-1': { type: 'Trojan', history: [{ delay: 42 }] }
+              }
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+    useControllerStore.setState({
+      config: {
+        controllerUrl: 'http://controller.local',
+        secret: '',
+        defaultTestUrl: 'https://cp.cloudflare.com/generate_204',
+        delayTestConcurrency: 4,
+        delayTestTimeoutMs: 5000
+      },
+      detection: {
+        ok: false,
+        failure: { kind: 'network', title: 'offline', detail: 'test keeps automatic effects idle' }
+      },
+      detecting: false,
+      lastCheckedAt: null,
+      urlSecretWarning: false
+    });
+    useHelperStore.setState((state) => ({
+      groups: state.groups.map((group) =>
+        group.name === 'select'
+          ? { ...group, config: { ...group.config, autoSwitch: true } }
+          : group
+      )
+    }));
+
+    const { container } = render(<App />);
+    const currentNode = container.querySelector('.strategy-card-current strong');
+
+    expect(currentNode?.textContent).toBe('hk-1');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run score' }));
+
+    await waitFor(() => expect(currentNode?.textContent).toBe('jp-1'));
+    expect(requests.some((url) => url.endsWith('/proxies'))).toBe(true);
   });
 });

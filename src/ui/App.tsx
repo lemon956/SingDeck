@@ -1112,7 +1112,14 @@ export function App() {
       return;
     }
 
+    const helperGroup = helperGroupByName.get(group.name);
+    const rowConfig = helperGroup?.config ?? fallbackGroupConfig(proxies.groupTestUrls[group.name] || helperDefaultTestUrl);
     await useHelperStore.getState().probeGroup(group.name, config.delayTestConcurrency ?? 4);
+    const probeResult = useHelperStore.getState().scoresByGroup[group.name];
+    if (rowConfig.autoSwitch && isSelectableProxyGroup(group) && probeResult?.applyError === null) {
+      await useProxyStore.getState().refresh();
+      await useHelperStore.getState().loadGroups();
+    }
   };
 
   const runGroupDelayOrProbe = async (group: ProxyRecord | null) => {
