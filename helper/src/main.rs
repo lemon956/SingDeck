@@ -28,7 +28,6 @@ const DEFAULT_TEST_URL: &str = "https://cp.cloudflare.com/generate_204";
 const DEFAULT_DELAY_TEST_TIMEOUT_MS: i64 = 5000;
 const MIN_DELAY_TEST_TIMEOUT_MS: i64 = 500;
 const MAX_DELAY_TEST_TIMEOUT_MS: i64 = 60_000;
-const SCORE_WINDOW_MS: i64 = 10 * 60 * 1000;
 const DEFAULT_PROBE_INTERVAL_SEC: i64 = 15 * 60;
 const MIN_PROBE_INTERVAL_SEC: i64 = 60;
 const MAX_PROBE_INTERVAL_SEC: i64 = 24 * 60 * 60;
@@ -1481,7 +1480,13 @@ fn compute_scores_for_group(
     let mut scores = nodes
         .iter()
         .map(|node| {
-            let samples = load_recent_samples(state, group, node, &config.test_url)?;
+            let samples = load_recent_samples(
+                state,
+                group,
+                node,
+                &config.test_url,
+                score_sample_window_ms(config),
+            )?;
             Ok(score_node(node, &samples, config))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1518,8 +1523,9 @@ fn load_recent_samples(
     group: &str,
     node: &str,
     test_url: &str,
+    window_ms: i64,
 ) -> Result<Vec<Sample>> {
-    let window_start = now_ms() - SCORE_WINDOW_MS;
+    let window_start = now_ms() - window_ms;
     let db = state
         .db
         .lock()
@@ -1541,6 +1547,10 @@ fn load_recent_samples(
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn score_sample_window_ms(config: &GroupConfig) -> i64 {
+    normalize_probe_interval(config.probe_interval_sec) * 1000
 }
 
 fn score_node(name: &str, samples: &[Sample], config: &GroupConfig) -> NodeScore {
@@ -1928,6 +1938,40 @@ mod tests {
         assert_eq!(score.name, "hk");
         assert!(score.score > 80.0);
         assert_eq!(score.delay_ms, Some(120));
+    }
+
+    #[test]
+    fn score_sample_window_follows_probe_interval() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let config = GroupConfig {
+            test_url: "https://latency.example.test".to_string(),
+            probe_interval_sec: 15 * 60,
+            ..GroupConfig::default()
+        };
+        save_probe_sample(
+            &state,
+            "select",
+            "hk",
+            &config.test_url,
+            Some(120),
+            true,
+            None,
+            now_ms() - 11 * 60 * 1000,
+        )
+        .unwrap();
+
+        let scores =
+            compute_scores_for_group(&state, "select", &["hk".to_string()], &config).unwrap();
+
+        assert_eq!(scores[0].delay_ms, Some(120));
+        assert!(scores[0].score > 0.0);
     }
 
     #[test]
