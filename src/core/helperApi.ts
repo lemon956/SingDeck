@@ -55,6 +55,15 @@ export type HelperGroupsResponse = {
   groups: HelperGroup[];
 };
 
+export type HelperActiveProbe = {
+  group: string;
+  startedAt: string;
+};
+
+export type HelperProbeStatusResponse = {
+  groups: HelperActiveProbe[];
+};
+
 export type HelperScoreComponents = {
   latency: number;
   availability: number;

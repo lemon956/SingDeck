@@ -4205,6 +4205,7 @@ body {
 }
 
 .strategy-group-card {
+  position: relative;
   display: grid;
   grid-template-rows: auto auto auto minmax(0, auto) auto;
   min-width: 0;
@@ -4218,6 +4219,53 @@ body {
     border-color 140ms ease,
     background 140ms ease,
     transform 140ms ease;
+}
+
+.strategy-group-card.is-testing,
+.strategy-group-card.is-scoring {
+  border-color: rgba(115, 183, 255, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(115, 183, 255, 0.08);
+}
+
+.strategy-group-card.is-scoring {
+  border-color: rgba(239, 199, 94, 0.36);
+  box-shadow: inset 0 0 0 1px rgba(239, 199, 94, 0.08);
+}
+
+.strategy-group-card.is-testing::after,
+.strategy-group-card.is-scoring::after {
+  position: absolute;
+  z-index: 0;
+  inset: 1px;
+  pointer-events: none;
+  content: "";
+  border-radius: calc(var(--radius) - 1px);
+  background: linear-gradient(
+    110deg,
+    transparent 0%,
+    transparent 34%,
+    rgba(115, 183, 255, 0.12) 46%,
+    transparent 58%,
+    transparent 100%
+  );
+  background-size: 230% 100%;
+  animation: probe-card-scan 1.35s linear infinite;
+}
+
+.strategy-group-card.is-scoring::after {
+  background-image: linear-gradient(
+    110deg,
+    transparent 0%,
+    transparent 34%,
+    rgba(239, 199, 94, 0.12) 46%,
+    transparent 58%,
+    transparent 100%
+  );
+}
+
+.strategy-group-card > * {
+  position: relative;
+  z-index: 1;
 }
 
 .strategy-group-card:hover {

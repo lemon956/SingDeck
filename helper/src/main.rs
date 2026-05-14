@@ -39,6 +39,34 @@ struct AppState {
     db: Arc<Mutex<Connection>>,
     http: Client,
     mobile_config_url: Option<String>,
+    active_probes: Arc<Mutex<HashMap<String, ActiveProbeState>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveProbeState {
+    started_at_ms: i64,
+    count: usize,
+}
+
+struct ActiveProbeGuard {
+    state: AppState,
+    group: String,
+}
+
+impl Drop for ActiveProbeGuard {
+    fn drop(&mut self) {
+        let Ok(mut active_probes) = self.state.active_probes.lock() else {
+            return;
+        };
+        let Some(active_probe) = active_probes.get_mut(&self.group) else {
+            return;
+        };
+        if active_probe.count > 1 {
+            active_probe.count -= 1;
+        } else {
+            active_probes.remove(&self.group);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -233,6 +261,19 @@ struct GroupsResponse {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ActiveProbeView {
+    group: String,
+    started_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProbeStatusResponse {
+    groups: Vec<ActiveProbeView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ScoresResponse {
     group: String,
     mode: ScoreMode,
@@ -296,6 +337,7 @@ async fn main() -> Result<()> {
             .build()?,
         mobile_config_url: public_config_url()
             .or_else(|| mobile_config_url_for_bind(&bind, detect_lan_ip())),
+        active_probes: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let cors = CorsLayer::new()
@@ -317,6 +359,7 @@ async fn main() -> Result<()> {
             get(traffic_settings).put(save_traffic_settings),
         )
         .route("/api/v1/groups", get(groups))
+        .route("/api/v1/probes", get(active_probes))
         .route("/api/v1/groups/:group/config", put(save_group_config))
         .route("/api/v1/groups/:group/probe", post(probe_group))
         .route("/api/v1/groups/:group/scores", get(group_scores))
@@ -514,6 +557,14 @@ async fn groups(State(state): State<AppState>) -> Result<Json<GroupsResponse>, A
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(Json(GroupsResponse { groups }))
+}
+
+async fn active_probes(
+    State(state): State<AppState>,
+) -> Result<Json<ProbeStatusResponse>, AppError> {
+    Ok(Json(ProbeStatusResponse {
+        groups: active_probe_groups(&state),
+    }))
 }
 
 async fn save_group_config(
@@ -824,6 +875,7 @@ async fn probe_group_nodes(
     concurrency: usize,
 ) -> Result<usize> {
     let concurrency = concurrency.clamp(1, 12);
+    let _active_probe = begin_active_probe(state, group);
     let timeout_ms = load_delay_test_timeout_ms(state)?;
     let proxy_map = fetch_proxies(state, controller)
         .await
@@ -1765,6 +1817,43 @@ fn delete_string_kv(state: &AppState, key: &str) -> Result<()> {
     Ok(())
 }
 
+fn begin_active_probe(state: &AppState, group: &str) -> ActiveProbeGuard {
+    if let Ok(mut active_probes) = state.active_probes.lock() {
+        let active_probe =
+            active_probes
+                .entry(group.to_string())
+                .or_insert_with(|| ActiveProbeState {
+                    started_at_ms: now_ms(),
+                    count: 0,
+                });
+        active_probe.count += 1;
+    }
+
+    ActiveProbeGuard {
+        state: state.clone(),
+        group: group.to_string(),
+    }
+}
+
+fn active_probe_groups(state: &AppState) -> Vec<ActiveProbeView> {
+    let Ok(active_probes) = state.active_probes.lock() else {
+        return Vec::new();
+    };
+    let mut groups = active_probes
+        .iter()
+        .map(|(group, active_probe)| ActiveProbeView {
+            group: group.clone(),
+            started_at: format_time(active_probe.started_at_ms),
+        })
+        .collect::<Vec<_>>();
+    groups.sort_by(|left, right| {
+        left.started_at
+            .cmp(&right.started_at)
+            .then_with(|| left.group.cmp(&right.group))
+    });
+    groups
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2093,6 +2182,7 @@ mod tests {
             db: Arc::new(Mutex::new(conn)),
             http: Client::new(),
             mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
         };
         let settings = TrafficSettings {
             enabled: true,
@@ -2112,6 +2202,7 @@ mod tests {
             db: Arc::new(Mutex::new(conn)),
             http: Client::new(),
             mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
         };
         save_traffic_settings_row(
             &state,
@@ -2129,6 +2220,27 @@ mod tests {
             error.message,
             "Chrome profile is not configured in Settings."
         );
+    }
+
+    #[test]
+    fn active_probe_tracking_keeps_group_until_all_runs_finish() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let first = begin_active_probe(&state, "select");
+        let second = begin_active_probe(&state, "select");
+
+        assert_eq!(active_probe_groups(&state).len(), 1);
+        drop(first);
+        assert_eq!(active_probe_groups(&state).len(), 1);
+        drop(second);
+        assert!(active_probe_groups(&state).is_empty());
     }
 
     #[test]

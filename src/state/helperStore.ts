@@ -9,6 +9,7 @@ import {
   type HelperGroupConfig,
   type HelperGroupsResponse,
   type HelperHealth,
+  type HelperProbeStatusResponse,
   type HelperScoresResponse,
   type HelperTestingSettings,
   type HelperTrafficSettings,
@@ -24,6 +25,7 @@ type HelperState = {
   trafficSettings: HelperTrafficSettings | null;
   groups: HelperGroup[];
   scoresByGroup: Record<string, HelperScoresResponse>;
+  activeProbeGroups: string[];
   traffic: HelperTrafficResponse | null;
   trafficLoading: boolean;
   trafficError: string | null;
@@ -42,6 +44,7 @@ type HelperState = {
   saveConfigPath: () => Promise<void>;
   saveTrafficSettings: (settings: HelperTrafficSettings) => Promise<void>;
   loadGroups: () => Promise<void>;
+  loadActiveProbes: () => Promise<void>;
   saveGroupConfig: (group: string, config: HelperGroupConfig) => Promise<void>;
   probeGroup: (group: string, concurrency: number) => Promise<void>;
   loadScores: (group: string) => Promise<void>;
@@ -60,6 +63,7 @@ export const useHelperStore = create<HelperState>()(
       trafficSettings: null,
       groups: [],
       scoresByGroup: {},
+      activeProbeGroups: [],
       traffic: null,
       trafficLoading: false,
       trafficError: null,
@@ -209,6 +213,18 @@ export const useHelperStore = create<HelperState>()(
           }));
         } catch (error) {
           set({ loading: false, error: formatHelperError(error) });
+        }
+      },
+      loadActiveProbes: async () => {
+        try {
+          const response = await client().getJson<HelperProbeStatusResponse>('/api/v1/probes');
+          const groups = Array.isArray(response.groups) ? response.groups : [];
+          set({
+            activeProbeGroups: groups.map((group) => group.group),
+            error: null
+          });
+        } catch (error) {
+          set({ activeProbeGroups: [] });
         }
       },
       saveGroupConfig: async (group, config) => {

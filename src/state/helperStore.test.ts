@@ -18,6 +18,7 @@ describe('helper store', () => {
       trafficSettings: null,
       groups: [],
       scoresByGroup: {},
+      activeProbeGroups: [],
       loading: false,
       error: null
     });
@@ -117,6 +118,31 @@ describe('helper store', () => {
 
     expect(useHelperStore.getState().groups.map((group) => group.name)).toEqual(['GLOBAL', 'download']);
     expect(Object.keys(useHelperStore.getState().scoresByGroup).sort()).toEqual(['GLOBAL', 'download']);
+  });
+
+  it('loads active helper probe groups', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/probes')) {
+          return jsonResponse({
+            groups: [
+              { group: 'select', startedAt: '2026-05-14T08:00:00.000Z' },
+              { group: 'download', startedAt: '2026-05-14T08:00:02.000Z' }
+            ]
+          });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await (useHelperStore.getState() as unknown as { loadActiveProbes: () => Promise<void> }).loadActiveProbes();
+
+    expect((useHelperStore.getState() as unknown as { activeProbeGroups: string[] }).activeProbeGroups).toEqual([
+      'select',
+      'download'
+    ]);
   });
 
   it('saves default test URL without dropping the configured timeout', async () => {

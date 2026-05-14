@@ -100,6 +100,7 @@ function setupProxyWorkspace() {
     trafficLoading: false,
     trafficError: null,
     loading: false,
+    activeProbeGroups: [],
     probingGroups: [],
     applyingGroups: [],
     error: null,
@@ -162,6 +163,33 @@ describe('App proxy workspace', () => {
     expect(groupTitle).not.toBeNull();
     expect(within(groupTitle as HTMLElement).getByText(new RegExp(`updated ${latestLabel}`))).toBeInTheDocument();
     expect(nodeCards.some((node) => within(node as HTMLElement).queryByText(latestLabel))).toBe(false);
+  });
+
+  it('keeps the previous score visible while a score probe is running', () => {
+    useHelperStore.setState({ probingGroups: ['select'] });
+
+    const { container } = render(<App />);
+    const scorePill = container.querySelector('.strategy-card-meta .score-pill') as HTMLElement;
+    const scoreMarks = Array.from(container.querySelectorAll('.score-mark'));
+
+    expect(scorePill).toHaveTextContent('92');
+    expect(scorePill).toHaveClass('testing');
+    expect(scoreMarks.map((mark) => mark.textContent)).toEqual(expect.arrayContaining(['92', '61']));
+    expect(scoreMarks.some((mark) => mark.textContent === '...')).toBe(false);
+  });
+
+  it('uses the scoring flash state for helper background probes', () => {
+    useHelperStore.setState({ activeProbeGroups: ['select'] });
+
+    const { container } = render(<App />);
+    const groupCard = container.querySelector('.strategy-group-card') as HTMLElement;
+    const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card'));
+    const scorePill = container.querySelector('.strategy-card-meta .score-pill') as HTMLElement;
+
+    expect(groupCard).toHaveClass('is-scoring');
+    expect(nodeCards).toHaveLength(2);
+    expect(nodeCards.every((node) => node.classList.contains('is-scoring'))).toBe(true);
+    expect(scorePill).toHaveTextContent('92');
   });
 
   it('refreshes proxy state after helper auto switch applies a probe result', async () => {

@@ -542,6 +542,7 @@ export function App() {
   const topologyChartRef = useRef<HTMLDivElement | null>(null);
   const topologyChartInstanceRef = useRef<echarts.EChartsType | null>(null);
   const settingsImportInputRef = useRef<HTMLInputElement | null>(null);
+  const previousHelperActiveProbeGroupsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     applyBrowserStartup(window.location.hash, window.location.origin, window.location.pathname);
@@ -726,6 +727,45 @@ export function App() {
     [activeStrategyMembers, proxyQuery]
   );
   const helperServiceAvailable = Boolean(helper.health?.sqlite && !helper.error);
+  const activeProbeGroupNames = useMemo(
+    () => new Set([...helper.probingGroups, ...helper.activeProbeGroups]),
+    [helper.probingGroups, helper.activeProbeGroups]
+  );
+
+  useEffect(() => {
+    if (!helperServiceAvailable || activeRoute !== 'proxies') {
+      previousHelperActiveProbeGroupsRef.current = new Set();
+      return;
+    }
+
+    let cancelled = false;
+    const refreshActiveProbes = async () => {
+      await useHelperStore.getState().loadActiveProbes();
+      if (cancelled) {
+        return;
+      }
+
+      const nextGroups = new Set(useHelperStore.getState().activeProbeGroups);
+      const endedGroups = Array.from(previousHelperActiveProbeGroupsRef.current).filter(
+        (group) => !nextGroups.has(group)
+      );
+      previousHelperActiveProbeGroupsRef.current = nextGroups;
+      if (endedGroups.length > 0) {
+        await Promise.all(endedGroups.map((group) => useHelperStore.getState().loadScores(group)));
+      }
+    };
+
+    void refreshActiveProbes();
+    const timer = window.setInterval(() => {
+      void refreshActiveProbes();
+    }, 1000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeRoute, helperServiceAvailable]);
+
   const helperActionBusy = Boolean(helperPendingAction) || helper.loading;
   const trafficModuleEnabled = Boolean(helper.trafficSettings?.enabled);
   const helperDefaultTestUrl = helper.testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
@@ -773,7 +813,7 @@ export function App() {
     testUrl: activeProbeExecution?.mode === 'native-urltest' ? 'sing-box urltest.url' : activeGroupTestUrl
   });
   const activeGroupBusy = Boolean(
-    activeStrategyGroup && (helper.probingGroups.includes(activeStrategyGroup.name) || activeNativeGroupTesting)
+    activeStrategyGroup && (activeProbeGroupNames.has(activeStrategyGroup.name) || activeNativeGroupTesting)
   );
   const activeGroupActivity = describeProbeActivity({
     mode: activeGroupConfig.mode,
@@ -1991,7 +2031,7 @@ export function App() {
                   const selectedDelayValue = selectedScore?.delayMs ?? proxies.groupDelayResults[proxy.name] ?? selectedDelay;
                   const selectedScoreTone = selectedScore ? nodeScoreTone(selectedScore, selectedDelay) : 'none';
                   const selectedDelayTone = delayTone(selectedDelayValue);
-                  const isProbing = helper.probingGroups.includes(proxy.name);
+                  const isProbing = activeProbeGroupNames.has(proxy.name);
                   const isNativeTesting = execution.mode === 'native-urltest' && proxies.testingProxies.includes(proxy.name);
                   const isActive = activeStrategyGroup?.name === proxy.name;
                   const isCollapsed = collapsedStrategyGroups.has(proxy.name);
@@ -2077,7 +2117,7 @@ export function App() {
                               }}
                               type="button"
                             >
-                              {isProbing ? '...' : formatNodeScore(selectedScore, selectedDelay)}
+                              {formatNodeScore(selectedScore, selectedDelay)}
                             </button>
                           ) : null}
                           <button
@@ -2199,7 +2239,7 @@ export function App() {
                                           : undefined
                                       }
                                     >
-                                      {isScoring ? '...' : formatNodeScore(score, displayDelay)}
+                                      {formatNodeScore(score, displayDelay)}
                                     </span>
                                   ) : (
                                     <span className={`node-status-dot ${nodeDelayTone}`} />
