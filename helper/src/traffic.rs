@@ -311,8 +311,8 @@ pub fn read_chrome_cookie(profile: &Path, host_key: &str, name: &str) -> Result<
         return Ok(value);
     }
 
-    let secret = chrome_linux_secret(profile)?;
-    decrypt_chrome_linux_cookie_with_secret(&actual_host_key, &encrypted_value, &secret)
+    let secrets = chrome_linux_secrets(profile)?;
+    decrypt_chrome_linux_cookie_with_secrets(&actual_host_key, &encrypted_value, &secrets)
 }
 
 pub fn read_chrome_local_storage(profile: &Path, origin: &str, name: &str) -> Result<String> {
@@ -490,7 +490,7 @@ fn chrome_profile_owner_secret_context(_profile: &Path) -> Option<SecretToolCont
     None
 }
 
-fn chrome_linux_secret(profile: &Path) -> Result<Vec<u8>> {
+fn chrome_linux_secrets(profile: &Path) -> Result<Vec<Vec<u8>>> {
     let lookups: &[&[&str]] = &[
         &["lookup", "application", "chrome"],
         &["lookup", "application", "chromium"],
@@ -506,6 +506,7 @@ fn chrome_linux_secret(profile: &Path) -> Result<Vec<u8>> {
             contexts.push(context);
         }
     }
+    let mut secrets = Vec::new();
 
     for context in contexts {
         for args in lookups {
@@ -525,13 +526,47 @@ fn chrome_linux_secret(profile: &Path) -> Result<Vec<u8>> {
                 secret.pop();
             }
             if !secret.is_empty() {
-                return Ok(secret);
+                push_unique_secret(&mut secrets, secret);
             }
         }
     }
 
+    if secrets.is_empty() {
+        Err(anyhow!(
+            "Chrome cookie key not available from secret-tool; install libsecret tools or unlock the Chrome profile owner's keyring"
+        ))
+    } else {
+        Ok(secrets)
+    }
+}
+
+fn push_unique_secret(secrets: &mut Vec<Vec<u8>>, secret: Vec<u8>) {
+    if !secrets.iter().any(|existing| existing == &secret) {
+        secrets.push(secret);
+    }
+}
+
+fn decrypt_chrome_linux_cookie_with_secrets<S: AsRef<[u8]>>(
+    host_key: &str,
+    encrypted_value: &[u8],
+    secrets: &[S],
+) -> Result<String> {
+    if secrets.is_empty() {
+        return Err(anyhow!("Chrome cookie decrypt failed: no candidate keys"));
+    }
+
+    let mut errors = Vec::new();
+    for (index, secret) in secrets.iter().enumerate() {
+        match decrypt_chrome_linux_cookie_with_secret(host_key, encrypted_value, secret.as_ref()) {
+            Ok(value) => return Ok(value),
+            Err(error) => errors.push(format!("candidate {}: {error}", index + 1)),
+        }
+    }
+
     Err(anyhow!(
-        "Chrome cookie key not available from secret-tool; install libsecret tools or unlock the Chrome profile owner's keyring"
+        "Chrome cookie decrypt failed with {} candidate keys: {}",
+        secrets.len(),
+        errors.join("; ")
     ))
 }
 
@@ -766,6 +801,36 @@ mod tests {
         let decrypted = decrypt_chrome_linux_cookie_with_secret(host, &encrypted, secret).unwrap();
 
         assert_eq!(decrypted, "browser-cookie-value");
+    }
+
+    #[test]
+    fn decrypts_chrome_linux_cookie_with_later_secret_candidate() {
+        type Aes128CbcEnc = cbc::Encryptor<Aes128>;
+
+        let correct_secret = b"correct chrome safe storage";
+        let wrong_secret = b"wrong chrome safe storage";
+        let host = "haita.io";
+        let value = b"haita-auth-cookie";
+        let mut plaintext = Sha256::digest(host.as_bytes()).to_vec();
+        plaintext.extend_from_slice(value);
+        let mut key = [0u8; 16];
+        pbkdf2_hmac::<Sha1>(correct_secret, b"saltysalt", 1, &mut key);
+        let iv = [b' '; 16];
+        let mut buffer = plaintext;
+        let message_len = buffer.len();
+        buffer.resize(message_len + 16, 0);
+        let ciphertext = Aes128CbcEnc::new(&key.into(), &iv.into())
+            .encrypt_padded_mut::<Pkcs7>(&mut buffer, message_len)
+            .unwrap()
+            .to_vec();
+        let mut encrypted = b"v11".to_vec();
+        encrypted.extend_from_slice(&ciphertext);
+
+        let secrets: [&[u8]; 2] = [&wrong_secret[..], &correct_secret[..]];
+        let decrypted =
+            decrypt_chrome_linux_cookie_with_secrets(host, &encrypted, &secrets).unwrap();
+
+        assert_eq!(decrypted, "haita-auth-cookie");
     }
 
     #[test]
