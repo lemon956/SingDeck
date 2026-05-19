@@ -21,6 +21,8 @@ use sha2::{Digest, Sha256};
 
 const WMSXWD_HOMEPAGE: &str = "https://2.wmsxwd-3.men/app.html#/dashboard";
 const WMSXWD_ORIGIN: &str = "https://2.wmsxwd-3.men";
+const HAITA_HOMEPAGE: &str = "https://haita.io/dashboard";
+const HAITA_ORIGIN: &str = "https://haita.io";
 const WMSXWD_API_KEY: &str = "51b056910a4fd60d";
 const WMSXWD_API_BASES: &[&str] = &[
     "https://z01.111285.xyz",
@@ -126,9 +128,9 @@ pub fn parse_v2board_traffic(
 
 async fn fetch_haita(http: &Client, profile: &Path, fetched_at: &str) -> TrafficSnapshot {
     let result = async {
-        let auth = read_chrome_cookie(profile, "haita.io", "auth")?;
+        let auth = read_haita_auth(profile)?;
         let html = fetch_text(
-            http.get("https://haita.io/dashboard")
+            http.get(HAITA_HOMEPAGE)
                 .header(header::COOKIE, format!("auth={auth}; lang=zh-cn"))
                 .header(header::USER_AGENT, user_agent()),
         )
@@ -137,15 +139,25 @@ async fn fetch_haita(http: &Client, profile: &Path, fetched_at: &str) -> Traffic
     }
     .await;
 
-    result.unwrap_or_else(|error| {
-        provider_error(
-            "haita",
-            "Haita",
-            "https://haita.io/dashboard",
-            fetched_at,
-            error,
-        )
+    result
+        .unwrap_or_else(|error| provider_error("haita", "Haita", HAITA_HOMEPAGE, fetched_at, error))
+}
+
+fn read_haita_auth(profile: &Path) -> Result<String> {
+    select_haita_auth(read_chrome_cookie(profile, "haita.io", "auth"), || {
+        read_chrome_local_storage(profile, HAITA_ORIGIN, "token")
     })
+}
+
+fn select_haita_auth(
+    cookie_auth: Result<String>,
+    local_storage_auth: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    match cookie_auth {
+        Ok(auth) => Ok(auth),
+        Err(cookie_error) => local_storage_auth()
+            .with_context(|| format!("Chrome cookie auth unavailable: {cookie_error}")),
+    }
 }
 
 async fn fetch_wmsxwd(http: &Client, profile: &Path, fetched_at: &str) -> TrafficSnapshot {
@@ -546,18 +558,33 @@ fn push_unique_secret(secrets: &mut Vec<Vec<u8>>, secret: Vec<u8>) {
     }
 }
 
+fn chrome_linux_secret_candidates<S: AsRef<[u8]>>(secrets: &[S]) -> Vec<Vec<u8>> {
+    let mut candidates = Vec::new();
+    for secret in secrets {
+        let secret = secret.as_ref();
+        push_unique_secret(&mut candidates, secret.to_vec());
+        if let Ok(decoded) = BASE64.decode(secret) {
+            if !decoded.is_empty() {
+                push_unique_secret(&mut candidates, decoded);
+            }
+        }
+    }
+    candidates
+}
+
 fn decrypt_chrome_linux_cookie_with_secrets<S: AsRef<[u8]>>(
     host_key: &str,
     encrypted_value: &[u8],
     secrets: &[S],
 ) -> Result<String> {
-    if secrets.is_empty() {
+    let candidates = chrome_linux_secret_candidates(secrets);
+    if candidates.is_empty() {
         return Err(anyhow!("Chrome cookie decrypt failed: no candidate keys"));
     }
 
     let mut errors = Vec::new();
-    for (index, secret) in secrets.iter().enumerate() {
-        match decrypt_chrome_linux_cookie_with_secret(host_key, encrypted_value, secret.as_ref()) {
+    for (index, secret) in candidates.iter().enumerate() {
+        match decrypt_chrome_linux_cookie_with_secret(host_key, encrypted_value, secret) {
             Ok(value) => return Ok(value),
             Err(error) => errors.push(format!("candidate {}: {error}", index + 1)),
         }
@@ -565,7 +592,7 @@ fn decrypt_chrome_linux_cookie_with_secrets<S: AsRef<[u8]>>(
 
     Err(anyhow!(
         "Chrome cookie decrypt failed with {} candidate keys: {}",
-        secrets.len(),
+        candidates.len(),
         errors.join("; ")
     ))
 }
@@ -831,6 +858,46 @@ mod tests {
             decrypt_chrome_linux_cookie_with_secrets(host, &encrypted, &secrets).unwrap();
 
         assert_eq!(decrypted, "haita-auth-cookie");
+    }
+
+    #[test]
+    fn decrypts_chrome_linux_cookie_with_base64_secret_candidate() {
+        type Aes128CbcEnc = cbc::Encryptor<Aes128>;
+
+        let decoded_secret = b"1234567890abcdef";
+        let encoded_secret = BASE64.encode(decoded_secret);
+        let host = "haita.io";
+        let value = b"haita-auth-cookie";
+        let mut plaintext = Sha256::digest(host.as_bytes()).to_vec();
+        plaintext.extend_from_slice(value);
+        let mut key = [0u8; 16];
+        pbkdf2_hmac::<Sha1>(decoded_secret, b"saltysalt", 1, &mut key);
+        let iv = [b' '; 16];
+        let mut buffer = plaintext;
+        let message_len = buffer.len();
+        buffer.resize(message_len + 16, 0);
+        let ciphertext = Aes128CbcEnc::new(&key.into(), &iv.into())
+            .encrypt_padded_mut::<Pkcs7>(&mut buffer, message_len)
+            .unwrap()
+            .to_vec();
+        let mut encrypted = b"v11".to_vec();
+        encrypted.extend_from_slice(&ciphertext);
+
+        let secrets = [encoded_secret.as_bytes()];
+        let decrypted =
+            decrypt_chrome_linux_cookie_with_secrets(host, &encrypted, &secrets).unwrap();
+
+        assert_eq!(decrypted, "haita-auth-cookie");
+    }
+
+    #[test]
+    fn haita_auth_falls_back_to_local_storage_token_when_cookie_fails() {
+        let auth = select_haita_auth(Err(anyhow!("cookie not found for haita.io/auth")), || {
+            Ok("local-storage-token".to_string())
+        })
+        .unwrap();
+
+        assert_eq!(auth, "local-storage-token");
     }
 
     #[test]
