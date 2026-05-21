@@ -40,6 +40,7 @@ describe('helper store', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -151,6 +152,55 @@ describe('helper store', () => {
       select: ['hk-1', 'jp-1'],
       download: ['sg-1']
     });
+  });
+
+  it('polls active probe nodes while a manual group probe is pending', async () => {
+    vi.useFakeTimers();
+    let probeFinished = false;
+    let resolveProbe!: () => void;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/v1/groups/select/probe')) {
+        return new Promise<Response>((resolve) => {
+          resolveProbe = () => {
+            probeFinished = true;
+            resolve(
+              jsonResponse({
+                group: 'select',
+                mode: 'score',
+                scheme: 'Balanced',
+                testUrl: 'https://cp.cloudflare.com/generate_204',
+                recommended: 'jp-1',
+                applyError: null,
+                nodes: []
+              })
+            );
+          };
+        });
+      }
+      if (url.endsWith('/api/v1/probes')) {
+        return jsonResponse({
+          groups: probeFinished
+            ? []
+            : [{ group: 'select', startedAt: '2026-05-14T08:00:00.000Z', activeNodes: ['jp-1'] }]
+        });
+      }
+      return new Response('not found', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const probe = useHelperStore.getState().probeGroup('select', 2);
+
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/probes'))).toBe(true);
+    expect(useHelperStore.getState().activeProbeNodesByGroup).toEqual({ select: ['jp-1'] });
+
+    resolveProbe();
+    await probe;
+
+    expect(useHelperStore.getState().activeProbeNodesByGroup).toEqual({});
+    vi.useRealTimers();
   });
 
   it('saves default test URL without dropping the configured timeout', async () => {

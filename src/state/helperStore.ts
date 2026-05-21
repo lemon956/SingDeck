@@ -17,6 +17,8 @@ import {
 } from '../core/helperApi';
 import { useControllerStore } from './controllerStore';
 
+const ACTIVE_PROBE_POLL_INTERVAL_MS = 120;
+
 type HelperState = {
   helperUrl: string;
   configPath: string;
@@ -250,21 +252,38 @@ export const useHelperStore = create<HelperState>()(
         }
       },
       probeGroup: async (group, concurrency) => {
+        let activeProbeTimer: ReturnType<typeof setInterval> | null = null;
+        const startActiveProbePolling = () => {
+          void get().loadActiveProbes();
+          activeProbeTimer = setInterval(() => {
+            void get().loadActiveProbes();
+          }, ACTIVE_PROBE_POLL_INTERVAL_MS);
+        };
+        const stopActiveProbePolling = async () => {
+          if (activeProbeTimer !== null) {
+            clearInterval(activeProbeTimer);
+          }
+          await get().loadActiveProbes();
+        };
+
         set((state) => ({
           error: null,
           probingGroups: Array.from(new Set([...state.probingGroups, group]))
         }));
+        startActiveProbePolling();
         try {
           const response = await client().postJson<HelperScoresResponse>(
             `/api/v1/groups/${encodeURIComponent(group)}/probe`,
             { concurrency }
           );
+          await stopActiveProbePolling();
           set((state) => ({
             scoresByGroup: { ...state.scoresByGroup, [group]: response },
             probingGroups: state.probingGroups.filter((item) => item !== group),
             error: response.applyError
           }));
         } catch (error) {
+          await stopActiveProbePolling();
           set((state) => ({
             probingGroups: state.probingGroups.filter((item) => item !== group),
             error: formatHelperError(error)
