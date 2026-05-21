@@ -58,6 +58,7 @@ export type HelperGroupsResponse = {
 export type HelperActiveProbe = {
   group: string;
   startedAt: string;
+  activeNodes?: string[];
 };
 
 export type HelperProbeStatusResponse = {

@@ -101,6 +101,7 @@ function setupProxyWorkspace() {
     trafficError: null,
     loading: false,
     activeProbeGroups: [],
+    activeProbeNodesByGroup: {},
     probingGroups: [],
     applyingGroups: [],
     error: null,
@@ -183,13 +184,34 @@ describe('App proxy workspace', () => {
 
     const { container } = render(<App />);
     const groupCard = container.querySelector('.strategy-group-card') as HTMLElement;
+    const groupHead = container.querySelector('.strategy-card-head') as HTMLElement;
     const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card'));
     const scorePill = container.querySelector('.strategy-card-meta .score-pill') as HTMLElement;
 
-    expect(groupCard).toHaveClass('is-scoring');
+    expect(groupCard).not.toHaveClass('is-scoring');
+    expect(groupHead).toHaveClass('is-scoring');
     expect(nodeCards).toHaveLength(2);
-    expect(nodeCards.every((node) => node.classList.contains('is-scoring'))).toBe(true);
+    expect(nodeCards.some((node) => node.classList.contains('is-scoring'))).toBe(false);
     expect(scorePill).toHaveTextContent('92');
+  });
+
+  it('limits helper background probe animation to the group head and active nodes', () => {
+    useHelperStore.setState({
+      activeProbeGroups: ['select'],
+      activeProbeNodesByGroup: { select: ['jp-1'] }
+    });
+
+    const { container } = render(<App />);
+    const groupCard = container.querySelector('.strategy-group-card') as HTMLElement;
+    const groupHead = container.querySelector('.strategy-card-head') as HTMLElement;
+    const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card')) as HTMLElement[];
+    const hkNode = nodeCards.find((node) => within(node).queryByText('hk-1')) as HTMLElement;
+    const jpNode = nodeCards.find((node) => within(node).queryByText('jp-1')) as HTMLElement;
+
+    expect(groupCard).not.toHaveClass('is-scoring');
+    expect(groupHead).toHaveClass('is-scoring');
+    expect(hkNode).not.toHaveClass('is-scoring');
+    expect(jpNode).toHaveClass('is-scoring');
   });
 
   it('refreshes proxy state after helper auto switch applies a probe result', async () => {

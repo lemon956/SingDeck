@@ -26,6 +26,7 @@ type HelperState = {
   groups: HelperGroup[];
   scoresByGroup: Record<string, HelperScoresResponse>;
   activeProbeGroups: string[];
+  activeProbeNodesByGroup: Record<string, string[]>;
   traffic: HelperTrafficResponse | null;
   trafficLoading: boolean;
   trafficError: string | null;
@@ -64,6 +65,7 @@ export const useHelperStore = create<HelperState>()(
       groups: [],
       scoresByGroup: {},
       activeProbeGroups: [],
+      activeProbeNodesByGroup: {},
       traffic: null,
       trafficLoading: false,
       trafficError: null,
@@ -221,10 +223,16 @@ export const useHelperStore = create<HelperState>()(
           const groups = Array.isArray(response.groups) ? response.groups : [];
           set({
             activeProbeGroups: groups.map((group) => group.group),
+            activeProbeNodesByGroup: Object.fromEntries(
+              groups.map((group) => [
+                group.group,
+                Array.isArray(group.activeNodes) ? group.activeNodes : []
+              ])
+            ),
             error: null
           });
         } catch (error) {
-          set({ activeProbeGroups: [] });
+          set({ activeProbeGroups: [], activeProbeNodesByGroup: {} });
         }
       },
       saveGroupConfig: async (group, config) => {

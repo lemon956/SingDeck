@@ -2033,6 +2033,7 @@ export function App() {
                   const selectedDelayTone = delayTone(selectedDelayValue);
                   const isProbing = activeProbeGroupNames.has(proxy.name);
                   const isNativeTesting = execution.mode === 'native-urltest' && proxies.testingProxies.includes(proxy.name);
+                  const activeProbeNodeNames = new Set(helper.activeProbeNodesByGroup[proxy.name] ?? []);
                   const isActive = activeStrategyGroup?.name === proxy.name;
                   const isCollapsed = collapsedStrategyGroups.has(proxy.name);
                   const canAutoSwitch = isSelectableProxyGroup(proxy) && !execution.autoSwitchManagedBySingBox;
@@ -2061,7 +2062,7 @@ export function App() {
                   return (
                     <article
                       aria-busy={rowActivity ? true : undefined}
-                      className={`strategy-group-card ${isActive ? 'selected' : ''} ${isActive ? 'featured' : ''} ${isCollapsed ? 'collapsed' : ''} ${draggingStrategyGroupName === proxy.name ? 'dragging' : ''} ${rowActivity?.className ?? ''}`}
+                      className={`strategy-group-card ${isActive ? 'selected' : ''} ${isActive ? 'featured' : ''} ${isCollapsed ? 'collapsed' : ''} ${draggingStrategyGroupName === proxy.name ? 'dragging' : ''}`}
                       draggable
                       key={proxy.name}
                       onDragEnd={() => setDraggingStrategyGroupName(null)}
@@ -2074,7 +2075,7 @@ export function App() {
                       onClick={() => setActiveStrategyGroupName(proxy.name)}
                     >
                       <div
-                        className="strategy-card-head"
+                        className={`strategy-card-head ${rowActivity?.className ?? ''}`}
                         onClick={(event) => {
                           event.stopPropagation();
                           setActiveStrategyGroupName(proxy.name);
@@ -2196,6 +2197,7 @@ export function App() {
                             {visibleMembers.map((member) => {
                           const isCurrent = member.name === proxy.now;
                           const isTesting = proxies.testingProxies.includes(member.name);
+                          const isHelperNodeProbing = activeProbeNodeNames.has(member.name);
                           const canSelect = isSelectableProxyGroup(proxy);
                           const score = execution.mode === 'helper-score' ? groupScoreByName.get(member.name) : undefined;
                           const displayDelay = proxyDelayByName.get(member.name) ?? member.delay;
@@ -2205,7 +2207,7 @@ export function App() {
                           const cardTone = rowConfig.mode === 'score' && score ? scoreTone : nodeDelayTone;
                           const nodeActivity = describeProbeActivity({
                             mode: rowConfig.mode,
-                            groupProbing: isProbing || isNativeTesting,
+                            groupProbing: isHelperNodeProbing,
                             nodeTesting: isTesting
                           });
                           const isScoring = nodeActivity?.kind === 'scoring';

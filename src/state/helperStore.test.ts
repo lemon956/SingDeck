@@ -19,6 +19,7 @@ describe('helper store', () => {
       groups: [],
       scoresByGroup: {},
       activeProbeGroups: [],
+      activeProbeNodesByGroup: {},
       loading: false,
       error: null
     });
@@ -128,8 +129,8 @@ describe('helper store', () => {
         if (url.endsWith('/api/v1/probes')) {
           return jsonResponse({
             groups: [
-              { group: 'select', startedAt: '2026-05-14T08:00:00.000Z' },
-              { group: 'download', startedAt: '2026-05-14T08:00:02.000Z' }
+              { group: 'select', startedAt: '2026-05-14T08:00:00.000Z', activeNodes: ['hk-1', 'jp-1'] },
+              { group: 'download', startedAt: '2026-05-14T08:00:02.000Z', activeNodes: ['sg-1'] }
             ]
           });
         }
@@ -143,6 +144,13 @@ describe('helper store', () => {
       'select',
       'download'
     ]);
+    expect(
+      (useHelperStore.getState() as unknown as { activeProbeNodesByGroup: Record<string, string[]> })
+        .activeProbeNodesByGroup
+    ).toEqual({
+      select: ['hk-1', 'jp-1'],
+      download: ['sg-1']
+    });
   });
 
   it('saves default test URL without dropping the configured timeout', async () => {

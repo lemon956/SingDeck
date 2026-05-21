@@ -45,11 +45,18 @@ struct AppState {
 struct ActiveProbeState {
     started_at_ms: i64,
     count: usize,
+    active_nodes: HashMap<String, usize>,
 }
 
 struct ActiveProbeGuard {
     state: AppState,
     group: String,
+}
+
+struct ActiveProbeNodeGuard {
+    state: AppState,
+    group: String,
+    node: String,
 }
 
 impl Drop for ActiveProbeGuard {
@@ -63,7 +70,28 @@ impl Drop for ActiveProbeGuard {
         if active_probe.count > 1 {
             active_probe.count -= 1;
         } else {
-            active_probes.remove(&self.group);
+            active_probe.count = 0;
+            remove_idle_active_probe(&mut active_probes, &self.group);
+        }
+    }
+}
+
+impl Drop for ActiveProbeNodeGuard {
+    fn drop(&mut self) {
+        let Ok(mut active_probes) = self.state.active_probes.lock() else {
+            return;
+        };
+        let Some(active_probe) = active_probes.get_mut(&self.group) else {
+            return;
+        };
+        let Some(node_count) = active_probe.active_nodes.get_mut(&self.node) else {
+            return;
+        };
+        if *node_count > 1 {
+            *node_count -= 1;
+        } else {
+            active_probe.active_nodes.remove(&self.node);
+            remove_idle_active_probe(&mut active_probes, &self.group);
         }
     }
 }
@@ -263,6 +291,7 @@ struct GroupsResponse {
 struct ActiveProbeView {
     group: String,
     started_at: String,
+    active_nodes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -774,6 +803,7 @@ async fn probe_node(
         timeout_ms,
         url_encode(test_url)
     );
+    let _active_node = begin_active_probe_node(state, group, node);
     let tested_at_ms = now_ms();
     let result = controller_get::<serde_json::Value>(state, controller, &path).await;
     match result {
@@ -1835,6 +1865,7 @@ fn begin_active_probe(state: &AppState, group: &str) -> ActiveProbeGuard {
                 .or_insert_with(|| ActiveProbeState {
                     started_at_ms: now_ms(),
                     count: 0,
+                    active_nodes: HashMap::new(),
                 });
         active_probe.count += 1;
     }
@@ -1845,15 +1876,43 @@ fn begin_active_probe(state: &AppState, group: &str) -> ActiveProbeGuard {
     }
 }
 
+fn begin_active_probe_node(state: &AppState, group: &str, node: &str) -> ActiveProbeNodeGuard {
+    if let Ok(mut active_probes) = state.active_probes.lock() {
+        let active_probe =
+            active_probes
+                .entry(group.to_string())
+                .or_insert_with(|| ActiveProbeState {
+                    started_at_ms: now_ms(),
+                    count: 0,
+                    active_nodes: HashMap::new(),
+                });
+        *active_probe
+            .active_nodes
+            .entry(node.to_string())
+            .or_insert(0) += 1;
+    }
+
+    ActiveProbeNodeGuard {
+        state: state.clone(),
+        group: group.to_string(),
+        node: node.to_string(),
+    }
+}
+
 fn active_probe_groups(state: &AppState) -> Vec<ActiveProbeView> {
     let Ok(active_probes) = state.active_probes.lock() else {
         return Vec::new();
     };
     let mut groups = active_probes
         .iter()
-        .map(|(group, active_probe)| ActiveProbeView {
-            group: group.clone(),
-            started_at: format_time(active_probe.started_at_ms),
+        .map(|(group, active_probe)| {
+            let mut active_nodes = active_probe.active_nodes.keys().cloned().collect::<Vec<_>>();
+            active_nodes.sort();
+            ActiveProbeView {
+                group: group.clone(),
+                started_at: format_time(active_probe.started_at_ms),
+                active_nodes,
+            }
         })
         .collect::<Vec<_>>();
     groups.sort_by(|left, right| {
@@ -1862,6 +1921,19 @@ fn active_probe_groups(state: &AppState) -> Vec<ActiveProbeView> {
             .then_with(|| left.group.cmp(&right.group))
     });
     groups
+}
+
+fn remove_idle_active_probe(
+    active_probes: &mut HashMap<String, ActiveProbeState>,
+    group: &str,
+) {
+    let should_remove = active_probes
+        .get(group)
+        .map(|active_probe| active_probe.count == 0 && active_probe.active_nodes.is_empty())
+        .unwrap_or(false);
+    if should_remove {
+        active_probes.remove(group);
+    }
 }
 
 fn now_ms() -> i64 {
@@ -2284,6 +2356,48 @@ mod tests {
         drop(first);
         assert_eq!(active_probe_groups(&state).len(), 1);
         drop(second);
+        assert!(active_probe_groups(&state).is_empty());
+    }
+
+    #[test]
+    fn active_probe_tracking_reports_only_current_nodes() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let group = begin_active_probe(&state, "select");
+        let hk = begin_active_probe_node(&state, "select", "hk-1");
+        let jp = begin_active_probe_node(&state, "select", "jp-1");
+
+        assert_eq!(
+            active_probe_groups(&state)
+                .first()
+                .map(|probe| probe.active_nodes.clone()),
+            Some(vec!["hk-1".to_string(), "jp-1".to_string()])
+        );
+
+        drop(hk);
+        assert_eq!(
+            active_probe_groups(&state)
+                .first()
+                .map(|probe| probe.active_nodes.clone()),
+            Some(vec!["jp-1".to_string()])
+        );
+
+        drop(jp);
+        assert_eq!(
+            active_probe_groups(&state)
+                .first()
+                .map(|probe| probe.active_nodes.clone()),
+            Some(Vec::new())
+        );
+
+        drop(group);
         assert!(active_probe_groups(&state).is_empty());
     }
 
