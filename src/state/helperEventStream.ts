@@ -11,7 +11,7 @@ const RUNTIME_HISTORY_MAX_POINTS = 140;
 
 export type HelperEvent =
   | { type: 'probeStatus'; groups: HelperActiveProbe[] }
-  | { type: 'probeScores'; scores: HelperScoresResponse }
+  | { type: 'probeScores'; scores: HelperScoresResponse; partial?: boolean }
   | { type: 'connectionsSnapshot'; snapshot: ConnectionsResponse; sampledAt: string }
   | {
       type: 'trafficSnapshot';
@@ -94,7 +94,9 @@ export function applyHelperEvent(event: HelperEvent): void {
     useHelperStore.setState((state) => ({
       scoresByGroup: {
         ...state.scoresByGroup,
-        [event.scores.group]: event.scores
+        [event.scores.group]: event.partial
+          ? mergePartialScores(state.scoresByGroup[event.scores.group], event.scores)
+          : event.scores
       }
     }));
     return;
@@ -128,6 +130,7 @@ export function applyHelperEvent(event: HelperEvent): void {
         mode: event.mode
       }),
       history: trimRuntimeHistory([...state.history, sample], now),
+      lastTraffic: { up: event.up, down: event.down },
       loading: false,
       error: null,
       lastUpdatedAt: time
@@ -153,6 +156,30 @@ function parseHelperEvent(data: unknown): HelperEvent | null {
   } catch {
     return null;
   }
+}
+
+function mergePartialScores(
+  previous: HelperScoresResponse | undefined,
+  partial: HelperScoresResponse
+): HelperScoresResponse {
+  if (!previous) {
+    return partial;
+  }
+
+  const updates = new Map(partial.nodes.map((node) => [node.name, node]));
+  const mergedNodes = previous.nodes.map((node) => updates.get(node.name) ?? node);
+  const existingNames = new Set(previous.nodes.map((node) => node.name));
+  const appendedNodes = partial.nodes.filter((node) => !existingNames.has(node.name));
+
+  return {
+    ...previous,
+    mode: partial.mode,
+    scheme: partial.scheme,
+    testUrl: partial.testUrl,
+    recommended: previous.recommended,
+    applyError: previous.applyError,
+    nodes: [...mergedNodes, ...appendedNodes]
+  };
 }
 
 function trimRuntimeHistory(

@@ -288,6 +288,18 @@ h1 {
   color: var(--text);
 }
 
+.ghost-action.status-ok {
+  color: var(--green);
+  border-color: rgba(88, 216, 141, 0.34);
+  background: rgba(88, 216, 141, 0.08);
+}
+
+.ghost-action.status-warn {
+  color: var(--amber);
+  border-color: rgba(255, 191, 105, 0.34);
+  background: rgba(255, 191, 105, 0.08);
+}
+
 .file-action {
   cursor: pointer;
 }
@@ -2835,6 +2847,15 @@ body {
   min-width: 0;
 }
 
+.usage-connection-window {
+  max-height: 356px;
+  min-height: 356px;
+  overflow-y: auto;
+  padding-right: 3px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(66, 217, 255, 0.42) rgba(255, 255, 255, 0.04);
+}
+
 .usage-connection-row {
   grid-template-columns: minmax(0, 1fr) minmax(54px, 0.34fr) minmax(58px, auto) minmax(62px, auto);
   gap: 8px;
@@ -2850,6 +2871,10 @@ body {
 .usage-connection-row strong {
   color: var(--text);
   font-size: 12px;
+}
+
+.overview-scroll-buffer {
+  height: clamp(72px, 12vh, 140px);
 }
 
 .node-score-desc-panel {
@@ -4449,6 +4474,24 @@ body {
 
 .settings-save-row .form-action {
   flex: 0 0 auto;
+}
+
+.settings-save-row .form-action.status-ok {
+  color: #06100c;
+  border-color: var(--green);
+  background: var(--green);
+}
+
+.settings-save-row .form-action.status-warn {
+  color: #140f04;
+  border-color: var(--amber);
+  background: var(--amber);
+}
+
+.settings-save-row .form-action.status-neutral {
+  color: #06100c;
+  border-color: var(--green);
+  background: var(--green);
 }
 
 /* Layout repair: keep proxy rows compact and sidebar runtime widgets anchored. */

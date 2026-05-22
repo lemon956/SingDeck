@@ -37,6 +37,9 @@ const DEFAULT_PROBE_INTERVAL_SEC: i64 = 15 * 60;
 const MIN_PROBE_INTERVAL_SEC: i64 = 60;
 const DEFAULT_MIN_PROBE_INTERVAL_SEC: i64 = MIN_PROBE_INTERVAL_SEC;
 const MAX_PROBE_INTERVAL_SEC: i64 = 24 * 60 * 60;
+const DEFAULT_PROBE_CONCURRENCY: usize = 4;
+const MIN_PROBE_CONCURRENCY: usize = 1;
+const MAX_PROBE_CONCURRENCY: usize = 12;
 const FAILURE_PROBE_COOLDOWN_MS: i64 = 30 * 1000;
 const REALTIME_EVENT_INTERVAL_MS: u64 = 1000;
 const NETWORK_USAGE_SAMPLE_INTERVAL_MS: u64 = 1000;
@@ -51,6 +54,7 @@ struct AppState {
     http: Client,
     mobile_config_url: Option<String>,
     active_probes: Arc<Mutex<HashMap<String, ActiveProbeState>>>,
+    probe_limiter: ProbeLimiter,
     events: broadcast::Sender<HelperEvent>,
 }
 
@@ -61,9 +65,72 @@ struct ActiveProbeState {
     active_nodes: HashMap<String, usize>,
 }
 
+#[derive(Clone)]
+struct ProbeLimiter {
+    state: Arc<Mutex<ProbeLimiterState>>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Debug, Default)]
+struct ProbeLimiterState {
+    active: usize,
+}
+
+struct ProbePermit {
+    limiter: ProbeLimiter,
+}
+
+impl ProbeLimiter {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ProbeLimiterState::default())),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    async fn acquire(&self, limit: usize) -> ProbePermit {
+        let limit = normalize_probe_concurrency(limit);
+        loop {
+            {
+                let mut state = self.state.lock().expect("probe limiter lock poisoned");
+                if state.active < limit {
+                    state.active += 1;
+                    return ProbePermit {
+                        limiter: self.clone(),
+                    };
+                }
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    fn active_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("probe limiter lock poisoned")
+            .active
+    }
+}
+
+impl Drop for ProbePermit {
+    fn drop(&mut self) {
+        {
+            let mut state = self
+                .limiter
+                .state
+                .lock()
+                .expect("probe limiter lock poisoned");
+            state.active = state.active.saturating_sub(1);
+        }
+        self.limiter.notify.notify_waiters();
+    }
+}
+
 struct ActiveProbeGuard {
     state: AppState,
     group: String,
+    active: bool,
 }
 
 struct ActiveProbeNodeGuard {
@@ -72,8 +139,16 @@ struct ActiveProbeNodeGuard {
     node: String,
 }
 
+#[derive(Clone)]
+struct ProbeProgressContext {
+    config: GroupConfig,
+}
+
 impl Drop for ActiveProbeGuard {
     fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
         {
             let Ok(mut active_probes) = self.state.active_probes.lock() else {
                 return;
@@ -89,6 +164,12 @@ impl Drop for ActiveProbeGuard {
             }
         }
         publish_probe_status(&self.state);
+    }
+}
+
+impl ActiveProbeGuard {
+    fn is_active(&self) -> bool {
+        self.active
     }
 }
 
@@ -241,6 +322,8 @@ struct TestingSettings {
     delay_test_timeout_ms: i64,
     #[serde(default = "default_min_probe_interval_sec")]
     min_probe_interval_sec: i64,
+    #[serde(default = "default_probe_concurrency")]
+    probe_concurrency: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,6 +332,7 @@ struct TestingSettingsInput {
     default_test_url: String,
     delay_test_timeout_ms: Option<i64>,
     min_probe_interval_sec: Option<i64>,
+    probe_concurrency: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -334,6 +418,7 @@ enum HelperEvent {
     },
     ProbeScores {
         scores: ScoresResponse,
+        partial: bool,
     },
     ConnectionsSnapshot {
         snapshot: serde_json::Value,
@@ -504,6 +589,7 @@ async fn main() -> Result<()> {
         mobile_config_url: public_config_url()
             .or_else(|| mobile_config_url_for_bind(&bind, detect_lan_ip())),
         active_probes: Arc::new(Mutex::new(HashMap::new())),
+        probe_limiter: ProbeLimiter::new(),
         events: helper_event_channel(),
     };
 
@@ -660,12 +746,6 @@ async fn save_controller(
         secret: input.secret,
     };
     save_json_kv(&state, "controller", &normalized)?;
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        if let Err(error) = run_scheduled_probes(&state_clone, true).await {
-            eprintln!("startup probe after controller sync failed: {error}");
-        }
-    });
     Ok(Json(normalized))
 }
 
@@ -676,6 +756,7 @@ async fn testing_settings(
         default_test_url: load_default_test_url(&state)?,
         delay_test_timeout_ms: load_delay_test_timeout_ms(&state)?,
         min_probe_interval_sec: load_min_probe_interval_sec(&state)?,
+        probe_concurrency: load_probe_concurrency(&state)?,
     }))
 }
 
@@ -695,6 +776,11 @@ async fn save_testing_settings(
         normalize_min_probe_interval(input.min_probe_interval_sec.unwrap_or_else(|| {
             load_min_probe_interval_sec(&state).unwrap_or(DEFAULT_MIN_PROBE_INTERVAL_SEC)
         }));
+    let probe_concurrency = normalize_probe_concurrency(
+        input
+            .probe_concurrency
+            .unwrap_or_else(|| load_probe_concurrency(&state).unwrap_or(DEFAULT_PROBE_CONCURRENCY)),
+    );
     save_string_kv(&state, "default_test_url", default_test_url)?;
     save_string_kv(
         &state,
@@ -706,10 +792,16 @@ async fn save_testing_settings(
         "min_probe_interval_sec",
         &min_probe_interval_sec.to_string(),
     )?;
+    save_string_kv(
+        &state,
+        "probe_concurrency",
+        &probe_concurrency.to_string(),
+    )?;
     Ok(Json(TestingSettings {
         default_test_url: default_test_url.to_string(),
         delay_test_timeout_ms,
         min_probe_interval_sec,
+        probe_concurrency,
     }))
 }
 
@@ -808,12 +900,7 @@ async fn groups(State(state): State<AppState>) -> Result<Json<GroupsResponse>, A
         .into_iter()
         .map(|proxy| {
             let config = load_group_config(&state, &proxy.name)?;
-            let scores =
-                if let Some(snapshot) = load_last_probe_snapshot(&state, &proxy.name, &config)? {
-                    snapshot.nodes
-                } else {
-                    compute_scores_for_group(&state, &proxy.name, &proxy.all, &config)?
-                };
+            let scores = compute_scores_for_group(&state, &proxy.name, &proxy.all, &config)?;
             let recommended = recommended_node(&scores);
             Ok(GroupView {
                 name: proxy.name,
@@ -909,7 +996,7 @@ async fn probe_group(
     AxumPath(group): AxumPath<String>,
     Json(request): Json<ProbeRequest>,
 ) -> Result<Json<ScoresResponse>, AppError> {
-    let concurrency = request.concurrency.unwrap_or(4).clamp(1, 12);
+    let concurrency = normalize_probe_concurrency(request.concurrency.unwrap_or(DEFAULT_PROBE_CONCURRENCY));
     Ok(Json(
         probe_group_internal(&state, &group, concurrency, true).await?,
     ))
@@ -926,9 +1013,6 @@ async fn group_scores(
         .get(&group)
         .ok_or_else(|| AppError::bad_request(format!("group not found: {group}")))?;
     let config = load_group_config(&state, &group)?;
-    if let Some(snapshot) = load_last_probe_snapshot(&state, &group, &config)? {
-        return Ok(Json(snapshot));
-    }
     let scores = compute_scores_for_group(&state, &group, &group_proxy.all, &config)?;
     Ok(Json(ScoresResponse {
         group,
@@ -953,11 +1037,7 @@ async fn apply_group(
         .get(&group)
         .ok_or_else(|| AppError::bad_request(format!("group not found: {group}")))?;
     let config = load_group_config(&state, &group)?;
-    let scores = if let Some(snapshot) = load_last_probe_snapshot(&state, &group, &config)? {
-        snapshot.nodes
-    } else {
-        compute_scores_for_group(&state, &group, &group_proxy.all, &config)?
-    };
+    let scores = compute_scores_for_group(&state, &group, &group_proxy.all, &config)?;
     let target = request
         .node
         .or_else(|| recommended_node(&scores))
@@ -1103,6 +1183,8 @@ async fn probe_node(
     probe_target: &str,
     test_url: &str,
     timeout_ms: i64,
+    concurrency: usize,
+    progress: Option<ProbeProgressContext>,
 ) -> Result<()> {
     let path = format!(
         "/proxies/{}/delay?timeout={}&url={}",
@@ -1110,6 +1192,7 @@ async fn probe_node(
         timeout_ms,
         url_encode(test_url)
     );
+    let _probe_permit = state.probe_limiter.acquire(concurrency).await;
     let _active_node = begin_active_probe_node(state, group, node);
     let tested_at_ms = now_ms();
     let result = controller_get::<serde_json::Value>(state, controller, &path).await;
@@ -1126,7 +1209,6 @@ async fn probe_node(
                 None,
                 tested_at_ms,
             )?;
-            Ok(())
         }
         Err(error) => {
             let error = error.to_string();
@@ -1140,9 +1222,12 @@ async fn probe_node(
                 Some(error.clone()),
                 tested_at_ms,
             )?;
-            Ok(())
         }
     }
+    if let Some(progress) = progress.as_ref() {
+        publish_probe_progress_score(state, group, node, &progress.config)?;
+    }
+    Ok(())
 }
 
 async fn probe_group_internal(
@@ -1180,12 +1265,26 @@ async fn probe_group_internal(
             state,
             HelperEvent::ProbeScores {
                 scores: response.clone(),
+                partial: false,
             },
         );
         return Ok(response);
     }
 
-    probe_group_nodes(state, &controller, group, group_proxy, &config, concurrency).await?;
+    let run_status =
+        probe_group_nodes(state, &controller, group, group_proxy, &config, concurrency, &proxy_map).await?;
+    if run_status == ProbeRunStatus::Skipped {
+        let scores = compute_scores_for_group(state, group, &group_proxy.all, &config)?;
+        return Ok(ScoresResponse {
+            group: group.to_string(),
+            mode: config.mode,
+            scheme: config.scheme,
+            test_url: config.test_url,
+            recommended: recommended_node(&scores),
+            apply_error: None,
+            nodes: scores,
+        });
+    }
 
     let scores = compute_scores_after_probe_run(state, group, &group_proxy.all, &config)?;
     let recommended = recommended_node(&scores);
@@ -1209,12 +1308,13 @@ async fn probe_group_internal(
         nodes: scores,
     };
     save_last_probe_snapshot(state, &response)?;
-    publish_helper_event(
-        state,
-        HelperEvent::ProbeScores {
-            scores: response.clone(),
-        },
-    );
+        publish_helper_event(
+            state,
+            HelperEvent::ProbeScores {
+                scores: response.clone(),
+                partial: false,
+            },
+        );
     Ok(response)
 }
 
@@ -1225,14 +1325,17 @@ async fn probe_group_nodes(
     group_proxy: &ProxyView,
     config: &GroupConfig,
     concurrency: usize,
-) -> Result<()> {
-    let concurrency = concurrency.clamp(1, 12);
-    let _active_probe = begin_active_probe(state, group);
+    proxy_map: &HashMap<String, ProxyView>,
+) -> Result<ProbeRunStatus> {
+    let concurrency = normalize_probe_concurrency(concurrency);
+    let active_probe = begin_active_probe(state, group);
+    if !active_probe.is_active() {
+        return Ok(ProbeRunStatus::Skipped);
+    }
     let timeout_ms = load_delay_test_timeout_ms(state)?;
-    let proxy_map = fetch_proxies(state, controller)
-        .await
-        .map(|proxies| proxy_map(&proxies))
-        .unwrap_or_default();
+    let progress = ProbeProgressContext {
+        config: config.clone(),
+    };
     let mut handles = Vec::new();
     for chunk in group_proxy.all.chunks(concurrency) {
         handles.clear();
@@ -1242,7 +1345,8 @@ async fn probe_group_nodes(
             let group_name = group.to_string();
             let test_url = config.test_url.clone();
             let node_name = node.clone();
-            let probe_target = resolve_leaf_proxy_name(node, &proxy_map);
+            let probe_target = resolve_leaf_proxy_name(node, proxy_map);
+            let progress = progress.clone();
             handles.push(tokio::spawn(async move {
                 probe_node(
                     &state_clone,
@@ -1252,6 +1356,8 @@ async fn probe_group_nodes(
                     &probe_target,
                     &test_url,
                     timeout_ms,
+                    concurrency,
+                    Some(progress),
                 )
                 .await
             }));
@@ -1263,7 +1369,13 @@ async fn probe_group_nodes(
                 .map_err(|error| anyhow!("probe task failed: {error}"))??;
         }
     }
-    Ok(())
+    Ok(ProbeRunStatus::Ran)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeRunStatus {
+    Ran,
+    Skipped,
 }
 
 async fn apply_recommended_node(
@@ -1482,12 +1594,14 @@ async fn run_scheduled_probes(state: &AppState, force: bool) -> Result<()> {
     if controller.controller_url.is_empty() {
         return Ok(());
     }
+    let probe_concurrency = load_probe_concurrency(state)?;
 
     let proxies = match fetch_proxies(state, &controller).await {
         Ok(proxies) => proxies,
         Err(error) if is_controller_poll_error(&error) => return Ok(()),
         Err(error) => return Err(error),
     };
+    let proxy_map = proxy_map(&proxies);
     for group in proxy_groups(&proxies) {
         let config = load_group_config(state, &group.name)?;
         if !config.auto_probe {
@@ -1509,7 +1623,20 @@ async fn run_scheduled_probes(state: &AppState, force: bool) -> Result<()> {
             continue;
         }
 
-        probe_group_nodes(state, &controller, &group.name, &group, &config, 4).await?;
+        let run_status =
+            probe_group_nodes(
+                state,
+                &controller,
+                &group.name,
+                &group,
+                &config,
+                probe_concurrency,
+                &proxy_map,
+            )
+            .await?;
+        if run_status == ProbeRunStatus::Skipped {
+            continue;
+        }
 
         let scores = compute_scores_after_probe_run(state, &group.name, &group.all, &config)?;
         if config.auto_switch {
@@ -1531,7 +1658,13 @@ async fn run_scheduled_probes(state: &AppState, force: bool) -> Result<()> {
             nodes: scores,
         };
         save_last_probe_snapshot(state, &response)?;
-        publish_helper_event(state, HelperEvent::ProbeScores { scores: response });
+        publish_helper_event(
+            state,
+            HelperEvent::ProbeScores {
+                scores: response,
+                partial: false,
+            },
+        );
         save_string_kv(state, &last_key, &now.to_string())?;
     }
 
@@ -1569,7 +1702,8 @@ async fn observe_failed_request_logs(
         }
 
         save_string_kv(state, &last_key, &now.to_string())?;
-        if let Err(error) = probe_group_internal(state, &group.name, 4, true).await {
+        let probe_concurrency = load_probe_concurrency(state)?;
+        if let Err(error) = probe_group_internal(state, &group.name, probe_concurrency, true).await {
             eprintln!("request-failure probe failed for {}: {error}", group.name);
         }
     }
@@ -1883,6 +2017,13 @@ fn load_min_probe_interval_sec(state: &AppState) -> Result<i64> {
         .unwrap_or(DEFAULT_MIN_PROBE_INTERVAL_SEC))
 }
 
+fn load_probe_concurrency(state: &AppState) -> Result<usize> {
+    Ok(load_string_kv(state, "probe_concurrency")?
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(normalize_probe_concurrency)
+        .unwrap_or(DEFAULT_PROBE_CONCURRENCY))
+}
+
 fn default_traffic_settings() -> TrafficSettings {
     TrafficSettings {
         enabled: false,
@@ -2057,6 +2198,7 @@ fn save_last_probe_snapshot(state: &AppState, response: &ScoresResponse) -> Resu
     save_json_kv(state, &last_probe_snapshot_key(&response.group), response)
 }
 
+#[cfg(test)]
 fn load_last_probe_snapshot(
     state: &AppState,
     group: &str,
@@ -2075,6 +2217,7 @@ fn load_last_probe_snapshot(
     )
 }
 
+#[cfg(test)]
 fn score_snapshot_matches_current_algorithm(snapshot: &ScoresResponse) -> bool {
     snapshot.nodes.iter().all(|node| {
         node.raw.sample_window_sec.is_some()
@@ -2497,6 +2640,10 @@ fn normalize_min_probe_interval(value: i64) -> i64 {
     value.clamp(MIN_PROBE_INTERVAL_SEC, MAX_PROBE_INTERVAL_SEC)
 }
 
+fn normalize_probe_concurrency(value: usize) -> usize {
+    value.clamp(MIN_PROBE_CONCURRENCY, MAX_PROBE_CONCURRENCY)
+}
+
 fn normalize_delay_test_timeout(value: i64) -> i64 {
     value.clamp(MIN_DELAY_TEST_TIMEOUT_MS, MAX_DELAY_TEST_TIMEOUT_MS)
 }
@@ -2507,6 +2654,10 @@ fn default_delay_test_timeout_ms() -> i64 {
 
 fn default_min_probe_interval_sec() -> i64 {
     DEFAULT_MIN_PROBE_INTERVAL_SEC
+}
+
+fn default_probe_concurrency() -> usize {
+    DEFAULT_PROBE_CONCURRENCY
 }
 
 fn public_config_url() -> Option<String> {
@@ -2612,6 +2763,7 @@ fn delete_string_kv(state: &AppState, key: &str) -> Result<()> {
 }
 
 fn begin_active_probe(state: &AppState, group: &str) -> ActiveProbeGuard {
+    let mut active = false;
     if let Ok(mut active_probes) = state.active_probes.lock() {
         let active_probe =
             active_probes
@@ -2621,13 +2773,20 @@ fn begin_active_probe(state: &AppState, group: &str) -> ActiveProbeGuard {
                     count: 0,
                     active_nodes: HashMap::new(),
                 });
-        active_probe.count += 1;
+        if active_probe.count == 0 && active_probe.active_nodes.is_empty() {
+            active_probe.count = 1;
+            active_probe.started_at_ms = now_ms();
+            active = true;
+        }
     }
-    publish_probe_status(state);
+    if active {
+        publish_probe_status(state);
+    }
 
     ActiveProbeGuard {
         state: state.clone(),
         group: group.to_string(),
+        active,
     }
 }
 
@@ -2701,6 +2860,32 @@ fn publish_probe_status(state: &AppState) {
     );
 }
 
+fn publish_probe_progress_score(
+    state: &AppState,
+    group: &str,
+    node: &str,
+    config: &GroupConfig,
+) -> Result<()> {
+    let scores = compute_scores_after_probe_run(state, group, &[node.to_string()], config)?;
+    let response = ScoresResponse {
+        group: group.to_string(),
+        mode: config.mode,
+        scheme: config.scheme,
+        test_url: config.test_url.clone(),
+        recommended: None,
+        apply_error: None,
+        nodes: scores,
+    };
+    publish_helper_event(
+        state,
+        HelperEvent::ProbeScores {
+            scores: response,
+            partial: true,
+        },
+    );
+    Ok(())
+}
+
 fn remove_idle_active_probe(active_probes: &mut HashMap<String, ActiveProbeState>, group: &str) {
     let should_remove = active_probes
         .get(group)
@@ -2753,6 +2938,11 @@ fn url_encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     #[test]
     fn latency_curve_favors_low_latency() {
@@ -2978,6 +3168,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
             events: helper_event_channel(),
         };
         let config = GroupConfig {
@@ -3014,6 +3205,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
             events: helper_event_channel(),
         };
         let config = GroupConfig {
@@ -3152,6 +3344,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
             events: helper_event_channel(),
         };
         let config = GroupConfig::default();
@@ -3218,6 +3411,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
             events: helper_event_channel(),
         };
         let config = GroupConfig::default();
@@ -3264,6 +3458,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
             events: helper_event_channel(),
         };
         let config = GroupConfig::default();
@@ -3466,6 +3661,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
             events: helper_event_channel(),
         };
         let settings = TrafficSettings {
@@ -3487,6 +3683,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
             events: helper_event_channel(),
         };
         save_traffic_settings_row(
@@ -3508,7 +3705,7 @@ mod tests {
     }
 
     #[test]
-    fn active_probe_tracking_keeps_group_until_all_runs_finish() {
+    fn active_probe_tracking_skips_duplicate_group_runs() {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
@@ -3516,6 +3713,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
             events: helper_event_channel(),
         };
 
@@ -3523,10 +3721,44 @@ mod tests {
         let second = begin_active_probe(&state, "select");
 
         assert_eq!(active_probe_groups(&state).len(), 1);
-        drop(first);
-        assert_eq!(active_probe_groups(&state).len(), 1);
+        assert_eq!(
+            state
+                .active_probes
+                .lock()
+                .unwrap()
+                .get("select")
+                .map(|probe| probe.count),
+            Some(1)
+        );
         drop(second);
+        assert_eq!(active_probe_groups(&state).len(), 1);
+        drop(first);
         assert!(active_probe_groups(&state).is_empty());
+    }
+
+    #[test]
+    fn background_probe_concurrency_is_persisted_and_normalized() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+
+        assert_eq!(load_probe_concurrency(&state).unwrap(), 4);
+
+        save_string_kv(&state, "probe_concurrency", "0").unwrap();
+        assert_eq!(load_probe_concurrency(&state).unwrap(), 1);
+
+        save_string_kv(&state, "probe_concurrency", "99").unwrap();
+        assert_eq!(load_probe_concurrency(&state).unwrap(), 12);
+
+        save_string_kv(&state, "probe_concurrency", "7").unwrap();
+        assert_eq!(load_probe_concurrency(&state).unwrap(), 7);
     }
 
     #[test]
@@ -3538,6 +3770,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
             events: helper_event_channel(),
         };
 
@@ -3581,6 +3814,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
             events,
         };
 
@@ -3613,6 +3847,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
             events,
         };
 
@@ -3631,6 +3866,168 @@ mod tests {
         );
         assert_eq!(events[2]["groups"][0]["activeNodes"], serde_json::json!([]));
         assert_eq!(events[3]["groups"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn probe_limiter_enforces_global_limit() {
+        let limiter = ProbeLimiter::new();
+        let first = limiter.acquire(1).await;
+        assert_eq!(limiter.active_count(), 1);
+
+        let queued_limiter = limiter.clone();
+        let queued = tokio::spawn(async move {
+            let _permit = queued_limiter.acquire(1).await;
+            queued_limiter.active_count()
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!queued.is_finished());
+
+        drop(first);
+        assert_eq!(queued.await.unwrap(), 1);
+        assert_eq!(limiter.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn probe_node_publishes_progress_scores_after_sample() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let events = helper_event_channel();
+        let mut receiver = events.subscribe();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events,
+        };
+        let controller_url = spawn_one_delay_response_server(42).await;
+        let controller = ControllerConfig {
+            controller_url,
+            secret: String::new(),
+        };
+        let config = GroupConfig::default();
+        let test_url = config.test_url.clone();
+
+        probe_node(
+            &state,
+            &controller,
+            "select",
+            "hk-1",
+            "hk-1",
+            &test_url,
+            5000,
+            4,
+            Some(ProbeProgressContext { config }),
+        )
+        .await
+        .unwrap();
+
+        let events = drain_helper_events(&mut receiver);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                HelperEvent::ProbeScores {
+                    scores,
+                    partial: true,
+                }
+                    if scores.group == "select"
+                        && scores.nodes.iter().any(|node| node.name == "hk-1" && node.delay_ms == Some(42))
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn probe_group_reuses_initial_proxy_snapshot_for_node_resolution() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        let proxy_request_count = Arc::new(AtomicUsize::new(0));
+        let controller_url = spawn_counting_probe_controller(proxy_request_count.clone()).await;
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+
+        let response = probe_group_internal(&state, "select", 4, false)
+            .await
+            .unwrap();
+
+        assert_eq!(response.nodes[0].delay_ms, Some(42));
+        assert_eq!(proxy_request_count.load(Ordering::SeqCst), 1);
+    }
+
+    async fn spawn_one_delay_response_server(delay_ms: i64) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).await.unwrap();
+            let body = format!(r#"{{"delay":{delay_ms}}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn spawn_counting_probe_controller(proxy_request_count: Arc<AtomicUsize>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buffer = [0_u8; 2048];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let body = if path == "/proxies" {
+                    proxy_request_count.fetch_add(1, Ordering::SeqCst);
+                    r#"{"proxies":{"select":{"name":"select","type":"Selector","now":"hk-1","all":["hk-1"]},"hk-1":{"name":"hk-1","type":"Trojan","now":"","all":[]}}}"#.to_string()
+                } else if path.starts_with("/proxies/hk-1/delay") {
+                    r#"{"delay":42}"#.to_string()
+                } else {
+                    r#"{"error":"not found"}"#.to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn drain_helper_events(receiver: &mut broadcast::Receiver<HelperEvent>) -> Vec<HelperEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            events.push(event);
+        }
+        events
     }
 
     #[test]

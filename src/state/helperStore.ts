@@ -24,6 +24,7 @@ import { useControllerStore } from './controllerStore';
 
 const ACTIVE_PROBE_POLL_INTERVAL_MS = 120;
 const DEFAULT_MIN_PROBE_INTERVAL_SEC = 60;
+const DEFAULT_PROBE_CONCURRENCY = 4;
 
 type HelperState = {
   helperUrl: string;
@@ -51,9 +52,10 @@ type HelperState = {
   applyingGroups: string[];
   error: string | null;
   lastCheckedAt: string | null;
+  lastSyncedControllerKey: string | null;
   updateSettings: (settings: Partial<Pick<HelperState, 'helperUrl' | 'configPath'>>) => void;
   checkHealth: () => Promise<void>;
-  syncController: () => Promise<void>;
+  syncController: (options?: { force?: boolean }) => Promise<void>;
   loadTestingSettings: () => Promise<void>;
   loadTrafficSettings: () => Promise<void>;
   loadNetworkUsageSettings: () => Promise<void>;
@@ -103,11 +105,22 @@ export const useHelperStore = create<HelperState>()(
       applyingGroups: [],
       error: null,
       lastCheckedAt: null,
+      lastSyncedControllerKey: null,
       updateSettings: (settings) =>
-        set((state) => ({
-          helperUrl: settings.helperUrl === undefined ? state.helperUrl : settings.helperUrl,
-          configPath: settings.configPath === undefined ? state.configPath : settings.configPath
-        })),
+        set((state) => {
+          const helperUrlChanged = settings.helperUrl !== undefined && settings.helperUrl !== state.helperUrl;
+          return {
+            helperUrl: settings.helperUrl === undefined ? state.helperUrl : settings.helperUrl,
+            configPath: settings.configPath === undefined ? state.configPath : settings.configPath,
+            health: helperUrlChanged ? null : state.health,
+            eventStreamConnected: helperUrlChanged ? false : state.eventStreamConnected,
+            activeProbeGroups: helperUrlChanged ? [] : state.activeProbeGroups,
+            activeProbeNodesByGroup: helperUrlChanged ? {} : state.activeProbeNodesByGroup,
+            error: helperUrlChanged ? null : state.error,
+            lastCheckedAt: helperUrlChanged ? null : state.lastCheckedAt,
+            lastSyncedControllerKey: helperUrlChanged ? null : state.lastSyncedControllerKey
+          };
+        }),
       checkHealth: async () => {
         set({ loading: true, error: null });
         try {
@@ -127,13 +140,20 @@ export const useHelperStore = create<HelperState>()(
             error: health.error
           });
         } catch (error) {
-          set({ loading: false, error: formatHelperError(error), lastCheckedAt: new Date().toISOString() });
+          set(helperUnavailablePatch(formatHelperError(error)));
         }
       },
-      syncController: async () => {
+      syncController: async (options) => {
         const { config } = useControllerStore.getState();
         if (!config.controllerUrl) {
           set({ error: 'Controller URL is empty.' });
+          return;
+        }
+        const syncKey = controllerSyncKey(config.controllerUrl, config.secret);
+        if (!options?.force && get().lastSyncedControllerKey === syncKey) {
+          if (!get().health) {
+            await get().checkHealth();
+          }
           return;
         }
 
@@ -156,10 +176,11 @@ export const useHelperStore = create<HelperState>()(
             networkUsageSettings,
             loading: false,
             lastCheckedAt: new Date().toISOString(),
+            lastSyncedControllerKey: syncKey,
             error: health.error
           });
         } catch (error) {
-          set({ loading: false, error: formatHelperError(error), lastCheckedAt: new Date().toISOString() });
+          set(helperUnavailablePatch(formatHelperError(error)));
         }
       },
       loadTestingSettings: async () => {
@@ -194,10 +215,13 @@ export const useHelperStore = create<HelperState>()(
           const delayTestTimeoutMs =
             get().testingSettings?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? 5000;
           const minProbeIntervalSec = get().testingSettings?.minProbeIntervalSec ?? DEFAULT_MIN_PROBE_INTERVAL_SEC;
+          const probeConcurrency =
+            config.delayTestConcurrency ?? get().testingSettings?.probeConcurrency ?? DEFAULT_PROBE_CONCURRENCY;
           const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', {
             defaultTestUrl,
             delayTestTimeoutMs,
-            minProbeIntervalSec
+            minProbeIntervalSec,
+            probeConcurrency
           });
           set({ testingSettings, error: null });
           await get().loadGroups();
@@ -210,10 +234,13 @@ export const useHelperStore = create<HelperState>()(
           const { config } = useControllerStore.getState();
           const defaultTestUrl = get().testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
           const minProbeIntervalSec = get().testingSettings?.minProbeIntervalSec ?? DEFAULT_MIN_PROBE_INTERVAL_SEC;
+          const probeConcurrency =
+            config.delayTestConcurrency ?? get().testingSettings?.probeConcurrency ?? DEFAULT_PROBE_CONCURRENCY;
           const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', {
             defaultTestUrl,
             delayTestTimeoutMs,
-            minProbeIntervalSec
+            minProbeIntervalSec,
+            probeConcurrency
           });
           set({ testingSettings, error: null });
         } catch (error) {
@@ -226,10 +253,13 @@ export const useHelperStore = create<HelperState>()(
           const defaultTestUrl = get().testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
           const delayTestTimeoutMs =
             get().testingSettings?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? 5000;
+          const probeConcurrency =
+            config.delayTestConcurrency ?? get().testingSettings?.probeConcurrency ?? DEFAULT_PROBE_CONCURRENCY;
           const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', {
             defaultTestUrl,
             delayTestTimeoutMs,
-            minProbeIntervalSec
+            minProbeIntervalSec,
+            probeConcurrency
           });
           set({ testingSettings, error: null });
           await get().loadGroups();
@@ -278,27 +308,34 @@ export const useHelperStore = create<HelperState>()(
         }
       },
       loadGroups: async () => {
-        set({ loading: true, error: null });
         try {
           const api = client();
           const response = await api.getJson<HelperGroupsResponse>('/api/v1/groups');
-          const scoreEntries = await Promise.all(
-            response.groups.map(async (group) => {
+          const groups = Array.isArray(response.groups) ? response.groups : [];
+          set({ groups, loading: false, error: null });
+          const scoreResults = await Promise.allSettled(
+            groups.map(async (group) => {
               const scores = await api.getJson<HelperScoresResponse>(
                 `/api/v1/groups/${encodeURIComponent(group.name)}/scores`
               );
               return [group.name, scores] as const;
             })
           );
+          const scoreEntries = scoreResults
+            .filter((result): result is PromiseFulfilledResult<readonly [string, HelperScoresResponse]> => {
+              return result.status === 'fulfilled';
+            })
+            .map((result) => result.value);
 
+          const firstScoreError = scoreResults.find(
+            (result): result is PromiseRejectedResult => result.status === 'rejected'
+          );
           set((state) => ({
-            groups: response.groups,
             scoresByGroup: {
               ...state.scoresByGroup,
               ...Object.fromEntries(scoreEntries)
             },
-            loading: false,
-            error: null
+            error: firstScoreError ? formatHelperError(firstScoreError.reason) : null
           }));
         } catch (error) {
           set({ loading: false, error: formatHelperError(error) });
@@ -319,7 +356,12 @@ export const useHelperStore = create<HelperState>()(
             error: null
           });
         } catch (error) {
-          set({ activeProbeGroups: [], activeProbeNodesByGroup: {} });
+          set({
+            activeProbeGroups: [],
+            activeProbeNodesByGroup: {},
+            eventStreamConnected: false,
+            error: formatHelperError(error)
+          });
         }
       },
       setEventStreamConnected: (connected) => set({ eventStreamConnected: connected }),
@@ -438,7 +480,7 @@ export const useHelperStore = create<HelperState>()(
       loadNetworkUsageWindow: async (request) => {
         set({ networkUsageLoading: true, networkUsageError: null });
         try {
-          const limit = request.limit ?? 8;
+          const limit = request.limit ?? 10;
           const [summary, topHosts, topOutbounds, connections] = await Promise.all([
             client().getJson<HelperNetworkUsageSummary>(
               `/api/v1/network-usage/summary?${networkUsageQuery(request)}`
@@ -504,6 +546,23 @@ function networkUsageQuery(input: NetworkUsageQueryInput): string {
 
 function client(): HelperApiClient {
   return new HelperApiClient({ baseUrl: useHelperStore.getState().helperUrl });
+}
+
+function controllerSyncKey(controllerUrl: string, secret: string): string {
+  return `${controllerUrl.trim().replace(/\/+$/, '')}\n${secret}`;
+}
+
+function helperUnavailablePatch(error: string): Partial<HelperState> {
+  return {
+    health: null,
+    loading: false,
+    eventStreamConnected: false,
+    activeProbeGroups: [],
+    activeProbeNodesByGroup: {},
+    probingGroups: [],
+    error,
+    lastCheckedAt: new Date().toISOString()
+  };
 }
 
 function formatHelperError(error: unknown): string {

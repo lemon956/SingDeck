@@ -36,6 +36,7 @@ import {
   type HelperNodeScore,
   type ScoreScheme
 } from '../core/helperApi';
+import { getHelperAvailability } from '../core/helperStatus';
 import {
   isProxyGroup,
   isSelectableProxyGroup,
@@ -265,7 +266,7 @@ function buildNetworkUsageRequest(windowId: NetworkUsageWindowId) {
     from: to - windowConfig.durationMs,
     to,
     bucket: windowConfig.bucket,
-    limit: 5
+    limit: 10
   };
 }
 
@@ -311,6 +312,13 @@ function formatNodeScore(score: HelperNodeScore | undefined, _fallbackDelay: num
   }
 
   return '--';
+}
+
+function scoreDelayOrFallback(
+  score: HelperNodeScore | undefined,
+  fallbackDelay: number | null | undefined
+): number | null | undefined {
+  return score ? score.delayMs : fallbackDelay;
 }
 
 function formatScoreTooltip(score: HelperNodeScore): string {
@@ -626,7 +634,19 @@ export function App() {
   const connections = useConnectionStore();
   const configWorkspace = useConfigStore();
   const helper = useHelperStore();
-  const helperServiceAvailable = Boolean(helper.health?.sqlite && !helper.error);
+  const helperAvailability = getHelperAvailability({
+    health: helper.health,
+    error: helper.error,
+    lastCheckedAt: helper.lastCheckedAt
+  });
+  const helperServiceAvailable = helperAvailability === 'ready';
+  const helperStatusLabel =
+    helperAvailability === 'ready'
+      ? 'Helper ready'
+      : helperAvailability === 'checking'
+        ? 'Helper checking'
+        : 'Helper offline';
+  const helperStatusTone = helperAvailability === 'ready' ? 'ok' : helperAvailability === 'checking' ? 'neutral' : 'bad';
   const [form, setForm] = useState(config);
   const [testingDefaultUrlDraft, setTestingDefaultUrlDraft] = useState(config.defaultTestUrl);
   const [trafficProfileDraft, setTrafficProfileDraft] = useState('');
@@ -644,6 +664,7 @@ export function App() {
   const [configQrCopied, setConfigQrCopied] = useState(false);
   const [helperActionStatus, setHelperActionStatus] = useState<InlineStatus | null>(null);
   const [helperPendingAction, setHelperPendingAction] = useState<string | null>(null);
+  const [helperStatusAction, setHelperStatusAction] = useState<string | null>(null);
   const [localBehaviorStatus, setLocalBehaviorStatus] = useState<InlineStatus | null>(null);
   const [settingsTransferMessage, setSettingsTransferMessage] = useState('');
   const [collapsedStrategyGroups, setCollapsedStrategyGroups] = useState<Set<string>>(() => new Set());
@@ -691,14 +712,22 @@ export function App() {
     ) {
       patch.delayTestTimeoutMs = helper.testingSettings.delayTestTimeoutMs;
     }
+    if (
+      helper.testingSettings.probeConcurrency &&
+      helper.testingSettings.probeConcurrency !== config.delayTestConcurrency
+    ) {
+      patch.delayTestConcurrency = helper.testingSettings.probeConcurrency;
+    }
     if (Object.keys(patch).length > 0) {
       updateConfig(patch);
     }
   }, [
     config.defaultTestUrl,
+    config.delayTestConcurrency,
     config.delayTestTimeoutMs,
     helper.testingSettings?.defaultTestUrl,
     helper.testingSettings?.delayTestTimeoutMs,
+    helper.testingSettings?.probeConcurrency,
     updateConfig
   ]);
 
@@ -723,12 +752,38 @@ export function App() {
   }, [config.controllerUrl, detect, detection, detecting]);
 
   useEffect(() => {
+    if (helper.health || helper.loading || helper.lastCheckedAt) {
+      return;
+    }
+
+    void useHelperStore.getState().checkHealth();
+  }, [helper.health, helper.helperUrl, helper.lastCheckedAt, helper.loading]);
+
+  useEffect(() => {
+    if (
+      helperAvailability !== 'ready' ||
+      (activeRoute !== 'overview' && activeRoute !== 'controller' && activeRoute !== 'proxies')
+    ) {
+      return;
+    }
+
+    void useHelperStore.getState().loadGroups();
+  }, [activeRoute, helper.helperUrl, helperAvailability]);
+
+  useEffect(() => {
     if (!detection?.ok) {
       return;
     }
 
-    void useHelperStore.getState().syncController();
-  }, [config.controllerUrl, config.secret, detection?.ok]);
+    void useHelperStore
+      .getState()
+      .syncController()
+      .then(() => {
+        if (activeRoute === 'overview' || activeRoute === 'controller' || activeRoute === 'proxies') {
+          void useHelperStore.getState().loadGroups();
+        }
+      });
+  }, [activeRoute, config.controllerUrl, config.secret, detection?.ok]);
 
   useEffect(() => {
     if (!detection?.ok) {
@@ -742,10 +797,7 @@ export function App() {
     }
 
     if (activeRoute === 'overview' || activeRoute === 'controller' || activeRoute === 'proxies') {
-      void useHelperStore
-        .getState()
-        .syncController()
-        .then(() => useHelperStore.getState().loadGroups());
+      void useHelperStore.getState().loadGroups();
     }
 
     if (activeRoute === 'overview' || activeRoute === 'connections') {
@@ -774,7 +826,11 @@ export function App() {
     }
 
     return connectHelperEventStream(helper.helperUrl, {
-      onOpen: () => useHelperStore.getState().setEventStreamConnected(true),
+      onOpen: () => {
+        useHelperStore.getState().setEventStreamConnected(true);
+        void useHelperStore.getState().loadActiveProbes();
+        void useHelperStore.getState().loadGroups();
+      },
       onClose: () => useHelperStore.getState().setEventStreamConnected(false)
     });
   }, [helper.helperUrl, helperServiceAvailable]);
@@ -861,7 +917,11 @@ export function App() {
   );
 
   useEffect(() => {
-    if (!helperServiceAvailable || activeRoute !== 'proxies' || helper.eventStreamConnected) {
+    if (
+      !helperServiceAvailable ||
+      (activeRoute !== 'proxies' && activeRoute !== 'overview') ||
+      helper.eventStreamConnected
+    ) {
       previousHelperActiveProbeGroupsRef.current = new Set();
       return;
     }
@@ -904,6 +964,25 @@ export function App() {
   const helperMinProbeIntervalSec =
     helper.testingSettings?.minProbeIntervalSec ?? DEFAULT_MIN_PROBE_INTERVAL_SEC;
   const helperMinProbeIntervalMinutes = Math.max(1, Math.ceil(helperMinProbeIntervalSec / 60));
+  const localBehaviorButtonLabel = detecting
+    ? 'Saving...'
+    : localBehaviorStatus?.tone === 'ok'
+      ? 'Saved'
+      : localBehaviorStatus?.tone === 'warn'
+        ? 'Save issue'
+        : 'Save controller settings';
+  const localBehaviorButtonTone = localBehaviorStatus?.tone ?? 'neutral';
+  const helperButtonLabel = (action: string, idle: string, busy: string) => {
+    if (helperPendingAction === action) {
+      return busy;
+    }
+    if (helperStatusAction !== action || !helperActionStatus) {
+      return idle;
+    }
+    return helperActionStatus.tone === 'ok' ? 'Saved' : helperActionStatus.tone === 'warn' ? 'Issue' : busy;
+  };
+  const helperButtonTitle = (action: string) =>
+    helperStatusAction === action && helperActionStatus ? helperActionStatus.text : undefined;
   const singBoxRemoteProfileUri = buildSingBoxRemoteProfileUri(configQrUrl, 'SingDeck');
   const configQrUrlNeedsLan = !configQrUrl.trim() || isLoopbackUrl(configQrUrl);
   const helperGroupByName = useMemo(() => new Map(helper.groups.map((group) => [group.name, group])), [helper.groups]);
@@ -1148,7 +1227,7 @@ export function App() {
   }, [activeRoute, helperServiceAvailable, networkUsageModuleEnabled, networkUsageWindow]);
 
   useEffect(() => {
-    if (activeRoute !== 'proxies' || !activeStrategyGroup?.name) {
+    if ((activeRoute !== 'proxies' && activeRoute !== 'overview') || !activeStrategyGroup?.name) {
       return;
     }
 
@@ -1231,6 +1310,7 @@ export function App() {
 
   const runHelperAction = async (action: string, pendingText: string, work: () => Promise<InlineStatus>) => {
     setHelperPendingAction(action);
+    setHelperStatusAction(action);
     setHelperActionStatus({ tone: 'neutral', text: pendingText });
     try {
       setHelperActionStatus(await work());
@@ -1259,7 +1339,7 @@ export function App() {
 
   const syncControllerWithFeedback = () =>
     runHelperAction('sync', 'Syncing controller...', async () => {
-      await useHelperStore.getState().syncController();
+      await useHelperStore.getState().syncController({ force: true });
       const state = useHelperStore.getState();
       return state.error
         ? { tone: 'warn', text: state.error }
@@ -1472,6 +1552,9 @@ export function App() {
         configPath: backup.helper.configPath
       });
       if (backup.helper.testingSettings?.defaultTestUrl) {
+        if (backup.helper.testingSettings.probeConcurrency) {
+          updateConfig({ delayTestConcurrency: backup.helper.testingSettings.probeConcurrency });
+        }
         setTestingDefaultUrlDraft(backup.helper.testingSettings.defaultTestUrl);
         await helper.saveDefaultTestUrl(backup.helper.testingSettings.defaultTestUrl);
         if (backup.helper.testingSettings.delayTestTimeoutMs) {
@@ -1667,9 +1750,9 @@ export function App() {
               <Wifi size={14} />
               {detection?.ok ? 'API authenticated' : 'API pending'}
             </span>
-            <span className={`status-chip ${helperServiceAvailable ? 'ok' : 'warn'}`}>
+            <span className={`status-chip ${helperStatusTone}`}>
               <Wifi size={14} />
-              {helperServiceAvailable ? 'Helper ready' : 'Helper offline'}
+              {helperStatusLabel}
             </span>
           </div>
         </header>
@@ -1766,7 +1849,11 @@ export function App() {
               </button>
             </div>
             {!helperServiceAvailable ? (
-              <div className="traffic-provider-empty">Helper offline. Browser-backed provider traffic is unavailable.</div>
+              <div className="traffic-provider-empty">
+                {helperAvailability === 'checking'
+                  ? 'Checking helper. Browser-backed provider traffic will load when ready.'
+                  : 'Helper offline. Browser-backed provider traffic is unavailable.'}
+              </div>
             ) : helper.traffic?.providers.length ? (
               <div className="traffic-provider-list">
                 {helper.traffic.providers.map((provider) => {
@@ -1814,7 +1901,11 @@ export function App() {
               </div>
             </div>
             {!helperServiceAvailable ? (
-              <div className="usage-empty">Helper offline. Usage capture is unavailable.</div>
+              <div className="usage-empty">
+                {helperAvailability === 'checking'
+                  ? 'Checking helper. Usage capture will load when ready.'
+                  : 'Helper offline. Usage capture is unavailable.'}
+              </div>
             ) : !networkUsageModuleEnabled ? (
               <div className="usage-empty">Enable Network usage in Settings to store domain and outbound traffic.</div>
             ) : helper.networkUsageSummary ? (
@@ -1859,21 +1950,23 @@ export function App() {
                     {helper.networkUsageTopOutbounds?.items.length === 0 ? <small>No outbound usage yet.</small> : null}
                   </div>
                 </div>
-                <div className="usage-connection-list">
-                  {(helper.networkUsageConnections?.connections ?? []).slice(0, 4).map((connection) => (
-                    <div className="usage-connection-row" key={connection.id}>
-                      <div>
-                        <strong>{connection.host}</strong>
-                        <span>{connection.rule}</span>
+                <div className="usage-connection-window">
+                  <div className="usage-connection-list">
+                    {(helper.networkUsageConnections?.connections ?? []).slice(0, 10).map((connection) => (
+                      <div className="usage-connection-row" key={connection.id}>
+                        <div>
+                          <strong>{connection.host}</strong>
+                          <span>{connection.rule}</span>
+                        </div>
+                        <span>{connection.outbound}</span>
+                        <span>{formatBytes(connection.totalBytes)}</span>
+                        <span>{formatLastSeen(connection.lastSeenMs)}</span>
                       </div>
-                      <span>{connection.outbound}</span>
-                      <span>{formatBytes(connection.totalBytes)}</span>
-                      <span>{formatLastSeen(connection.lastSeenMs)}</span>
-                    </div>
-                  ))}
-                  {helper.networkUsageConnections?.connections.length === 0 ? (
-                    <div className="usage-empty compact">No sampled connection traffic in this window.</div>
-                  ) : null}
+                    ))}
+                    {helper.networkUsageConnections?.connections.length === 0 ? (
+                      <div className="usage-empty compact">No sampled connection traffic in this window.</div>
+                    ) : null}
+                  </div>
                 </div>
               </>
             ) : (
@@ -2040,6 +2133,7 @@ export function App() {
             </div>
           )}
         </article>
+        <div className="overview-scroll-buffer" aria-hidden="true" />
           </>
         ) : null}
 
@@ -2170,44 +2264,43 @@ export function App() {
                   </label>
                   <div className="helper-actions">
                     <button
-                      className="ghost-action"
+                      className={`ghost-action status-${helperStatusAction === 'check' ? helperActionStatus?.tone ?? 'neutral' : 'neutral'}`}
                       disabled={helperActionBusy}
                       onClick={() => void checkHelperWithFeedback()}
+                      title={helperButtonTitle('check')}
                       type="button"
                     >
-                      {helperPendingAction === 'check' ? 'Checking...' : 'Check helper'}
+                      {helperButtonLabel('check', 'Check helper', 'Checking...')}
                     </button>
                     <button
-                      className="ghost-action"
+                      className={`ghost-action status-${helperStatusAction === 'sync' ? helperActionStatus?.tone ?? 'neutral' : 'neutral'}`}
                       disabled={helperActionBusy}
                       onClick={() => void syncControllerWithFeedback()}
+                      title={helperButtonTitle('sync')}
                       type="button"
                     >
-                      {helperPendingAction === 'sync' ? 'Syncing...' : 'Sync controller'}
+                      {helperButtonLabel('sync', 'Sync controller', 'Syncing...')}
                     </button>
                     <button
-                      className="ghost-action"
+                      className={`ghost-action status-${helperStatusAction === 'config' ? helperActionStatus?.tone ?? 'neutral' : 'neutral'}`}
                       disabled={helperActionBusy}
                       onClick={() => void saveConfigPathWithFeedback()}
+                      title={helperButtonTitle('config')}
                       type="button"
                     >
-                      {helperPendingAction === 'config' ? 'Saving...' : 'Save config'}
+                      {helperButtonLabel('config', 'Save config', 'Saving...')}
                     </button>
                     <button
-                      className="ghost-action"
+                      className={`ghost-action status-${helperStatusAction === 'traffic' ? helperActionStatus?.tone ?? 'neutral' : 'neutral'}`}
                       disabled={helperActionBusy}
                       onClick={() => void saveTrafficWithFeedback(trafficModuleEnabled, trafficProfileDraft)}
+                      title={helperButtonTitle('traffic')}
                       type="button"
                     >
-                      {helperPendingAction === 'traffic' ? 'Saving...' : 'Save traffic'}
+                      {helperButtonLabel('traffic', 'Save traffic', 'Saving...')}
                     </button>
                   </div>
                 </div>
-                {helperActionStatus ? (
-                  <div className={`settings-inline-status ${helperActionStatus.tone}`}>
-                    {helperActionStatus.text}
-                  </div>
-                ) : null}
                 <div className="settings-note-grid compact-health">
                   {healthRow('SQLite', helper.health?.sqlite ? 'ready' : helper.error ? 'issue' : 'idle', helper.health?.sqlite ? 'ok' : helper.error ? 'warn' : 'neutral')}
                   {healthRow(
@@ -2413,13 +2506,13 @@ export function App() {
                 Saves controller URL, secret, note, test worker count, and test timeout in browser storage. If helper is ready, testing limits are mirrored to helper.
               </div>
               <div className="settings-save-row">
-                {localBehaviorStatus ? (
-                  <div className={`settings-inline-status ${localBehaviorStatus.tone}`}>
-                    {localBehaviorStatus.text}
-                  </div>
-                ) : null}
-                <button className="primary-action form-action" disabled={detecting} type="submit">
-                  {detecting ? 'Saving...' : 'Save controller settings'}
+                <button
+                  className={`primary-action form-action status-${localBehaviorButtonTone}`}
+                  disabled={detecting}
+                  title={localBehaviorStatus?.text}
+                  type="submit"
+                >
+                  {localBehaviorButtonLabel}
                 </button>
               </div>
             </article>
@@ -2462,8 +2555,8 @@ export function App() {
                   />
                 </label>
                 <div className="proxy-board-status">
-                  <span className={`status-chip ${helperServiceAvailable ? 'ok' : 'bad'}`}>
-                    Helper {helperServiceAvailable ? 'ready' : 'offline'}
+                  <span className={`status-chip ${helperStatusTone}`}>
+                    {helperStatusLabel}
                   </span>
                   <span className="status-chip neutral">parallel {config.delayTestConcurrency ?? 4}</span>
                 </div>
@@ -2485,7 +2578,7 @@ export function App() {
                   const selectedScore = execution.mode !== 'native-urltest' ? groupScoreByName.get(proxy.now) : undefined;
                   const selectedDelayValue =
                     execution.mode === 'helper-score'
-                      ? selectedScore?.delayMs ?? null
+                      ? scoreDelayOrFallback(selectedScore, selectedDelay)
                       : proxies.groupDelayResults[proxy.name] ?? selectedDelay;
                   const selectedScoreTone = selectedScore ? nodeScoreTone(selectedScore, selectedDelay) : 'none';
                   const selectedDelayTone = delayTone(selectedDelayValue);
@@ -2654,12 +2747,13 @@ export function App() {
                           <div className={`strategy-card-nodes ${isActive ? 'expanded' : ''}`}>
                             {visibleMembers.map((member) => {
                           const isCurrent = member.name === proxy.now;
+                          const isSwitchingGroup = proxies.switchingGroups.includes(proxy.name);
                           const isTesting = proxies.testingProxies.includes(member.name);
                           const isHelperNodeProbing = activeProbeNodeNames.has(member.name);
-                          const canSelect = isSelectableProxyGroup(proxy);
+                          const canSelect = isSelectableProxyGroup(proxy) && !isSwitchingGroup;
                           const score = execution.mode === 'helper-score' ? groupScoreByName.get(member.name) : undefined;
                           const displayDelay = proxyDelayByName.get(member.name) ?? member.delay;
-                          const nodeDelay = execution.mode === 'helper-score' ? score?.delayMs ?? null : displayDelay;
+                          const nodeDelay = execution.mode === 'helper-score' ? scoreDelayOrFallback(score, displayDelay) : displayDelay;
                           const scoreTone = score ? nodeScoreTone(score, displayDelay) : 'none';
                           const nodeDelayTone = delayTone(nodeDelay);
                           const cardTone = rowConfig.mode === 'score' && score ? scoreTone : nodeDelayTone;
@@ -2765,7 +2859,9 @@ export function App() {
 
                   {!helperServiceAvailable ? (
                     <div className="inspector-warning">
-                      Helper service is offline. Score, helper delay, schedule, and URL settings are disabled.
+                      {helperAvailability === 'checking'
+                        ? 'Checking helper service. Score, helper delay, schedule, and URL settings will enable when ready.'
+                        : 'Helper service is offline. Score, helper delay, schedule, and URL settings are disabled.'}
                     </div>
                   ) : null}
                   {activeHelperScores?.applyError ? (

@@ -13,12 +13,22 @@ import {
 } from '../core/proxies';
 import { useControllerStore } from './controllerStore';
 
+const OPTIMISTIC_SWITCH_TTL_MS = 5_000;
+const SWITCH_CONFIRM_POLL_INTERVAL_MS = 300;
+
+type OptimisticSelection = {
+  name: string;
+  expiresAt: number;
+};
+
 type ProxyState = {
   proxies: ProxyRecord[];
   query: string;
   groupTestUrls: Record<string, string>;
   nodeTestUrls: Record<string, string>;
   groupDelayResults: Record<string, number>;
+  optimisticSelections: Record<string, OptimisticSelection>;
+  switchingGroups: string[];
   testingProxies: string[];
   testingAllNodes: boolean;
   loading: boolean;
@@ -43,6 +53,8 @@ export const useProxyStore = create<ProxyState>()(
       groupTestUrls: {},
       nodeTestUrls: {},
       groupDelayResults: {},
+      optimisticSelections: {},
+      switchingGroups: [],
       testingProxies: [],
       testingAllNodes: false,
       loading: false,
@@ -67,11 +79,20 @@ export const useProxyStore = create<ProxyState>()(
         const client = new ClashApiClient({ baseUrl: config.controllerUrl, secret: config.secret });
         try {
           const response = await client.getJson<ProxiesResponse>('/proxies');
-          set({
-            proxies: normalizeProxiesResponse(response),
-            groupDelayResults: {},
-            loading: false,
-            lastUpdatedAt: new Date().toISOString()
+          const normalized = normalizeProxiesResponse(response);
+          set((state) => {
+            const { proxies, optimisticSelections } = applyOptimisticSelections(
+              normalized,
+              state.optimisticSelections,
+              Date.now()
+            );
+            return {
+              proxies,
+              optimisticSelections,
+              groupDelayResults: {},
+              loading: false,
+              lastUpdatedAt: new Date().toISOString()
+            };
           });
         } catch (error) {
           set({ loading: false, error: error instanceof Error ? error.message : 'Failed to load proxies' });
@@ -79,13 +100,49 @@ export const useProxyStore = create<ProxyState>()(
       },
       switchProxy: async (group, name) => {
         const { config } = useControllerStore.getState();
+        if (!config.controllerUrl || get().switchingGroups.includes(group)) {
+          return;
+        }
+        const previousNow = get().proxies.find((proxy) => proxy.name === group)?.now ?? '';
         const client = new ClashApiClient({ baseUrl: config.controllerUrl, secret: config.secret });
-        await client.request(`/proxies/${encodeURIComponent(group)}`, {
-          method: 'PUT',
-          body: JSON.stringify({ name }),
-          headers: { 'content-type': 'application/json' }
-        });
-        await get().refresh();
+        let latestProxies: ProxyRecord[] | null = null;
+        set((state) => ({
+          error: null,
+          switchingGroups: Array.from(new Set([...state.switchingGroups, group])),
+          optimisticSelections: {
+            ...state.optimisticSelections,
+            [group]: { name, expiresAt: Date.now() + OPTIMISTIC_SWITCH_TTL_MS }
+          },
+          proxies: state.proxies.map((proxy) => (proxy.name === group ? { ...proxy, now: name } : proxy))
+        }));
+        try {
+          await client.request(`/proxies/${encodeURIComponent(group)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ name }),
+            headers: { 'content-type': 'application/json' }
+          });
+          latestProxies = await waitForConfirmedSelection(client, group, name, OPTIMISTIC_SWITCH_TTL_MS);
+          const selected = latestProxies.find((proxy) => proxy.name === group)?.now;
+          if (selected !== name) {
+            throw new Error(`Controller still reports ${selected || 'empty'} after switch confirmation timeout`);
+          }
+          set((state) => ({
+            proxies: latestProxies ?? state.proxies,
+            optimisticSelections: omitKey(state.optimisticSelections, group),
+            switchingGroups: state.switchingGroups.filter((item) => item !== group),
+            groupDelayResults: {},
+            loading: false,
+            lastUpdatedAt: new Date().toISOString(),
+            error: null
+          }));
+        } catch (error) {
+          set((state) => ({
+            proxies: latestProxies ?? state.proxies.map((proxy) => (proxy.name === group ? { ...proxy, now: previousNow } : proxy)),
+            optimisticSelections: omitKey(state.optimisticSelections, group),
+            switchingGroups: state.switchingGroups.filter((item) => item !== group),
+            error: `Switch failed for ${group}: ${formatProxyError(error)}`
+          }));
+        }
       },
       testProxy: async (name, group, testUrl) => {
         const { config } = useControllerStore.getState();
@@ -267,6 +324,30 @@ export const useProxyStore = create<ProxyState>()(
   )
 );
 
+async function waitForConfirmedSelection(
+  client: ClashApiClient,
+  group: string,
+  target: string,
+  timeoutMs: number
+): Promise<ProxyRecord[]> {
+  const deadline = Date.now() + timeoutMs;
+  let latest = await fetchNormalizedProxies(client);
+  while (latest.find((proxy) => proxy.name === group)?.now !== target && Date.now() < deadline) {
+    await sleep(SWITCH_CONFIRM_POLL_INTERVAL_MS);
+    latest = await fetchNormalizedProxies(client);
+  }
+  return latest;
+}
+
+async function fetchNormalizedProxies(client: ClashApiClient): Promise<ProxyRecord[]> {
+  const response = await client.getJson<ProxiesResponse>('/proxies');
+  return normalizeProxiesResponse(response);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
   const queue = [...items];
   const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
@@ -283,6 +364,37 @@ async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T
 
 function proxyMapFrom(proxies: ProxyRecord[]): Map<string, ProxyRecord> {
   return new Map(proxies.map((proxy) => [proxy.name, proxy]));
+}
+
+function applyOptimisticSelections(
+  proxies: ProxyRecord[],
+  optimisticSelections: Record<string, OptimisticSelection>,
+  now: number
+): { proxies: ProxyRecord[]; optimisticSelections: Record<string, OptimisticSelection> } {
+  const nextSelections = { ...optimisticSelections };
+  const nextProxies = proxies.map((proxy) => {
+    const pending = nextSelections[proxy.name];
+    if (!pending) {
+      return proxy;
+    }
+    if (pending.expiresAt <= now || !proxy.all.includes(pending.name)) {
+      delete nextSelections[proxy.name];
+      return proxy;
+    }
+    if (proxy.now === pending.name) {
+      delete nextSelections[proxy.name];
+      return proxy;
+    }
+    return { ...proxy, now: pending.name };
+  });
+
+  return { proxies: nextProxies, optimisticSelections: nextSelections };
+}
+
+function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  const next = { ...record };
+  delete next[key];
+  return next;
 }
 
 function nativeGroupDelayFromResponse(response: unknown, group: string, proxies: ProxyRecord[]): number | null {

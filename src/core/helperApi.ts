@@ -35,6 +35,7 @@ export type HelperTestingSettings = {
   defaultTestUrl: string;
   delayTestTimeoutMs: number;
   minProbeIntervalSec: number;
+  probeConcurrency: number;
 };
 
 export type HelperTrafficSettings = {

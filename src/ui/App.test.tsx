@@ -53,6 +53,8 @@ function setupProxyWorkspace() {
     groupTestUrls: {},
     nodeTestUrls: {},
     groupDelayResults: {},
+    optimisticSelections: {},
+    switchingGroups: [],
     testingProxies: [],
     testingAllNodes: false,
     loading: false,
@@ -167,7 +169,8 @@ function setupProxyWorkspace() {
     probingGroups: [],
     applyingGroups: [],
     error: null,
-    lastCheckedAt: null
+    lastCheckedAt: null,
+    lastSyncedControllerKey: null
   });
 }
 
@@ -209,6 +212,150 @@ describe('App proxy workspace', () => {
     expect(nodeCards.some((node) => within(node as HTMLElement).queryByText('212ms'))).toBe(true);
     expect(nodeCards.some((node) => within(node as HTMLElement).queryByText('active'))).toBe(false);
     expect(nodeCards.some((node) => within(node as HTMLElement).queryByText('standby'))).toBe(false);
+  });
+
+  it('shows helper checking before the first helper health result', () => {
+    useHelperStore.setState({
+      health: null,
+      error: null,
+      lastCheckedAt: null,
+      loading: false
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/health')) {
+          return new Promise<Response>(() => {});
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    render(<App />);
+
+    expect(screen.getAllByText('Helper checking').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Helper offline')).not.toBeInTheDocument();
+  });
+
+  it('loads helper groups and scores after a refresh starts with unknown helper health', async () => {
+    const requests: string[] = [];
+    useHelperStore.setState({
+      health: null,
+      testingSettings: null,
+      trafficSettings: null,
+      networkUsageSettings: null,
+      groups: [],
+      scoresByGroup: {},
+      error: null,
+      lastCheckedAt: null,
+      loading: false
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        requests.push(url);
+        if (url.endsWith('/api/v1/health')) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              version: '0.1.0',
+              sqlite: true,
+              controllerConfigured: true,
+              controllerReachable: true,
+              mobileConfigUrl: null,
+              error: null
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        if (url.endsWith('/api/v1/settings/testing')) {
+          return new Response(
+            JSON.stringify({
+              defaultTestUrl: groupConfig.testUrl,
+              delayTestTimeoutMs: 5000,
+              minProbeIntervalSec: 60,
+              probeConcurrency: 4
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        if (url.endsWith('/api/v1/settings/traffic')) {
+          return new Response(JSON.stringify({ enabled: false, browserProfile: '' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+        if (url.endsWith('/api/v1/settings/network-usage')) {
+          return new Response(JSON.stringify({ enabled: false, retentionDays: 7 }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+        if (url.endsWith('/api/v1/groups')) {
+          return new Response(
+            JSON.stringify({
+              groups: [
+                {
+                  name: 'select',
+                  kind: 'Selector',
+                  now: 'hk-1',
+                  all: ['hk-1', 'jp-1'],
+                  config: groupConfig,
+                  recommended: 'hk-1',
+                  applyError: null
+                }
+              ]
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        if (url.endsWith('/api/v1/groups/select/scores')) {
+          return new Response(
+            JSON.stringify({
+              group: 'select',
+              mode: 'score',
+              scheme: 'Balanced',
+              testUrl: groupConfig.testUrl,
+              recommended: 'hk-1',
+              applyError: null,
+              nodes: [
+                {
+                  name: 'hk-1',
+                  score: 93,
+                  delayMs: 44,
+                  components: { latency: 100, availability: 100, jitter: 100, freshness: 100 },
+                  lastTestedAt: '2026-05-22T08:00:00.000Z',
+                  error: null
+                }
+              ]
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    render(<App />);
+
+    await waitFor(() => expect(requests.some((url) => url.endsWith('/api/v1/groups/select/scores'))).toBe(true));
+    await waitFor(() => expect(screen.getAllByText('93').length).toBeGreaterThan(0));
+  });
+
+  it('falls back to controller delay while helper scores are not loaded yet', () => {
+    useHelperStore.setState({ scoresByGroup: {} });
+
+    const { container } = render(<App />);
+    const scoreMarks = Array.from(container.querySelectorAll('.score-mark'));
+    const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card')) as HTMLElement[];
+    const hkNode = nodeCards.find((node) => within(node).queryByText('hk-1')) as HTMLElement;
+    const jpNode = nodeCards.find((node) => within(node).queryByText('jp-1')) as HTMLElement;
+
+    expect(scoreMarks.map((mark) => mark.textContent)).toEqual(['--', '--']);
+    expect(within(hkNode).getByRole('button', { name: /Test hk-1 delay/i })).toHaveTextContent('48ms');
+    expect(within(jpNode).getByRole('button', { name: /Test jp-1 delay/i })).toHaveTextContent('212ms');
   });
 
   it('uses the latest score delay without falling back to controller delay in score mode', () => {
@@ -511,6 +658,19 @@ describe('App proxy workspace', () => {
 
   it('shows network usage as an overview submodule', () => {
     window.location.hash = '#/overview';
+    const recentConnections = Array.from({ length: 12 }, (_, index) => ({
+      id: `conn-${index + 1}`,
+      host: `host-${index + 1}.example.com`,
+      network: 'tcp',
+      rule: `DOMAIN host-${index + 1}.example.com`,
+      outbound: 'proxy-a',
+      chains: ['proxy-a'],
+      firstSeenMs: 1000,
+      lastSeenMs: 2000 + index,
+      uploadBytes: 128,
+      downloadBytes: 1024,
+      totalBytes: 1152
+    }));
     useHelperStore.setState({
       networkUsageSettings: { enabled: true, retentionDays: 7 },
       networkUsageSummary: {
@@ -531,30 +691,19 @@ describe('App proxy workspace', () => {
         items: [{ label: 'proxy-a', uploadBytes: 384, downloadBytes: 1024, totalBytes: 1408, connectionCount: 1 }]
       },
       networkUsageConnections: {
-        connections: [
-          {
-            id: 'conn-1',
-            host: 'example.com',
-            network: 'tcp',
-            rule: 'DOMAIN example.com',
-            outbound: 'proxy-a',
-            chains: ['proxy-a'],
-            firstSeenMs: 1000,
-            lastSeenMs: 2000,
-            uploadBytes: 128,
-            downloadBytes: 1024,
-            totalBytes: 1152
-          }
-        ]
+        connections: recentConnections
       }
     });
 
-    render(<App />);
+    const { container } = render(<App />);
 
     expect(screen.getByText('Usage window')).toBeInTheDocument();
     expect(screen.getAllByText('example.com').length).toBeGreaterThan(0);
     expect(screen.getAllByText('proxy-a').length).toBeGreaterThan(0);
     expect(screen.getByText('2 connections')).toBeInTheDocument();
+    expect(container.querySelector('.usage-connection-window')).not.toBeNull();
+    expect(container.querySelectorAll('.usage-connection-row')).toHaveLength(10);
+    expect(container.querySelector('.overview-scroll-buffer')).not.toBeNull();
   });
 
   it('exposes the network usage capture toggle in settings', () => {
@@ -574,5 +723,24 @@ describe('App proxy workspace', () => {
     fireEvent.click(checkbox);
 
     expect(saveNetworkUsageSettings).toHaveBeenCalledWith({ enabled: true, retentionDays: 7 });
+  });
+
+  it('shows local behavior save status on the save button without inserting a status block', async () => {
+    window.location.hash = '#/controller';
+    useControllerStore.setState({
+      detect: vi.fn(
+        () =>
+          new Promise<void>(() => {
+            useControllerStore.setState({ detecting: true });
+          })
+      )
+    });
+
+    const { container } = render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save controller settings' }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Saving...' })).toBeInTheDocument());
+    expect(container.querySelector('.settings-save-row .settings-inline-status')).toBeNull();
   });
 });

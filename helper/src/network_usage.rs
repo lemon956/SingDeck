@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::DateTime;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,6 +8,7 @@ pub const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const MINUTE_MS: i64 = 60 * 1000;
 const HOUR_MS: i64 = 60 * MINUTE_MS;
 const SETTINGS_KEY: &str = "network_usage_settings";
+const LAST_SAMPLE_AT_KEY: &str = "network_usage_last_sample_at";
 const DEFAULT_RETENTION_DAYS: i64 = 7;
 const MIN_RETENTION_DAYS: i64 = 1;
 pub const MAX_RETENTION_DAYS: i64 = 90;
@@ -152,6 +154,7 @@ struct ConnectionSample {
     rule: String,
     outbound: String,
     chains: Vec<String>,
+    started_at_ms: Option<i64>,
     upload_counter: i64,
     download_counter: i64,
 }
@@ -250,9 +253,11 @@ pub fn apply_connections_snapshot(
     snapshot: &Value,
     sampled_at_ms: i64,
 ) -> Result<()> {
+    let previous_sampled_at_ms = load_last_sample_at(conn)?;
     for sample in parse_connection_samples(snapshot) {
-        record_connection_sample(conn, &sample, sampled_at_ms)?;
+        record_connection_sample(conn, &sample, sampled_at_ms, previous_sampled_at_ms)?;
     }
+    save_last_sample_at(conn, sampled_at_ms)?;
     Ok(())
 }
 
@@ -260,6 +265,7 @@ fn record_connection_sample(
     conn: &Connection,
     sample: &ConnectionSample,
     sampled_at_ms: i64,
+    previous_sampled_at_ms: Option<i64>,
 ) -> Result<()> {
     let previous = conn
         .query_row(
@@ -273,14 +279,21 @@ fn record_connection_sample(
         )
         .optional()?;
 
-    let (upload_delta, download_delta) = previous
-        .map(|(upload, download)| {
-            (
-                (sample.upload_counter - upload).max(0),
-                (sample.download_counter - download).max(0),
-            )
-        })
-        .unwrap_or((0, 0));
+    let (upload_delta, download_delta) = match previous {
+        Some((upload, download)) => (
+            (sample.upload_counter - upload).max(0),
+            (sample.download_counter - download).max(0),
+        ),
+        None if is_new_connection_since_last_sample(
+            sample.started_at_ms,
+            previous_sampled_at_ms,
+            sampled_at_ms,
+        ) =>
+        {
+            (sample.upload_counter.max(0), sample.download_counter.max(0))
+        }
+        None => (0, 0),
+    };
     let chains_json = serde_json::to_string(&sample.chains)?;
 
     conn.execute(
@@ -364,6 +377,42 @@ fn record_connection_sample(
     )?;
 
     Ok(())
+}
+
+fn load_last_sample_at(conn: &Connection) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            [LAST_SAMPLE_AT_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|value| value.parse::<i64>().ok()))
+}
+
+fn save_last_sample_at(conn: &Connection, sampled_at_ms: i64) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO kv(key, value)
+        VALUES(?1, ?2)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        "#,
+        params![LAST_SAMPLE_AT_KEY, sampled_at_ms.to_string()],
+    )?;
+    Ok(())
+}
+
+fn is_new_connection_since_last_sample(
+    started_at_ms: Option<i64>,
+    previous_sampled_at_ms: Option<i64>,
+    sampled_at_ms: i64,
+) -> bool {
+    let (Some(started_at_ms), Some(previous_sampled_at_ms)) =
+        (started_at_ms, previous_sampled_at_ms)
+    else {
+        return false;
+    };
+    started_at_ms >= previous_sampled_at_ms && started_at_ms <= sampled_at_ms
 }
 
 pub fn cleanup_old_usage(conn: &Connection, now_ms: i64, retention_days: i64) -> Result<()> {
@@ -638,6 +687,7 @@ fn parse_connection_sample(connection: &Value) -> Option<ConnectionSample> {
         },
         outbound,
         chains,
+        started_at_ms: parse_connection_start_ms(connection.get("start")),
         upload_counter: read_i64(connection.get("upload")).unwrap_or(0).max(0),
         download_counter: read_i64(connection.get("download")).unwrap_or(0).max(0),
     })
@@ -657,6 +707,13 @@ fn read_i64(value: Option<&Value>) -> Option<i64> {
             .as_i64()
             .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
     })
+}
+
+fn parse_connection_start_ms(value: Option<&Value>) -> Option<i64> {
+    let raw = read_string(value)?;
+    DateTime::parse_from_rfc3339(&raw)
+        .ok()
+        .map(|time| time.timestamp_millis())
 }
 
 #[cfg(test)]
@@ -688,6 +745,58 @@ mod tests {
                 }]
             }),
             60_000,
+        )
+        .unwrap();
+
+        let summary = query_summary(&conn, 0, 120_000, UsageBucket::Minute).unwrap();
+        assert_eq!(summary.upload_bytes, 0);
+        assert_eq!(summary.download_bytes, 0);
+        assert_eq!(summary.connection_count, 0);
+    }
+
+    #[test]
+    fn first_seen_short_connection_counts_when_started_after_previous_sample() {
+        let conn = test_db();
+        apply_connections_snapshot(&conn, &json!({ "connections": [] }), 60_000).unwrap();
+        apply_connections_snapshot(
+            &conn,
+            &json!({
+                "connections": [{
+                    "id": "short-1",
+                    "start": "1970-01-01T00:01:00.500Z",
+                    "metadata": { "host": "short.test", "network": "tcp" },
+                    "chains": ["proxy-a"],
+                    "upload": 120,
+                    "download": 880
+                }]
+            }),
+            61_000,
+        )
+        .unwrap();
+
+        let summary = query_summary(&conn, 0, 120_000, UsageBucket::Minute).unwrap();
+        assert_eq!(summary.upload_bytes, 120);
+        assert_eq!(summary.download_bytes, 880);
+        assert_eq!(summary.connection_count, 1);
+    }
+
+    #[test]
+    fn first_seen_old_connection_remains_baseline_even_with_start_time() {
+        let conn = test_db();
+        apply_connections_snapshot(&conn, &json!({ "connections": [] }), 60_000).unwrap();
+        apply_connections_snapshot(
+            &conn,
+            &json!({
+                "connections": [{
+                    "id": "old-live-1",
+                    "start": "1970-01-01T00:00:20.000Z",
+                    "metadata": { "host": "old-live.test", "network": "tcp" },
+                    "chains": ["proxy-a"],
+                    "upload": 120,
+                    "download": 880
+                }]
+            }),
+            61_000,
         )
         .unwrap();
 

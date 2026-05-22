@@ -18,6 +18,7 @@ describe('helper event stream', () => {
     });
     useRuntimeStore.setState({
       history: [],
+      lastTraffic: { up: 0, down: 0 },
       lastUpdatedAt: null
     });
   });
@@ -52,6 +53,68 @@ describe('helper event stream', () => {
     expect(useHelperStore.getState().activeProbeGroups).toEqual(['select']);
     expect(useHelperStore.getState().activeProbeNodesByGroup).toEqual({ select: ['hk-1'] });
     expect(useHelperStore.getState().scoresByGroup.select?.recommended).toBe('hk-1');
+  });
+
+  it('merges partial probe scores into the existing group snapshot', () => {
+    applyHelperEvent({
+      type: 'probeScores',
+      scores: {
+        group: 'select',
+        mode: 'score',
+        scheme: 'Balanced',
+        testUrl: 'https://cp.cloudflare.com/generate_204',
+        recommended: 'hk-1',
+        applyError: null,
+        nodes: [
+          {
+            name: 'hk-1',
+            score: 72,
+            delayMs: 120,
+            components: { latency: 72, availability: 100, jitter: 80, freshness: 100 },
+            lastTestedAt: '2026-05-21T10:00:01+08:00',
+            error: null
+          },
+          {
+            name: 'jp-1',
+            score: 65,
+            delayMs: 180,
+            components: { latency: 65, availability: 100, jitter: 75, freshness: 100 },
+            lastTestedAt: '2026-05-21T10:00:01+08:00',
+            error: null
+          }
+        ]
+      }
+    });
+
+    applyHelperEvent({
+      type: 'probeScores',
+      partial: true,
+      scores: {
+        group: 'select',
+        mode: 'score',
+        scheme: 'Balanced',
+        testUrl: 'https://cp.cloudflare.com/generate_204',
+        recommended: 'jp-1',
+        applyError: null,
+        nodes: [
+          {
+            name: 'jp-1',
+            score: 96,
+            delayMs: 42,
+            components: { latency: 96, availability: 100, jitter: 95, freshness: 100 },
+            lastTestedAt: '2026-05-21T10:00:03+08:00',
+            error: null
+          }
+        ]
+      }
+    });
+
+    const scores = useHelperStore.getState().scoresByGroup.select;
+    expect(scores.nodes.map((node) => [node.name, node.score, node.delayMs])).toEqual([
+      ['hk-1', 72, 120],
+      ['jp-1', 96, 42]
+    ]);
+    expect(scores.recommended).toBe('hk-1');
   });
 
   it('applies connection snapshots to the connection store', () => {

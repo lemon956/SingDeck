@@ -14,14 +14,17 @@ describe('helper store', () => {
     useHelperStore.setState({
       helperUrl: 'http://helper.local',
       configPath: '',
+      health: null,
       testingSettings: null,
       trafficSettings: null,
+      networkUsageSettings: null,
       groups: [],
       scoresByGroup: {},
       activeProbeGroups: [],
       activeProbeNodesByGroup: {},
       eventStreamConnected: false,
       loading: false,
+      lastSyncedControllerKey: null,
       error: null
     });
     useControllerStore.setState({
@@ -123,6 +126,132 @@ describe('helper store', () => {
     expect(Object.keys(useHelperStore.getState().scoresByGroup).sort()).toEqual(['GLOBAL', 'download']);
   });
 
+  it('keeps previous scores visible while strategy groups refresh', async () => {
+    let resolveGroups!: () => void;
+    useHelperStore.setState({
+      scoresByGroup: {
+        GLOBAL: {
+          group: 'GLOBAL',
+          mode: 'score',
+          scheme: 'Balanced',
+          testUrl: 'https://cp.cloudflare.com/generate_204',
+          recommended: 'hk-1',
+          applyError: null,
+          nodes: [
+            {
+              name: 'hk-1',
+              score: 88,
+              delayMs: 58,
+              components: { latency: 88, availability: 100, jitter: 80, freshness: 100 },
+              lastTestedAt: null,
+              error: null
+            }
+          ]
+        }
+      }
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/groups')) {
+          return new Promise<Response>((resolve) => {
+            resolveGroups = () => resolve(jsonResponse({ groups: [] }));
+          });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    const refresh = useHelperStore.getState().loadGroups();
+
+    expect(useHelperStore.getState().loading).toBe(false);
+    expect(useHelperStore.getState().scoresByGroup.GLOBAL?.nodes[0].score).toBe(88);
+
+    resolveGroups();
+    await refresh;
+  });
+
+  it('keeps existing scores when a score preload fails', async () => {
+    useHelperStore.setState({
+      scoresByGroup: {
+        GLOBAL: {
+          group: 'GLOBAL',
+          mode: 'score',
+          scheme: 'Balanced',
+          testUrl: 'https://cp.cloudflare.com/generate_204',
+          recommended: 'hk-1',
+          applyError: null,
+          nodes: [
+            {
+              name: 'hk-1',
+              score: 88,
+              delayMs: 58,
+              components: { latency: 88, availability: 100, jitter: 80, freshness: 100 },
+              lastTestedAt: null,
+              error: null
+            }
+          ]
+        }
+      }
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/groups')) {
+          return jsonResponse({
+            groups: [
+              {
+                name: 'GLOBAL',
+                kind: 'Selector',
+                now: 'hk-1',
+                all: ['hk-1'],
+                config: {
+                  testUrl: 'https://cp.cloudflare.com/generate_204',
+                  testUrlOverridden: false,
+                  mode: 'score',
+                  scheme: 'Balanced',
+                  autoSwitch: true,
+                  autoProbe: true,
+                  probeIntervalSec: 60
+                },
+                recommended: 'hk-1',
+                applyError: null
+              }
+            ]
+          });
+        }
+        if (url.endsWith('/api/v1/groups/GLOBAL/scores')) {
+          return new Response('temporary score failure', { status: 503 });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().loadGroups();
+
+    expect(useHelperStore.getState().groups.map((group) => group.name)).toEqual(['GLOBAL']);
+    expect(useHelperStore.getState().scoresByGroup.GLOBAL?.nodes[0].score).toBe(88);
+  });
+
+  it('keeps strategy groups as an array when the helper returns a malformed group payload', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/groups')) {
+          return jsonResponse({ nodes: [] });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().loadGroups();
+
+    expect(useHelperStore.getState().groups).toEqual([]);
+  });
+
   it('loads active helper probe groups', async () => {
     vi.stubGlobal(
       'fetch',
@@ -153,6 +282,175 @@ describe('helper store', () => {
       select: ['hk-1', 'jp-1'],
       download: ['sg-1']
     });
+  });
+
+  it('clears stale helper health and active probes when health check fails', async () => {
+    useHelperStore.setState({
+      health: {
+        ok: true,
+        version: '0.1.0',
+        sqlite: true,
+        controllerConfigured: true,
+        controllerReachable: true,
+        mobileConfigUrl: null,
+        error: null
+      },
+      activeProbeGroups: ['select'],
+      activeProbeNodesByGroup: { select: ['hk-1'] },
+      eventStreamConnected: true
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('helper down', { status: 503 })));
+
+    await useHelperStore.getState().checkHealth();
+
+    expect(useHelperStore.getState().health).toBeNull();
+    expect(useHelperStore.getState().activeProbeGroups).toEqual([]);
+    expect(useHelperStore.getState().activeProbeNodesByGroup).toEqual({});
+    expect(useHelperStore.getState().eventStreamConnected).toBe(false);
+  });
+
+  it('clears active probe state when polling active probes fails', async () => {
+    useHelperStore.setState({
+      activeProbeGroups: ['select'],
+      activeProbeNodesByGroup: { select: ['hk-1'] },
+      eventStreamConnected: true
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('temporary helper failure', { status: 503 })));
+
+    await useHelperStore.getState().loadActiveProbes();
+
+    expect(useHelperStore.getState().activeProbeGroups).toEqual([]);
+    expect(useHelperStore.getState().activeProbeNodesByGroup).toEqual({});
+    expect(useHelperStore.getState().eventStreamConnected).toBe(false);
+  });
+
+  it('skips duplicate controller sync unless forced', async () => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === 'PUT' && url.endsWith('/api/v1/controller')) {
+          requests.push('put-controller');
+          return jsonResponse({ controllerUrl: 'http://controller.local', secret: '' });
+        }
+        if (url.endsWith('/api/v1/health')) {
+          return jsonResponse({
+            ok: true,
+            version: '0.1.0',
+            sqlite: true,
+            controllerConfigured: true,
+            controllerReachable: true,
+            mobileConfigUrl: null,
+            error: null
+          });
+        }
+        if (url.endsWith('/api/v1/settings/testing')) {
+          return jsonResponse({
+            defaultTestUrl: 'https://cp.cloudflare.com/generate_204',
+            delayTestTimeoutMs: 10000,
+            minProbeIntervalSec: 60,
+            probeConcurrency: 4
+          });
+        }
+        if (url.endsWith('/api/v1/settings/traffic')) {
+          return jsonResponse({ enabled: false, browserProfile: '' });
+        }
+        if (url.endsWith('/api/v1/settings/network-usage')) {
+          return jsonResponse({ enabled: false, retentionDays: 7 });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().syncController();
+    await useHelperStore.getState().syncController();
+    await useHelperStore.getState().syncController({ force: true });
+
+    expect(requests).toEqual(['put-controller', 'put-controller']);
+  });
+
+  it('checks helper health when duplicate controller sync is skipped with unknown health', async () => {
+    const requests: string[] = [];
+    useHelperStore.setState({
+      health: null,
+      lastSyncedControllerKey: 'http://controller.local\n'
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === 'PUT' && url.endsWith('/api/v1/controller')) {
+          requests.push('put-controller');
+          return jsonResponse({ controllerUrl: 'http://controller.local', secret: '' });
+        }
+        if (url.endsWith('/api/v1/health')) {
+          requests.push('health');
+          return jsonResponse({
+            ok: true,
+            version: '0.1.0',
+            sqlite: true,
+            controllerConfigured: true,
+            controllerReachable: true,
+            mobileConfigUrl: null,
+            error: null
+          });
+        }
+        if (url.endsWith('/api/v1/settings/testing')) {
+          requests.push('testing');
+          return jsonResponse({
+            defaultTestUrl: 'https://cp.cloudflare.com/generate_204',
+            delayTestTimeoutMs: 10000,
+            minProbeIntervalSec: 60,
+            probeConcurrency: 4
+          });
+        }
+        if (url.endsWith('/api/v1/settings/traffic')) {
+          requests.push('traffic');
+          return jsonResponse({ enabled: false, browserProfile: '' });
+        }
+        if (url.endsWith('/api/v1/settings/network-usage')) {
+          requests.push('network-usage');
+          return jsonResponse({ enabled: false, retentionDays: 7 });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().syncController();
+
+    expect(requests).toEqual(['health', 'testing', 'traffic', 'network-usage']);
+    expect(useHelperStore.getState().health?.ok).toBe(true);
+  });
+
+  it('clears helper readiness when the helper URL changes', () => {
+    useHelperStore.setState({
+      health: {
+        ok: true,
+        version: '0.1.0',
+        sqlite: true,
+        controllerConfigured: true,
+        controllerReachable: true,
+        mobileConfigUrl: null,
+        error: null
+      },
+      activeProbeGroups: ['select'],
+      activeProbeNodesByGroup: { select: ['hk-1'] },
+      eventStreamConnected: true,
+      error: 'old helper error',
+      lastCheckedAt: new Date().toISOString(),
+      lastSyncedControllerKey: 'http://controller.local\n'
+    });
+
+    useHelperStore.getState().updateSettings({ helperUrl: 'http://new-helper.local' });
+
+    expect(useHelperStore.getState().health).toBeNull();
+    expect(useHelperStore.getState().activeProbeGroups).toEqual([]);
+    expect(useHelperStore.getState().activeProbeNodesByGroup).toEqual({});
+    expect(useHelperStore.getState().eventStreamConnected).toBe(false);
+    expect(useHelperStore.getState().error).toBeNull();
+    expect(useHelperStore.getState().lastCheckedAt).toBeNull();
+    expect(useHelperStore.getState().lastSyncedControllerKey).toBeNull();
   });
 
   it('polls active probe nodes while a manual group probe is pending', async () => {
@@ -256,7 +554,8 @@ describe('helper store', () => {
           return jsonResponse({
             defaultTestUrl: body.defaultTestUrl,
             delayTestTimeoutMs: body.delayTestTimeoutMs,
-            minProbeIntervalSec: body.minProbeIntervalSec
+            minProbeIntervalSec: body.minProbeIntervalSec,
+            probeConcurrency: body.probeConcurrency
           });
         }
         if (url.endsWith('/api/v1/groups')) {
@@ -271,17 +570,25 @@ describe('helper store', () => {
     expect(requests[0].body).toEqual({
       defaultTestUrl: 'https://api.openai.com',
       delayTestTimeoutMs: 10000,
-      minProbeIntervalSec: 60
+      minProbeIntervalSec: 60,
+      probeConcurrency: 4
     });
   });
 
   it('saves minimum probe interval with testing settings', async () => {
     const requests: Array<{ url: string; body: unknown }> = [];
+    useControllerStore.setState((state) => ({
+      config: {
+        ...state.config,
+        delayTestConcurrency: 6
+      }
+    }));
     useHelperStore.setState({
       testingSettings: {
         defaultTestUrl: 'https://cp.cloudflare.com/generate_204',
         delayTestTimeoutMs: 8000,
-        minProbeIntervalSec: 180
+        minProbeIntervalSec: 180,
+        probeConcurrency: 6
       }
     });
     vi.stubGlobal(
@@ -302,7 +609,8 @@ describe('helper store', () => {
     expect(requests[0].body).toEqual({
       defaultTestUrl: 'https://cp.cloudflare.com/generate_204',
       delayTestTimeoutMs: 8000,
-      minProbeIntervalSec: 300
+      minProbeIntervalSec: 300,
+      probeConcurrency: 6
     });
   });
 

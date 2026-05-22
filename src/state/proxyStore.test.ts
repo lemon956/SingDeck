@@ -35,6 +35,8 @@ describe('proxy store latency tests', () => {
       groupTestUrls: {},
       nodeTestUrls: {},
       groupDelayResults: {},
+      optimisticSelections: {},
+      switchingGroups: [],
       testingProxies: [],
       testingAllNodes: false,
       loading: false,
@@ -44,6 +46,7 @@ describe('proxy store latency tests', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -118,6 +121,69 @@ describe('proxy store latency tests', () => {
       Other: 777
     });
     expect(useProxyStore.getState().proxies.find((proxy) => proxy.name === 'Other')?.delay).toBe(120);
+  });
+
+  it('updates selected proxy immediately while the controller switch is pending', async () => {
+    let resolveSwitch!: () => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/proxies/Auto') && init?.method === 'PUT') {
+          return new Promise<Response>((resolve) => {
+            resolveSwitch = () => resolve(new Response(null, { status: 204 }));
+          });
+        }
+        if (url.endsWith('/proxies')) {
+          return jsonResponse({
+            proxies: {
+              Auto: { type: 'Selector', now: 'jp-1', all: ['hk-1', 'jp-1'], history: [{ delay: 88 }] },
+              'hk-1': { type: 'Trojan', history: [{ delay: 48 }] },
+              'jp-1': { type: 'Trojan', history: [{ delay: 88 }] }
+            }
+          });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    const switchRequest = useProxyStore.getState().switchProxy('Auto', 'jp-1');
+
+    expect(useProxyStore.getState().proxies.find((proxy) => proxy.name === 'Auto')?.now).toBe('jp-1');
+
+    resolveSwitch();
+    await switchRequest;
+  });
+
+  it('rolls back optimistic selected proxy when controller confirmation times out', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/proxies/Auto') && init?.method === 'PUT') {
+          return new Response(null, { status: 204 });
+        }
+        if (url.endsWith('/proxies')) {
+          return jsonResponse({
+            proxies: {
+              Auto: { type: 'Selector', now: 'hk-1', all: ['hk-1', 'jp-1'], history: [{ delay: 48 }] },
+              'hk-1': { type: 'Trojan', history: [{ delay: 48 }] },
+              'jp-1': { type: 'Trojan', history: [{ delay: 88 }] }
+            }
+          });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    const request = useProxyStore.getState().switchProxy('Auto', 'jp-1');
+    await vi.advanceTimersByTimeAsync(5_500);
+    await request;
+
+    expect(useProxyStore.getState().proxies.find((proxy) => proxy.name === 'Auto')?.now).toBe('hk-1');
+    expect(useProxyStore.getState().switchingGroups).toEqual([]);
+    expect(useProxyStore.getState().error).toMatch(/Switch failed for Auto/);
   });
 
 });

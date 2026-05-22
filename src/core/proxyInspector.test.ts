@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { HelperGroupConfig, HelperNodeScore } from './helperApi';
+import { isHelperServiceAvailable } from './helperStatus';
 import { buildProxyInspectorModel } from './proxyInspector';
 import type { ProxyRecord } from './proxies';
 import { resolveProbeExecution } from './proxies';
@@ -84,5 +85,29 @@ describe('proxy inspector model', () => {
     expect(model.canAutoSwitch).toBe(false);
     expect(model.autoSwitchLabel).toBe('sing-box');
     expect(model.runLabel).toBe('Run delay');
+  });
+
+  it('allows selector auto switch when helper is healthy but controller polling has an error', () => {
+    const group = proxy({});
+    const model = buildProxyInspectorModel({
+      group,
+      config: baseConfig,
+      execution: resolveProbeExecution(group, baseConfig.mode),
+      helperAvailable: isHelperServiceAvailable({
+        ok: true,
+        version: '0.1.0',
+        sqlite: true,
+        controllerConfigured: true,
+        controllerReachable: false,
+        mobileConfigUrl: null,
+        error: 'controller returned HTTP 401 Unauthorized'
+      }),
+      selectedDelay: 144,
+      selectedScore: score,
+      testUrl: baseConfig.testUrl
+    });
+
+    expect(model.canAutoSwitch).toBe(true);
+    expect(model.autoSwitchLabel).toBe('On');
   });
 });
