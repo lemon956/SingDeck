@@ -9,7 +9,10 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path as AxumPath, Query, State,
+    },
     http::{header, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -19,8 +22,10 @@ use chrono::{DateTime, Local, TimeZone};
 use reqwest::Client;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
+mod network_usage;
 mod traffic;
 
 const DEFAULT_BIND: &str = "0.0.0.0:9531";
@@ -32,6 +37,8 @@ const DEFAULT_PROBE_INTERVAL_SEC: i64 = 15 * 60;
 const MIN_PROBE_INTERVAL_SEC: i64 = 60;
 const MAX_PROBE_INTERVAL_SEC: i64 = 24 * 60 * 60;
 const FAILURE_PROBE_COOLDOWN_MS: i64 = 30 * 1000;
+const REALTIME_EVENT_INTERVAL_MS: u64 = 1000;
+const NETWORK_USAGE_SAMPLE_INTERVAL_MS: u64 = 1000;
 
 #[derive(Clone)]
 struct AppState {
@@ -39,6 +46,7 @@ struct AppState {
     http: Client,
     mobile_config_url: Option<String>,
     active_probes: Arc<Mutex<HashMap<String, ActiveProbeState>>>,
+    events: broadcast::Sender<HelperEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,38 +69,44 @@ struct ActiveProbeNodeGuard {
 
 impl Drop for ActiveProbeGuard {
     fn drop(&mut self) {
-        let Ok(mut active_probes) = self.state.active_probes.lock() else {
-            return;
-        };
-        let Some(active_probe) = active_probes.get_mut(&self.group) else {
-            return;
-        };
-        if active_probe.count > 1 {
-            active_probe.count -= 1;
-        } else {
-            active_probe.count = 0;
-            remove_idle_active_probe(&mut active_probes, &self.group);
+        {
+            let Ok(mut active_probes) = self.state.active_probes.lock() else {
+                return;
+            };
+            let Some(active_probe) = active_probes.get_mut(&self.group) else {
+                return;
+            };
+            if active_probe.count > 1 {
+                active_probe.count -= 1;
+            } else {
+                active_probe.count = 0;
+                remove_idle_active_probe(&mut active_probes, &self.group);
+            }
         }
+        publish_probe_status(&self.state);
     }
 }
 
 impl Drop for ActiveProbeNodeGuard {
     fn drop(&mut self) {
-        let Ok(mut active_probes) = self.state.active_probes.lock() else {
-            return;
-        };
-        let Some(active_probe) = active_probes.get_mut(&self.group) else {
-            return;
-        };
-        let Some(node_count) = active_probe.active_nodes.get_mut(&self.node) else {
-            return;
-        };
-        if *node_count > 1 {
-            *node_count -= 1;
-        } else {
-            active_probe.active_nodes.remove(&self.node);
-            remove_idle_active_probe(&mut active_probes, &self.group);
+        {
+            let Ok(mut active_probes) = self.state.active_probes.lock() else {
+                return;
+            };
+            let Some(active_probe) = active_probes.get_mut(&self.group) else {
+                return;
+            };
+            let Some(node_count) = active_probe.active_nodes.get_mut(&self.node) else {
+                return;
+            };
+            if *node_count > 1 {
+                *node_count -= 1;
+            } else {
+                active_probe.active_nodes.remove(&self.node);
+                remove_idle_active_probe(&mut active_probes, &self.group);
+            }
         }
+        publish_probe_status(&self.state);
     }
 }
 
@@ -301,6 +315,27 @@ struct ProbeStatusResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+enum HelperEvent {
+    ProbeStatus { groups: Vec<ActiveProbeView> },
+    ProbeScores { scores: ScoresResponse },
+    ConnectionsSnapshot {
+        snapshot: serde_json::Value,
+        sampled_at: String,
+    },
+    TrafficSnapshot {
+        up: i64,
+        down: i64,
+        upload_total: i64,
+        download_total: i64,
+        connection_count: usize,
+        mode: String,
+        sampled_at: String,
+    },
+    Error { scope: String, message: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScoresResponse {
     group: String,
@@ -350,6 +385,32 @@ struct ConfigResponse {
     error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkUsageSummaryQuery {
+    from: Option<i64>,
+    to: Option<i64>,
+    bucket: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkUsageTopQuery {
+    from: Option<i64>,
+    to: Option<i64>,
+    group_by: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkUsageConnectionsQuery {
+    from: Option<i64>,
+    to: Option<i64>,
+    limit: Option<i64>,
+    q: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let bind = env::var("SINGDECK_HELPER_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
@@ -366,6 +427,7 @@ async fn main() -> Result<()> {
         mobile_config_url: public_config_url()
             .or_else(|| mobile_config_url_for_bind(&bind, detect_lan_ip())),
         active_probes: Arc::new(Mutex::new(HashMap::new())),
+        events: helper_event_channel(),
     };
 
     let cors = CorsLayer::new()
@@ -374,6 +436,8 @@ async fn main() -> Result<()> {
         .allow_origin(Any);
 
     spawn_probe_scheduler(state.clone());
+    spawn_realtime_event_publisher(state.clone());
+    spawn_network_usage_sampler(state.clone());
 
     let app = Router::new()
         .route("/api/v1/health", get(health))
@@ -386,7 +450,12 @@ async fn main() -> Result<()> {
             "/api/v1/settings/traffic",
             get(traffic_settings).put(save_traffic_settings),
         )
+        .route(
+            "/api/v1/settings/network-usage",
+            get(network_usage_settings).put(save_network_usage_settings),
+        )
         .route("/api/v1/groups", get(groups))
+        .route("/api/v1/events", get(helper_events))
         .route("/api/v1/probes", get(active_probes))
         .route("/api/v1/groups/:group/config", put(save_group_config))
         .route("/api/v1/groups/:group/probe", post(probe_group))
@@ -396,6 +465,12 @@ async fn main() -> Result<()> {
         .route("/api/v1/config/raw", get(read_config_raw))
         .route("/api/v1/config/source", put(save_config_source))
         .route("/api/v1/traffic", get(read_traffic))
+        .route("/api/v1/network-usage/summary", get(network_usage_summary))
+        .route("/api/v1/network-usage/top", get(network_usage_top))
+        .route(
+            "/api/v1/network-usage/connections",
+            get(network_usage_connections),
+        )
         .layer(cors)
         .with_state(state);
 
@@ -432,6 +507,7 @@ fn init_db(conn: &Connection) -> Result<()> {
           ON probe_samples(group_name, node_name, tested_at_ms);
         "#,
     )?;
+    network_usage::init_db(conn)?;
     add_column_if_missing(
         conn,
         "group_configs",
@@ -564,6 +640,79 @@ async fn save_traffic_settings(
     Ok(Json(settings))
 }
 
+async fn network_usage_settings(
+    State(state): State<AppState>,
+) -> Result<Json<network_usage::NetworkUsageSettings>, AppError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::internal("database lock poisoned"))?;
+    Ok(Json(network_usage::load_settings(&db)?))
+}
+
+async fn save_network_usage_settings(
+    State(state): State<AppState>,
+    Json(input): Json<network_usage::NetworkUsageSettings>,
+) -> Result<Json<network_usage::NetworkUsageSettings>, AppError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::internal("database lock poisoned"))?;
+    Ok(Json(network_usage::save_settings(&db, &input)?))
+}
+
+async fn network_usage_summary(
+    State(state): State<AppState>,
+    Query(query): Query<NetworkUsageSummaryQuery>,
+) -> Result<Json<network_usage::UsageSummaryResponse>, AppError> {
+    let (from_ms, to_ms) = resolve_usage_window(query.from, query.to);
+    let bucket = network_usage::UsageBucket::parse(query.bucket.as_deref());
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::internal("database lock poisoned"))?;
+    Ok(Json(network_usage::query_summary(
+        &db, from_ms, to_ms, bucket,
+    )?))
+}
+
+async fn network_usage_top(
+    State(state): State<AppState>,
+    Query(query): Query<NetworkUsageTopQuery>,
+) -> Result<Json<network_usage::UsageTopResponse>, AppError> {
+    let (from_ms, to_ms) = resolve_usage_window(query.from, query.to);
+    let group_by = network_usage::UsageGroupBy::parse(query.group_by.as_deref());
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::internal("database lock poisoned"))?;
+    Ok(Json(network_usage::query_top(
+        &db,
+        from_ms,
+        to_ms,
+        group_by,
+        query.limit.unwrap_or(10),
+    )?))
+}
+
+async fn network_usage_connections(
+    State(state): State<AppState>,
+    Query(query): Query<NetworkUsageConnectionsQuery>,
+) -> Result<Json<network_usage::UsageConnectionsResponse>, AppError> {
+    let (from_ms, to_ms) = resolve_usage_window(query.from, query.to);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::internal("database lock poisoned"))?;
+    Ok(Json(network_usage::query_connections(
+        &db,
+        from_ms,
+        to_ms,
+        query.limit.unwrap_or(20),
+        query.q.as_deref(),
+    )?))
+}
+
 async fn groups(State(state): State<AppState>) -> Result<Json<GroupsResponse>, AppError> {
     let controller = load_controller(&state)?;
     let proxies = fetch_proxies(&state, &controller).await?;
@@ -593,6 +742,62 @@ async fn active_probes(
     Ok(Json(ProbeStatusResponse {
         groups: active_probe_groups(&state),
     }))
+}
+
+async fn helper_events(
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(|socket| async move {
+        stream_helper_events(state, socket).await;
+    })
+}
+
+async fn stream_helper_events(state: AppState, mut socket: WebSocket) {
+    let mut receiver = state.events.subscribe();
+    let initial = HelperEvent::ProbeStatus {
+        groups: active_probe_groups(&state),
+    };
+    if send_helper_event(&mut socket, &initial).await.is_err() {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            event = receiver.recv() => {
+                match event {
+                    Ok(event) => {
+                        if send_helper_event(&mut socket, &event).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let event = HelperEvent::ProbeStatus {
+                            groups: active_probe_groups(&state),
+                        };
+                        if send_helper_event(&mut socket, &event).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            message = socket.recv() => {
+                match message {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+        }
+    }
+}
+
+async fn send_helper_event(socket: &mut WebSocket, event: &HelperEvent) -> Result<()> {
+    socket
+        .send(Message::Text(serde_json::to_string(event)?))
+        .await
+        .map_err(|error| anyhow!("websocket send failed: {error}"))
 }
 
 async fn save_group_config(
@@ -859,7 +1064,7 @@ async fn probe_group_internal(
             Some(group_proxy.now.clone())
         };
 
-        return Ok(ScoresResponse {
+        let response = ScoresResponse {
             group: group.to_string(),
             mode: config.mode,
             scheme: config.scheme,
@@ -867,7 +1072,14 @@ async fn probe_group_internal(
             recommended,
             apply_error: None,
             nodes: scores,
-        });
+        };
+        publish_helper_event(
+            state,
+            HelperEvent::ProbeScores {
+                scores: response.clone(),
+            },
+        );
+        return Ok(response);
     }
 
     probe_group_nodes(state, &controller, group, group_proxy, &config, concurrency).await?;
@@ -884,7 +1096,7 @@ async fn probe_group_internal(
         None
     };
 
-    Ok(ScoresResponse {
+    let response = ScoresResponse {
         group: group.to_string(),
         mode: config.mode,
         scheme: config.scheme,
@@ -892,7 +1104,14 @@ async fn probe_group_internal(
         recommended,
         apply_error,
         nodes: scores,
-    })
+    };
+    publish_helper_event(
+        state,
+        HelperEvent::ProbeScores {
+            scores: response.clone(),
+        },
+    );
+    Ok(response)
 }
 
 async fn probe_group_nodes(
@@ -1022,6 +1241,135 @@ fn spawn_probe_scheduler(state: AppState) {
     });
 }
 
+fn spawn_realtime_event_publisher(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(REALTIME_EVENT_INTERVAL_MS));
+        loop {
+            ticker.tick().await;
+            if state.events.receiver_count() == 0 {
+                continue;
+            }
+            if let Err(error) = publish_realtime_snapshot_events(&state).await {
+                publish_helper_event(
+                    &state,
+                    HelperEvent::Error {
+                        scope: "realtime".to_string(),
+                        message: error.to_string(),
+                    },
+                );
+            }
+        }
+    });
+}
+
+fn spawn_network_usage_sampler(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(Duration::from_millis(NETWORK_USAGE_SAMPLE_INTERVAL_MS));
+        loop {
+            ticker.tick().await;
+            if let Err(error) = sample_network_usage(&state).await {
+                eprintln!("network usage sample failed: {error}");
+            }
+        }
+    });
+}
+
+async fn sample_network_usage(state: &AppState) -> Result<()> {
+    let settings = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| anyhow!("database lock poisoned"))?;
+        network_usage::load_settings(&db)?
+    };
+    if !settings.enabled {
+        return Ok(());
+    }
+
+    let controller = load_controller(state)?;
+    if controller.controller_url.is_empty() {
+        return Ok(());
+    }
+
+    let snapshot = controller_get::<serde_json::Value>(state, &controller, "/connections").await?;
+    let sampled_at_ms = now_ms();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| anyhow!("database lock poisoned"))?;
+    network_usage::apply_connections_snapshot(&db, &snapshot, sampled_at_ms)?;
+    network_usage::cleanup_old_usage(&db, sampled_at_ms, settings.retention_days)?;
+    Ok(())
+}
+
+async fn publish_realtime_snapshot_events(state: &AppState) -> Result<()> {
+    let controller = load_controller(state)?;
+    if controller.controller_url.is_empty() {
+        return Ok(());
+    }
+
+    let configs = controller_get::<serde_json::Value>(state, &controller, "/configs")
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let connections = controller_get::<serde_json::Value>(state, &controller, "/connections").await?;
+    let traffic = controller_traffic_json(state, &controller)
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let sampled_at = format_time(now_ms());
+
+    publish_helper_event(
+        state,
+        build_connections_snapshot_event(connections.clone(), sampled_at.clone()),
+    );
+    publish_helper_event(
+        state,
+        build_traffic_snapshot_event(configs, connections, traffic, sampled_at),
+    );
+    Ok(())
+}
+
+fn build_connections_snapshot_event(
+    snapshot: serde_json::Value,
+    sampled_at: String,
+) -> HelperEvent {
+    HelperEvent::ConnectionsSnapshot { snapshot, sampled_at }
+}
+
+fn build_traffic_snapshot_event(
+    configs: serde_json::Value,
+    connections: serde_json::Value,
+    traffic: serde_json::Value,
+    sampled_at: String,
+) -> HelperEvent {
+    HelperEvent::TrafficSnapshot {
+        up: traffic.get("up").and_then(|value| value.as_i64()).unwrap_or(0),
+        down: traffic
+            .get("down")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0),
+        upload_total: connections
+            .get("uploadTotal")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0),
+        download_total: connections
+            .get("downloadTotal")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0),
+        connection_count: connections
+            .get("connections")
+            .and_then(|value| value.as_array())
+            .map(|connections| connections.len())
+            .unwrap_or(0),
+        mode: configs
+            .get("mode")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        sampled_at,
+    }
+}
+
 async fn run_scheduled_probes(state: &AppState, force: bool) -> Result<()> {
     let controller = load_controller(state)?;
     if controller.controller_url.is_empty() {
@@ -1066,6 +1414,20 @@ async fn run_scheduled_probes(state: &AppState, force: bool) -> Result<()> {
                 }
             }
         }
+        publish_helper_event(
+            state,
+            HelperEvent::ProbeScores {
+                scores: ScoresResponse {
+                    group: group.name.clone(),
+                    mode: config.mode,
+                    scheme: config.scheme,
+                    test_url: config.test_url.clone(),
+                    recommended: scores.first().map(|score| score.name.clone()),
+                    apply_error: None,
+                    nodes: scores,
+                },
+            },
+        );
         save_string_kv(state, &last_key, &now.to_string())?;
     }
 
@@ -1144,6 +1506,43 @@ async fn controller_log_chunk(state: &AppState, controller: &ControllerConfig) -
         Ok(Ok(None)) | Err(_) => Ok(String::new()),
         Ok(Err(_)) => Ok(String::new()),
     }
+}
+
+async fn controller_traffic_json(
+    state: &AppState,
+    controller: &ControllerConfig,
+) -> Result<serde_json::Value> {
+    if controller.controller_url.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(4),
+        state
+            .http
+            .get(format!(
+                "{}/traffic",
+                controller.controller_url.trim_end_matches('/')
+            ))
+            .bearer_auth_if(&controller.secret)
+            .send(),
+    )
+    .await??;
+    if !response.status().is_success() {
+        return Err(anyhow!("controller returned HTTP {}", response.status()));
+    }
+
+    let mut response = response;
+    let Some(bytes) = tokio::time::timeout(Duration::from_secs(4), response.chunk()).await?? else {
+        return Ok(serde_json::json!({}));
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let line = text
+        .split(['\r', '\n'])
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("{}");
+    Ok(serde_json::from_str(line).unwrap_or_else(|_| serde_json::json!({})))
 }
 
 fn is_controller_poll_error(error: &anyhow::Error) -> bool {
@@ -1869,6 +2268,7 @@ fn begin_active_probe(state: &AppState, group: &str) -> ActiveProbeGuard {
                 });
         active_probe.count += 1;
     }
+    publish_probe_status(state);
 
     ActiveProbeGuard {
         state: state.clone(),
@@ -1891,6 +2291,7 @@ fn begin_active_probe_node(state: &AppState, group: &str, node: &str) -> ActiveP
             .entry(node.to_string())
             .or_insert(0) += 1;
     }
+    publish_probe_status(state);
 
     ActiveProbeNodeGuard {
         state: state.clone(),
@@ -1923,6 +2324,24 @@ fn active_probe_groups(state: &AppState) -> Vec<ActiveProbeView> {
     groups
 }
 
+fn helper_event_channel() -> broadcast::Sender<HelperEvent> {
+    let (sender, _) = broadcast::channel(256);
+    sender
+}
+
+fn publish_helper_event(state: &AppState, event: HelperEvent) {
+    let _ = state.events.send(event);
+}
+
+fn publish_probe_status(state: &AppState) {
+    publish_helper_event(
+        state,
+        HelperEvent::ProbeStatus {
+            groups: active_probe_groups(state),
+        },
+    );
+}
+
 fn remove_idle_active_probe(
     active_probes: &mut HashMap<String, ActiveProbeState>,
     group: &str,
@@ -1941,6 +2360,18 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn resolve_usage_window(from: Option<i64>, to: Option<i64>) -> (i64, i64) {
+    let now = now_ms();
+    let to_ms = to.unwrap_or(now).clamp(0, now);
+    let default_from = to_ms.saturating_sub(network_usage::DAY_MS);
+    let from_ms = from.unwrap_or(default_from).clamp(0, to_ms);
+    if from_ms == to_ms {
+        (from_ms.saturating_sub(1), to_ms)
+    } else {
+        (from_ms, to_ms)
+    }
 }
 
 fn format_time(timestamp_ms: i64) -> String {
@@ -2021,6 +2452,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            events: helper_event_channel(),
         };
         let config = GroupConfig {
             test_url: "https://latency.example.test".to_string(),
@@ -2299,6 +2731,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            events: helper_event_channel(),
         };
         let settings = TrafficSettings {
             enabled: true,
@@ -2319,6 +2752,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            events: helper_event_channel(),
         };
         save_traffic_settings_row(
             &state,
@@ -2347,6 +2781,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            events: helper_event_channel(),
         };
 
         let first = begin_active_probe(&state, "select");
@@ -2368,6 +2803,7 @@ mod tests {
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
+            events: helper_event_channel(),
         };
 
         let group = begin_active_probe(&state, "select");
@@ -2399,6 +2835,107 @@ mod tests {
 
         drop(group);
         assert!(active_probe_groups(&state).is_empty());
+    }
+
+    #[test]
+    fn helper_events_broadcast_probe_status_payloads() {
+        let events = helper_event_channel();
+        let mut receiver = events.subscribe();
+        let state = AppState {
+            db: Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            events,
+        };
+
+        publish_helper_event(
+            &state,
+            HelperEvent::ProbeStatus {
+                groups: vec![ActiveProbeView {
+                    group: "select".to_string(),
+                    started_at: "2026-05-21T10:00:00+08:00".to_string(),
+                    active_nodes: vec!["hk-1".to_string()],
+                }],
+            },
+        );
+
+        let event = receiver.try_recv().unwrap();
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["type"], "probeStatus");
+        assert_eq!(value["groups"][0]["group"], "select");
+        assert_eq!(value["groups"][0]["activeNodes"][0], "hk-1");
+    }
+
+    #[test]
+    fn active_probe_tracking_broadcasts_node_lifecycle_status() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let events = helper_event_channel();
+        let mut receiver = events.subscribe();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            events,
+        };
+
+        let group = begin_active_probe(&state, "select");
+        let node = begin_active_probe_node(&state, "select", "hk-1");
+        drop(node);
+        drop(group);
+
+        let events = (0..4)
+            .map(|_| serde_json::to_value(receiver.try_recv().unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(events[0]["groups"][0]["activeNodes"], serde_json::json!([]));
+        assert_eq!(events[1]["groups"][0]["activeNodes"], serde_json::json!(["hk-1"]));
+        assert_eq!(events[2]["groups"][0]["activeNodes"], serde_json::json!([]));
+        assert_eq!(events[3]["groups"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn realtime_connections_snapshot_event_keeps_controller_payload() {
+        let event = build_connections_snapshot_event(
+            serde_json::json!({
+                "connections": [
+                    { "id": "conn-1", "chains": ["proxy-a"] }
+                ]
+            }),
+            "2026-05-21T10:00:00+08:00".to_string(),
+        );
+
+        let value = serde_json::to_value(event).unwrap();
+
+        assert_eq!(value["type"], "connectionsSnapshot");
+        assert_eq!(value["sampledAt"], "2026-05-21T10:00:00+08:00");
+        assert_eq!(value["snapshot"]["connections"][0]["id"], "conn-1");
+    }
+
+    #[test]
+    fn realtime_traffic_snapshot_event_combines_controller_runtime_fields() {
+        let event = build_traffic_snapshot_event(
+            serde_json::json!({ "mode": "rule" }),
+            serde_json::json!({
+                "connections": [{ "id": "conn-1" }, { "id": "conn-2" }],
+                "uploadTotal": 1024,
+                "downloadTotal": 2048
+            }),
+            serde_json::json!({ "up": 128, "down": 256 }),
+            "2026-05-21T10:00:01+08:00".to_string(),
+        );
+
+        let value = serde_json::to_value(event).unwrap();
+
+        assert_eq!(value["type"], "trafficSnapshot");
+        assert_eq!(value["up"], 128);
+        assert_eq!(value["down"], 256);
+        assert_eq!(value["uploadTotal"], 1024);
+        assert_eq!(value["downloadTotal"], 2048);
+        assert_eq!(value["connectionCount"], 2);
+        assert_eq!(value["mode"], "rule");
+        assert_eq!(value["sampledAt"], "2026-05-21T10:00:01+08:00");
     }
 
     #[test]

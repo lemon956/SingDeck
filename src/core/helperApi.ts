@@ -41,6 +41,11 @@ export type HelperTrafficSettings = {
   browserProfile: string;
 };
 
+export type HelperNetworkUsageSettings = {
+  enabled: boolean;
+  retentionDays: number;
+};
+
 export type HelperGroup = {
   name: string;
   kind: string;
@@ -124,6 +129,63 @@ export type HelperTrafficResponse = {
   providers: HelperTrafficSnapshot[];
   updatedAt: string;
   profile: string;
+};
+
+export type HelperNetworkUsageBucket = {
+  bucketStartMs: number;
+  uploadBytes: number;
+  downloadBytes: number;
+  totalBytes: number;
+  connectionCount: number;
+};
+
+export type HelperNetworkUsageSummary = {
+  fromMs: number;
+  toMs: number;
+  uploadBytes: number;
+  downloadBytes: number;
+  totalBytes: number;
+  connectionCount: number;
+  buckets: HelperNetworkUsageBucket[];
+};
+
+export type HelperNetworkUsageTopItem = {
+  label: string;
+  uploadBytes: number;
+  downloadBytes: number;
+  totalBytes: number;
+  connectionCount: number;
+};
+
+export type HelperNetworkUsageTop = {
+  groupBy: 'host' | 'outbound' | 'rule';
+  items: HelperNetworkUsageTopItem[];
+};
+
+export type HelperNetworkUsageConnection = {
+  id: string;
+  host: string;
+  network: string;
+  rule: string;
+  outbound: string;
+  chains: string[];
+  firstSeenMs: number;
+  lastSeenMs: number;
+  uploadBytes: number;
+  downloadBytes: number;
+  totalBytes: number;
+};
+
+export type HelperNetworkUsageConnections = {
+  connections: HelperNetworkUsageConnection[];
+};
+
+export type HelperNetworkUsageWindowRequest = {
+  from: number;
+  to: number;
+  bucket?: 'minute' | 'hour';
+  limit?: number;
+  q?: string;
 };
 
 type HelperApiClientOptions = {

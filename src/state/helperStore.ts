@@ -9,6 +9,11 @@ import {
   type HelperGroupConfig,
   type HelperGroupsResponse,
   type HelperHealth,
+  type HelperNetworkUsageConnections,
+  type HelperNetworkUsageSettings,
+  type HelperNetworkUsageSummary,
+  type HelperNetworkUsageTop,
+  type HelperNetworkUsageWindowRequest,
   type HelperProbeStatusResponse,
   type HelperScoresResponse,
   type HelperTestingSettings,
@@ -25,6 +30,7 @@ type HelperState = {
   health: HelperHealth | null;
   testingSettings: HelperTestingSettings | null;
   trafficSettings: HelperTrafficSettings | null;
+  networkUsageSettings: HelperNetworkUsageSettings | null;
   groups: HelperGroup[];
   scoresByGroup: Record<string, HelperScoresResponse>;
   activeProbeGroups: string[];
@@ -32,6 +38,13 @@ type HelperState = {
   traffic: HelperTrafficResponse | null;
   trafficLoading: boolean;
   trafficError: string | null;
+  networkUsageSummary: HelperNetworkUsageSummary | null;
+  networkUsageTopHosts: HelperNetworkUsageTop | null;
+  networkUsageTopOutbounds: HelperNetworkUsageTop | null;
+  networkUsageConnections: HelperNetworkUsageConnections | null;
+  networkUsageLoading: boolean;
+  networkUsageError: string | null;
+  eventStreamConnected: boolean;
   loading: boolean;
   probingGroups: string[];
   applyingGroups: string[];
@@ -42,18 +55,22 @@ type HelperState = {
   syncController: () => Promise<void>;
   loadTestingSettings: () => Promise<void>;
   loadTrafficSettings: () => Promise<void>;
+  loadNetworkUsageSettings: () => Promise<void>;
   saveDefaultTestUrl: (defaultTestUrl: string) => Promise<void>;
   saveDelayTestTimeout: (delayTestTimeoutMs: number) => Promise<void>;
   saveConfigPath: () => Promise<void>;
   saveTrafficSettings: (settings: HelperTrafficSettings) => Promise<void>;
+  saveNetworkUsageSettings: (settings: HelperNetworkUsageSettings) => Promise<void>;
   loadGroups: () => Promise<void>;
   loadActiveProbes: () => Promise<void>;
+  setEventStreamConnected: (connected: boolean) => void;
   saveGroupConfig: (group: string, config: HelperGroupConfig) => Promise<void>;
   probeGroup: (group: string, concurrency: number) => Promise<void>;
   loadScores: (group: string) => Promise<void>;
   applyNode: (group: string, node?: string) => Promise<void>;
   loadHelperConfigContent: () => Promise<HelperConfigResponse>;
   loadTraffic: () => Promise<void>;
+  loadNetworkUsageWindow: (request: HelperNetworkUsageWindowRequest) => Promise<void>;
 };
 
 export const useHelperStore = create<HelperState>()(
@@ -64,6 +81,7 @@ export const useHelperStore = create<HelperState>()(
       health: null,
       testingSettings: null,
       trafficSettings: null,
+      networkUsageSettings: null,
       groups: [],
       scoresByGroup: {},
       activeProbeGroups: [],
@@ -71,6 +89,13 @@ export const useHelperStore = create<HelperState>()(
       traffic: null,
       trafficLoading: false,
       trafficError: null,
+      networkUsageSummary: null,
+      networkUsageTopHosts: null,
+      networkUsageTopOutbounds: null,
+      networkUsageConnections: null,
+      networkUsageLoading: false,
+      networkUsageError: null,
+      eventStreamConnected: false,
       loading: false,
       probingGroups: [],
       applyingGroups: [],
@@ -87,10 +112,14 @@ export const useHelperStore = create<HelperState>()(
           const health = await client().getJson<HelperHealth>('/api/v1/health');
           const testingSettings = await client().getJson<HelperTestingSettings>('/api/v1/settings/testing');
           const trafficSettings = await client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic');
+          const networkUsageSettings = await client().getJson<HelperNetworkUsageSettings>(
+            '/api/v1/settings/network-usage'
+          );
           set({
             health,
             testingSettings,
             trafficSettings,
+            networkUsageSettings,
             loading: false,
             lastCheckedAt: new Date().toISOString(),
             error: health.error
@@ -115,10 +144,14 @@ export const useHelperStore = create<HelperState>()(
           const health = await client().getJson<HelperHealth>('/api/v1/health');
           const testingSettings = await client().getJson<HelperTestingSettings>('/api/v1/settings/testing');
           const trafficSettings = await client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic');
+          const networkUsageSettings = await client().getJson<HelperNetworkUsageSettings>(
+            '/api/v1/settings/network-usage'
+          );
           set({
             health,
             testingSettings,
             trafficSettings,
+            networkUsageSettings,
             loading: false,
             lastCheckedAt: new Date().toISOString(),
             error: health.error
@@ -139,6 +172,16 @@ export const useHelperStore = create<HelperState>()(
         try {
           const trafficSettings = await client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic');
           set({ trafficSettings, error: null });
+        } catch (error) {
+          set({ error: formatHelperError(error) });
+        }
+      },
+      loadNetworkUsageSettings: async () => {
+        try {
+          const networkUsageSettings = await client().getJson<HelperNetworkUsageSettings>(
+            '/api/v1/settings/network-usage'
+          );
+          set({ networkUsageSettings, error: null });
         } catch (error) {
           set({ error: formatHelperError(error) });
         }
@@ -192,6 +235,25 @@ export const useHelperStore = create<HelperState>()(
           set({ error: formatHelperError(error) });
         }
       },
+      saveNetworkUsageSettings: async (settings) => {
+        try {
+          const networkUsageSettings = await client().putJson<HelperNetworkUsageSettings>(
+            '/api/v1/settings/network-usage',
+            settings
+          );
+          set({
+            networkUsageSettings,
+            networkUsageSummary: networkUsageSettings.enabled ? get().networkUsageSummary : null,
+            networkUsageTopHosts: networkUsageSettings.enabled ? get().networkUsageTopHosts : null,
+            networkUsageTopOutbounds: networkUsageSettings.enabled ? get().networkUsageTopOutbounds : null,
+            networkUsageConnections: networkUsageSettings.enabled ? get().networkUsageConnections : null,
+            networkUsageError: null,
+            error: null
+          });
+        } catch (error) {
+          set({ error: formatHelperError(error) });
+        }
+      },
       loadGroups: async () => {
         set({ loading: true, error: null });
         try {
@@ -237,6 +299,7 @@ export const useHelperStore = create<HelperState>()(
           set({ activeProbeGroups: [], activeProbeNodesByGroup: {} });
         }
       },
+      setEventStreamConnected: (connected) => set({ eventStreamConnected: connected }),
       saveGroupConfig: async (group, config) => {
         try {
           const saved = await client().putJson<HelperGroupConfig>(
@@ -252,6 +315,7 @@ export const useHelperStore = create<HelperState>()(
         }
       },
       probeGroup: async (group, concurrency) => {
+        const useHttpProbePolling = !get().eventStreamConnected;
         let activeProbeTimer: ReturnType<typeof setInterval> | null = null;
         const startActiveProbePolling = () => {
           void get().loadActiveProbes();
@@ -270,20 +334,26 @@ export const useHelperStore = create<HelperState>()(
           error: null,
           probingGroups: Array.from(new Set([...state.probingGroups, group]))
         }));
-        startActiveProbePolling();
+        if (useHttpProbePolling) {
+          startActiveProbePolling();
+        }
         try {
           const response = await client().postJson<HelperScoresResponse>(
             `/api/v1/groups/${encodeURIComponent(group)}/probe`,
             { concurrency }
           );
-          await stopActiveProbePolling();
+          if (useHttpProbePolling) {
+            await stopActiveProbePolling();
+          }
           set((state) => ({
             scoresByGroup: { ...state.scoresByGroup, [group]: response },
             probingGroups: state.probingGroups.filter((item) => item !== group),
             error: response.applyError
           }));
         } catch (error) {
-          await stopActiveProbePolling();
+          if (useHttpProbePolling) {
+            await stopActiveProbePolling();
+          }
           set((state) => ({
             probingGroups: state.probingGroups.filter((item) => item !== group),
             error: formatHelperError(error)
@@ -341,6 +411,36 @@ export const useHelperStore = create<HelperState>()(
         } catch (error) {
           set({ trafficLoading: false, trafficError: formatHelperError(error) });
         }
+      },
+      loadNetworkUsageWindow: async (request) => {
+        set({ networkUsageLoading: true, networkUsageError: null });
+        try {
+          const limit = request.limit ?? 8;
+          const [summary, topHosts, topOutbounds, connections] = await Promise.all([
+            client().getJson<HelperNetworkUsageSummary>(
+              `/api/v1/network-usage/summary?${networkUsageQuery(request)}`
+            ),
+            client().getJson<HelperNetworkUsageTop>(
+              `/api/v1/network-usage/top?${networkUsageQuery({ ...request, groupBy: 'host', limit })}`
+            ),
+            client().getJson<HelperNetworkUsageTop>(
+              `/api/v1/network-usage/top?${networkUsageQuery({ ...request, groupBy: 'outbound', limit })}`
+            ),
+            client().getJson<HelperNetworkUsageConnections>(
+              `/api/v1/network-usage/connections?${networkUsageQuery({ ...request, limit })}`
+            )
+          ]);
+          set({
+            networkUsageSummary: summary,
+            networkUsageTopHosts: topHosts,
+            networkUsageTopOutbounds: topOutbounds,
+            networkUsageConnections: connections,
+            networkUsageLoading: false,
+            networkUsageError: null
+          });
+        } catch (error) {
+          set({ networkUsageLoading: false, networkUsageError: formatHelperError(error) });
+        }
       }
     }),
     {
@@ -348,11 +448,36 @@ export const useHelperStore = create<HelperState>()(
       partialize: (state) => ({
         helperUrl: state.helperUrl,
         configPath: state.configPath,
-        trafficSettings: state.trafficSettings
+        trafficSettings: state.trafficSettings,
+        networkUsageSettings: state.networkUsageSettings
       })
     }
   )
 );
+
+type NetworkUsageQueryInput = HelperNetworkUsageWindowRequest & {
+  groupBy?: 'host' | 'outbound' | 'rule';
+};
+
+function networkUsageQuery(input: NetworkUsageQueryInput): string {
+  const params = new URLSearchParams({
+    from: String(input.from),
+    to: String(input.to)
+  });
+  if (input.bucket) {
+    params.set('bucket', input.bucket);
+  }
+  if (input.limit !== undefined) {
+    params.set('limit', String(input.limit));
+  }
+  if (input.q?.trim()) {
+    params.set('q', input.q.trim());
+  }
+  if (input.groupBy) {
+    params.set('groupBy', input.groupBy);
+  }
+  return params.toString();
+}
 
 function client(): HelperApiClient {
   return new HelperApiClient({ baseUrl: useHelperStore.getState().helperUrl });

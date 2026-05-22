@@ -18,9 +18,11 @@ import {
 import QRCode from 'qrcode';
 import { isLoopbackUrl, resolveConfigDownloadUrl } from '../core/configDownloadUrl';
 import { routeFromHash, type AppRoute } from '../core/navigation';
+import { formatBytes } from '../core/runtime';
 import { summarizeTrafficProvider } from '../core/traffic';
 import { describeProbeActivity } from '../core/probeActivity';
 import { buildProxyInspectorModel } from '../core/proxyInspector';
+import { connectHelperEventStream } from '../state/helperEventStream';
 import {
   applyStrategyWallOrder,
   buildStrategyWallGroups,
@@ -62,6 +64,14 @@ const TRAFFIC_SPARKLINE_WIDTH = 188;
 const TRAFFIC_SPARKLINE_HEIGHT = 44;
 const DEFAULT_DELAY_TEST_TIMEOUT_MS = 5000;
 const STRATEGY_GROUP_ORDER_STORAGE_KEY = 'singdeck-strategy-group-order';
+const NETWORK_USAGE_WINDOWS = [
+  { id: '1h', label: '1h', durationMs: 60 * 60 * 1000, bucket: 'minute' as const },
+  { id: '6h', label: '6h', durationMs: 6 * 60 * 60 * 1000, bucket: 'minute' as const },
+  { id: '24h', label: '24h', durationMs: 24 * 60 * 60 * 1000, bucket: 'hour' as const },
+  { id: '7d', label: '7d', durationMs: 7 * 24 * 60 * 60 * 1000, bucket: 'hour' as const }
+] as const;
+
+type NetworkUsageWindowId = (typeof NETWORK_USAGE_WINDOWS)[number]['id'];
 
 type InlineStatus = {
   tone: 'ok' | 'warn' | 'neutral';
@@ -245,6 +255,21 @@ function formatDelay(delay: number | null | undefined): string {
   }
 
   return typeof delay === 'number' ? `${delay}ms` : '--';
+}
+
+function buildNetworkUsageRequest(windowId: NetworkUsageWindowId) {
+  const windowConfig = NETWORK_USAGE_WINDOWS.find((item) => item.id === windowId) ?? NETWORK_USAGE_WINDOWS[2];
+  const to = Date.now();
+  return {
+    from: to - windowConfig.durationMs,
+    to,
+    bucket: windowConfig.bucket,
+    limit: 5
+  };
+}
+
+function formatLastSeen(timestampMs: number): string {
+  return timestampMs > 0 ? new Date(timestampMs).toLocaleTimeString() : '--';
 }
 
 function delayTone(delay: number | null | undefined): DelayTone {
@@ -521,9 +546,11 @@ export function App() {
   const connections = useConnectionStore();
   const configWorkspace = useConfigStore();
   const helper = useHelperStore();
+  const helperServiceAvailable = Boolean(helper.health?.sqlite && !helper.error);
   const [form, setForm] = useState(config);
   const [testingDefaultUrlDraft, setTestingDefaultUrlDraft] = useState(config.defaultTestUrl);
   const [trafficProfileDraft, setTrafficProfileDraft] = useState('');
+  const [networkUsageWindow, setNetworkUsageWindow] = useState<NetworkUsageWindowId>('24h');
   const [activeRoute, setActiveRoute] = useState<AppRoute>(() => routeFromHash(window.location.hash));
   const [activeStrategyGroupName, setActiveStrategyGroupName] = useState<string | null>(null);
   const [railExpanded, setRailExpanded] = useState(() => localStorage.getItem('singdeck-rail-expanded') !== 'false');
@@ -658,7 +685,19 @@ export function App() {
   }, [activeRoute, connections.logStreaming, connections.stopLogs]);
 
   useEffect(() => {
-    if (!detection?.ok) {
+    if (!helperServiceAvailable) {
+      useHelperStore.getState().setEventStreamConnected(false);
+      return;
+    }
+
+    return connectHelperEventStream(helper.helperUrl, {
+      onOpen: () => useHelperStore.getState().setEventStreamConnected(true),
+      onClose: () => useHelperStore.getState().setEventStreamConnected(false)
+    });
+  }, [helper.helperUrl, helperServiceAvailable]);
+
+  useEffect(() => {
+    if (!detection?.ok || helper.eventStreamConnected) {
       return;
     }
 
@@ -670,7 +709,14 @@ export function App() {
     }, 3000);
 
     return () => window.clearInterval(timer);
-  }, [activeRoute, detection?.ok, topologyPaused, runtime.refresh, connections.refreshConnections]);
+  }, [
+    activeRoute,
+    detection?.ok,
+    helper.eventStreamConnected,
+    topologyPaused,
+    runtime.refresh,
+    connections.refreshConnections
+  ]);
 
   const connectionLabel = detection?.ok
     ? `sing-box ${detection.version}`
@@ -726,14 +772,13 @@ export function App() {
       ),
     [activeStrategyMembers, proxyQuery]
   );
-  const helperServiceAvailable = Boolean(helper.health?.sqlite && !helper.error);
   const activeProbeGroupNames = useMemo(
     () => new Set([...helper.probingGroups, ...helper.activeProbeGroups]),
     [helper.probingGroups, helper.activeProbeGroups]
   );
 
   useEffect(() => {
-    if (!helperServiceAvailable || activeRoute !== 'proxies') {
+    if (!helperServiceAvailable || activeRoute !== 'proxies' || helper.eventStreamConnected) {
       previousHelperActiveProbeGroupsRef.current = new Set();
       return;
     }
@@ -764,10 +809,12 @@ export function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeRoute, helperServiceAvailable]);
+  }, [activeRoute, helper.eventStreamConnected, helperServiceAvailable]);
 
   const helperActionBusy = Boolean(helperPendingAction) || helper.loading;
   const trafficModuleEnabled = Boolean(helper.trafficSettings?.enabled);
+  const networkUsageModuleEnabled = Boolean(helper.networkUsageSettings?.enabled);
+  const networkUsageRetentionDays = helper.networkUsageSettings?.retentionDays ?? 7;
   const helperDefaultTestUrl = helper.testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
   const helperDelayTestTimeoutMs =
     helper.testingSettings?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? DEFAULT_DELAY_TEST_TIMEOUT_MS;
@@ -954,6 +1001,20 @@ export function App() {
   }, [activeRoute, helperServiceAvailable, trafficModuleEnabled]);
 
   useEffect(() => {
+    if (activeRoute !== 'overview' || !helperServiceAvailable || !networkUsageModuleEnabled) {
+      return;
+    }
+
+    const loadUsage = () => {
+      void useHelperStore.getState().loadNetworkUsageWindow(buildNetworkUsageRequest(networkUsageWindow));
+    };
+    loadUsage();
+    const timer = window.setInterval(loadUsage, 60 * 1000);
+
+    return () => window.clearInterval(timer);
+  }, [activeRoute, helperServiceAvailable, networkUsageModuleEnabled, networkUsageWindow]);
+
+  useEffect(() => {
     if (activeRoute !== 'proxies' || !activeStrategyGroup?.name) {
       return;
     }
@@ -1101,6 +1162,21 @@ export function App() {
         return { tone: 'warn', text: `Traffic profile saved, sync failed: ${state.trafficError}` };
       }
       return { tone: 'ok', text: 'Traffic profile saved and synced.' };
+    });
+
+  const saveNetworkUsageWithFeedback = (enabled: boolean) =>
+    runHelperAction('network-usage', enabled ? 'Enabling usage capture...' : 'Disabling usage capture...', async () => {
+      await useHelperStore.getState().saveNetworkUsageSettings({
+        enabled,
+        retentionDays: networkUsageRetentionDays
+      });
+      const state = useHelperStore.getState();
+      if (state.error) {
+        return { tone: 'warn', text: state.error };
+      }
+      return enabled
+        ? { tone: 'ok', text: `Network usage capture enabled for ${networkUsageRetentionDays} days.` }
+        : { tone: 'ok', text: 'Network usage capture disabled.' };
     });
 
   const saveLocalBehavior = async () => {
@@ -1577,6 +1653,91 @@ export function App() {
             )}
           </article>
           ) : null}
+          <article className={`overview-widget usage-widget ${networkUsageModuleEnabled ? '' : 'disabled'}`}>
+            <div className="widget-head usage-widget-head">
+              <span>Usage window</span>
+              <div className="usage-window-tabs" aria-label="Network usage window">
+                {NETWORK_USAGE_WINDOWS.map((item) => (
+                  <button
+                    className={networkUsageWindow === item.id ? 'active' : ''}
+                    key={item.id}
+                    onClick={() => setNetworkUsageWindow(item.id)}
+                    type="button"
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {!helperServiceAvailable ? (
+              <div className="usage-empty">Helper offline. Usage capture is unavailable.</div>
+            ) : !networkUsageModuleEnabled ? (
+              <div className="usage-empty">Enable Network usage in Settings to store domain and outbound traffic.</div>
+            ) : helper.networkUsageSummary ? (
+              <>
+                <div className="usage-total-grid">
+                  <span>
+                    <small>Down</small>
+                    <strong>{formatBytes(helper.networkUsageSummary.downloadBytes)}</strong>
+                  </span>
+                  <span>
+                    <small>Up</small>
+                    <strong>{formatBytes(helper.networkUsageSummary.uploadBytes)}</strong>
+                  </span>
+                  <span>
+                    <small>Total</small>
+                    <strong>{formatBytes(helper.networkUsageSummary.totalBytes)}</strong>
+                  </span>
+                  <span>
+                    <small>Rows</small>
+                    <strong>{helper.networkUsageSummary.connectionCount} connections</strong>
+                  </span>
+                </div>
+                <div className="usage-columns">
+                  <div>
+                    <span className="usage-list-title">Top domains</span>
+                    {(helper.networkUsageTopHosts?.items ?? []).slice(0, 4).map((item) => (
+                      <div className="usage-rank-row" key={item.label}>
+                        <span>{item.label}</span>
+                        <strong>{formatBytes(item.totalBytes)}</strong>
+                      </div>
+                    ))}
+                    {helper.networkUsageTopHosts?.items.length === 0 ? <small>No domain usage yet.</small> : null}
+                  </div>
+                  <div>
+                    <span className="usage-list-title">Top outbounds</span>
+                    {(helper.networkUsageTopOutbounds?.items ?? []).slice(0, 4).map((item) => (
+                      <div className="usage-rank-row" key={item.label}>
+                        <span>{item.label}</span>
+                        <strong>{formatBytes(item.totalBytes)}</strong>
+                      </div>
+                    ))}
+                    {helper.networkUsageTopOutbounds?.items.length === 0 ? <small>No outbound usage yet.</small> : null}
+                  </div>
+                </div>
+                <div className="usage-connection-list">
+                  {(helper.networkUsageConnections?.connections ?? []).slice(0, 4).map((connection) => (
+                    <div className="usage-connection-row" key={connection.id}>
+                      <div>
+                        <strong>{connection.host}</strong>
+                        <span>{connection.rule}</span>
+                      </div>
+                      <span>{connection.outbound}</span>
+                      <span>{formatBytes(connection.totalBytes)}</span>
+                      <span>{formatLastSeen(connection.lastSeenMs)}</span>
+                    </div>
+                  ))}
+                  {helper.networkUsageConnections?.connections.length === 0 ? (
+                    <div className="usage-empty compact">No sampled connection traffic in this window.</div>
+                  ) : null}
+                </div>
+              </>
+            ) : (
+              <div className="usage-empty">
+                {helper.networkUsageLoading ? 'Loading usage window...' : helper.networkUsageError ?? 'No usage samples yet.'}
+              </div>
+            )}
+          </article>
           <article className="overview-widget">
             <div className="widget-head">
               <span>Rule hit ranking</span>
@@ -1735,6 +1896,18 @@ export function App() {
                       <small>Show browser-backed usage cards on Overview</small>
                     </span>
                   </label>
+                  <label className={`automation-option settings-toggle ${networkUsageModuleEnabled ? 'on' : ''}`}>
+                    <input
+                      checked={networkUsageModuleEnabled}
+                      type="checkbox"
+                      onChange={(event) => void saveNetworkUsageWithFeedback(event.target.checked)}
+                    />
+                    <span className="automation-switch" aria-hidden="true" />
+                    <span>
+                      <strong>Network usage</strong>
+                      <small>Store sampled domains and outbounds for the Overview usage window</small>
+                    </span>
+                  </label>
                   <label>
                     <span>Chrome profile</span>
                     <input
@@ -1790,6 +1963,11 @@ export function App() {
                     'Controller',
                     helper.health?.controllerReachable ? 'reachable' : helper.health?.controllerConfigured ? 'configured' : 'empty',
                     helper.health?.controllerReachable ? 'ok' : 'warn'
+                  )}
+                  {healthRow(
+                    'Usage capture',
+                    networkUsageModuleEnabled ? `${networkUsageRetentionDays} days` : 'off',
+                    networkUsageModuleEnabled ? 'blue' : 'neutral'
                   )}
                 </div>
                 {helper.error ? <div className="settings-inline-error">{helper.error}</div> : null}

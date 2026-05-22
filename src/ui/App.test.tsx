@@ -22,6 +22,14 @@ function setupProxyWorkspace() {
     'fetch',
     vi.fn(async () => new Response(JSON.stringify({ nodes: [] }), { status: 200 }))
   );
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  );
   useControllerStore.setState({
     config: {
       controllerUrl: '',
@@ -99,9 +107,17 @@ function setupProxyWorkspace() {
     traffic: null,
     trafficLoading: false,
     trafficError: null,
+    networkUsageSettings: { enabled: false, retentionDays: 7 },
+    networkUsageSummary: null,
+    networkUsageTopHosts: null,
+    networkUsageTopOutbounds: null,
+    networkUsageConnections: null,
+    networkUsageLoading: false,
+    networkUsageError: null,
     loading: false,
     activeProbeGroups: [],
     activeProbeNodesByGroup: {},
+    eventStreamConnected: false,
     probingGroups: [],
     applyingGroups: [],
     error: null,
@@ -292,5 +308,72 @@ describe('App proxy workspace', () => {
 
     await waitFor(() => expect(currentNode?.textContent).toBe('jp-1'));
     expect(requests.some((url) => url.endsWith('/proxies'))).toBe(true);
+  });
+
+  it('shows network usage as an overview submodule', () => {
+    window.location.hash = '#/overview';
+    useHelperStore.setState({
+      networkUsageSettings: { enabled: true, retentionDays: 7 },
+      networkUsageSummary: {
+        fromMs: 1000,
+        toMs: 2000,
+        uploadBytes: 512,
+        downloadBytes: 2048,
+        totalBytes: 2560,
+        connectionCount: 2,
+        buckets: []
+      },
+      networkUsageTopHosts: {
+        groupBy: 'host',
+        items: [{ label: 'example.com', uploadBytes: 128, downloadBytes: 1024, totalBytes: 1152, connectionCount: 1 }]
+      },
+      networkUsageTopOutbounds: {
+        groupBy: 'outbound',
+        items: [{ label: 'proxy-a', uploadBytes: 384, downloadBytes: 1024, totalBytes: 1408, connectionCount: 1 }]
+      },
+      networkUsageConnections: {
+        connections: [
+          {
+            id: 'conn-1',
+            host: 'example.com',
+            network: 'tcp',
+            rule: 'DOMAIN example.com',
+            outbound: 'proxy-a',
+            chains: ['proxy-a'],
+            firstSeenMs: 1000,
+            lastSeenMs: 2000,
+            uploadBytes: 128,
+            downloadBytes: 1024,
+            totalBytes: 1152
+          }
+        ]
+      }
+    });
+
+    render(<App />);
+
+    expect(screen.getByText('Usage window')).toBeInTheDocument();
+    expect(screen.getAllByText('example.com').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('proxy-a').length).toBeGreaterThan(0);
+    expect(screen.getByText('2 connections')).toBeInTheDocument();
+  });
+
+  it('exposes the network usage capture toggle in settings', () => {
+    window.location.hash = '#/controller';
+    const saveNetworkUsageSettings = vi.fn(async (settings) => {
+      useHelperStore.setState({ networkUsageSettings: settings });
+    });
+    useHelperStore.setState({
+      networkUsageSettings: { enabled: false, retentionDays: 7 },
+      saveNetworkUsageSettings
+    });
+
+    render(<App />);
+
+    const label = screen.getByText('Network usage').closest('label') as HTMLLabelElement;
+    const checkbox = within(label).getByRole('checkbox');
+    fireEvent.click(checkbox);
+
+    expect(saveNetworkUsageSettings).toHaveBeenCalledWith({ enabled: true, retentionDays: 7 });
   });
 });

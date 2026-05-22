@@ -20,6 +20,7 @@ describe('helper store', () => {
       scoresByGroup: {},
       activeProbeGroups: [],
       activeProbeNodesByGroup: {},
+      eventStreamConnected: false,
       loading: false,
       error: null
     });
@@ -203,6 +204,46 @@ describe('helper store', () => {
     vi.useRealTimers();
   });
 
+  it('does not short-poll active probe nodes while the helper event stream is connected', async () => {
+    vi.useFakeTimers();
+    let resolveProbe!: () => void;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/api/v1/groups/select/probe')) {
+        return new Promise<Response>((resolve) => {
+          resolveProbe = () =>
+            resolve(
+              jsonResponse({
+                group: 'select',
+                mode: 'score',
+                scheme: 'Balanced',
+                testUrl: 'https://cp.cloudflare.com/generate_204',
+                recommended: null,
+                applyError: null,
+                nodes: []
+              })
+            );
+        });
+      }
+      if (url.endsWith('/api/v1/probes')) {
+        return jsonResponse({ groups: [] });
+      }
+      return new Response('not found', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    useHelperStore.setState({ eventStreamConnected: true });
+
+    const probe = useHelperStore.getState().probeGroup('select', 2);
+
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/probes'))).toBe(false);
+
+    resolveProbe();
+    await probe;
+    vi.useRealTimers();
+  });
+
   it('saves default test URL without dropping the configured timeout', async () => {
     const requests: Array<{ url: string; body: unknown }> = [];
     vi.stubGlobal(
@@ -307,6 +348,108 @@ describe('helper store', () => {
 
     expect(requests.some((url) => url.endsWith('/api/v1/traffic'))).toBe(true);
     expect(useHelperStore.getState().traffic?.providers[0]?.name).toBe('Haita');
+  });
+
+  it('saves network usage settings through the helper API', async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/settings/network-usage')) {
+          const body = init?.body ? JSON.parse(String(init.body)) : null;
+          requests.push({ url, body });
+          return jsonResponse(body);
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().saveNetworkUsageSettings({
+      enabled: true,
+      retentionDays: 7
+    });
+
+    expect(requests[0].body).toEqual({
+      enabled: true,
+      retentionDays: 7
+    });
+    expect(useHelperStore.getState().networkUsageSettings).toEqual({
+      enabled: true,
+      retentionDays: 7
+    });
+  });
+
+  it('loads a network usage window from summary, top, and connection endpoints', async () => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        requests.push(url);
+        const parsed = new URL(url);
+        if (parsed.pathname.endsWith('/api/v1/network-usage/summary')) {
+          return jsonResponse({
+            fromMs: 1000,
+            toMs: 2000,
+            uploadBytes: 512,
+            downloadBytes: 2048,
+            totalBytes: 2560,
+            connectionCount: 2,
+            buckets: []
+          });
+        }
+        if (parsed.pathname.endsWith('/api/v1/network-usage/top')) {
+          return jsonResponse({
+            groupBy: parsed.searchParams.get('groupBy'),
+            items: [
+              {
+                label: parsed.searchParams.get('groupBy') === 'outbound' ? 'proxy-a' : 'example.com',
+                uploadBytes: 128,
+                downloadBytes: 1024,
+                totalBytes: 1152,
+                connectionCount: 1
+              }
+            ]
+          });
+        }
+        if (parsed.pathname.endsWith('/api/v1/network-usage/connections')) {
+          return jsonResponse({
+            connections: [
+              {
+                id: 'conn-1',
+                host: 'example.com',
+                network: 'tcp',
+                rule: 'DOMAIN example.com',
+                outbound: 'proxy-a',
+                chains: ['proxy-a'],
+                firstSeenMs: 1000,
+                lastSeenMs: 2000,
+                uploadBytes: 128,
+                downloadBytes: 1024,
+                totalBytes: 1152
+              }
+            ]
+          });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().loadNetworkUsageWindow({
+      from: 1000,
+      to: 2000,
+      bucket: 'minute',
+      limit: 5
+    });
+
+    expect(requests.some((url) => url.includes('/api/v1/network-usage/summary'))).toBe(true);
+    expect(requests.some((url) => url.includes('groupBy=host'))).toBe(true);
+    expect(requests.some((url) => url.includes('groupBy=outbound'))).toBe(true);
+    expect(useHelperStore.getState().networkUsageSummary?.totalBytes).toBe(2560);
+    expect(useHelperStore.getState().networkUsageTopHosts?.items[0]?.label).toBe('example.com');
+    expect(useHelperStore.getState().networkUsageTopOutbounds?.items[0]?.label).toBe('proxy-a');
+    expect(useHelperStore.getState().networkUsageConnections?.connections[0]?.host).toBe('example.com');
   });
 
   it('saves config path through the helper API', async () => {
