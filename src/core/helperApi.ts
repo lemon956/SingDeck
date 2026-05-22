@@ -34,6 +34,7 @@ export type HelperGroupConfig = {
 export type HelperTestingSettings = {
   defaultTestUrl: string;
   delayTestTimeoutMs: number;
+  minProbeIntervalSec: number;
 };
 
 export type HelperTrafficSettings = {
@@ -77,6 +78,37 @@ export type HelperScoreComponents = {
   freshness: number;
 };
 
+export type HelperScoreWeights = {
+  latency: number;
+  availability: number;
+  jitter: number;
+  freshness: number;
+};
+
+export type HelperNodeScoreRaw = {
+  success: boolean;
+  delayMs: number | null;
+  error: string | null;
+  testedAt: string | null;
+  sampleWindowSec?: number | null;
+  sampleCount?: number;
+  successCount?: number;
+  failureCount?: number;
+  confidence?: number | null;
+  latencyDelayMs?: number | null;
+  latencyP50Ms?: number | null;
+  latencyP90Ms?: number | null;
+  jitterP50Ms?: number | null;
+  jitterP95Ms?: number | null;
+  jitterMs?: number | null;
+  freshnessAgeMs?: number | null;
+  freshnessState?: 'fresh' | 'stale' | 'expired' | null;
+  gateReason?: 'none' | 'no_sample' | 'latest_failed' | 'expired' | string | null;
+  mode?: ScoreMode;
+  scheme?: ScoreScheme;
+  weights?: HelperScoreWeights | null;
+};
+
 export type HelperNodeScore = {
   name: string;
   score: number;
@@ -84,6 +116,7 @@ export type HelperNodeScore = {
   components: HelperScoreComponents;
   lastTestedAt: string | null;
   error: string | null;
+  raw?: HelperNodeScoreRaw;
 };
 
 export type HelperScoresResponse = {

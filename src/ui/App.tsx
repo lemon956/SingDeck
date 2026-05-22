@@ -63,6 +63,7 @@ const TRAFFIC_SPARKLINE_WINDOW_MS = 2 * 60 * 1000;
 const TRAFFIC_SPARKLINE_WIDTH = 188;
 const TRAFFIC_SPARKLINE_HEIGHT = 44;
 const DEFAULT_DELAY_TEST_TIMEOUT_MS = 5000;
+const DEFAULT_MIN_PROBE_INTERVAL_SEC = 60;
 const STRATEGY_GROUP_ORDER_STORAGE_KEY = 'singdeck-strategy-group-order';
 const NETWORK_USAGE_WINDOWS = [
   { id: '1h', label: '1h', durationMs: 60 * 60 * 1000, bucket: 'minute' as const },
@@ -319,6 +320,12 @@ function formatScoreTooltip(score: HelperNodeScore): string {
     `jitter ${score.components.jitter}`,
     `freshness ${score.components.freshness}`
   ];
+  if (score.raw) {
+    parts.push(
+      `raw ${score.raw.success ? 'ok' : 'failed'}`,
+      `delay ${score.raw.delayMs === null ? '--' : `${score.raw.delayMs}ms`}`
+    );
+  }
   return parts.join(' / ');
 }
 
@@ -331,6 +338,79 @@ function latestScoreUpdateAt(scores: HelperNodeScore[]): Date | null {
   }
 
   return new Date(Math.max(...timestamps));
+}
+
+function probeSnapshotTimestamp(scores: HelperNodeScore[]): Date | null {
+  const timestamps = scores
+    .map((score) => score.raw?.testedAt ?? score.lastTestedAt)
+    .filter((value): value is string => Boolean(value))
+    .map((value) => Date.parse(value))
+    .filter(Number.isFinite);
+  if (timestamps.length === 0) {
+    return null;
+  }
+
+  return new Date(Math.max(...timestamps));
+}
+
+function rawAvailabilityLabel(score: HelperNodeScore): string {
+  const raw = score.raw;
+  if (!raw || raw.sampleCount === undefined || raw.successCount === undefined) {
+    return '--';
+  }
+  const confidence = raw.confidence === null || raw.confidence === undefined
+    ? null
+    : Math.round(raw.confidence * 100);
+  return confidence === null
+    ? `${raw.successCount}/${raw.sampleCount}`
+    : `${raw.successCount}/${raw.sampleCount} · conf ${confidence}%`;
+}
+
+function rawLatencyLabel(score: HelperNodeScore): string {
+  const raw = score.raw;
+  const p50 = raw?.latencyP50Ms ?? raw?.jitterP50Ms;
+  const p90 = raw?.latencyP90Ms ?? raw?.jitterP95Ms;
+  if (raw && !raw.success && (p50 === null || p50 === undefined) && (p90 === null || p90 === undefined)) {
+    return 'failed';
+  }
+  if (p50 === null || p50 === undefined || p90 === null || p90 === undefined) {
+    return '--';
+  }
+  return `p50 ${p50} / p90 ${p90}`;
+}
+
+function rawStabilityLabel(score: HelperNodeScore): string {
+  const raw = score.raw;
+  if (!raw) {
+    return '--';
+  }
+  const jitter = raw.jitterMs === null || raw.jitterMs === undefined ? '--' : String(raw.jitterMs);
+  return jitter === '--' ? 'jitter --' : `jitter ${jitter}ms`;
+}
+
+function rawFreshnessLabel(score: HelperNodeScore): string {
+  const raw = score.raw;
+  const age = raw?.freshnessAgeMs;
+  if (age === null || age === undefined) {
+    return '--';
+  }
+  const ageLabel = age < 1000 ? '<1s' : `${Math.round(age / 1000)}s`;
+  return `${raw?.freshnessState ?? 'unknown'} ${ageLabel} / ${raw?.gateReason ?? 'none'}`;
+}
+
+function rawWeightsLabel(score: HelperNodeScore): string {
+  const weights = score.raw?.weights;
+  if (!weights) {
+    return '--';
+  }
+  const latency = Math.round(weights.latency * 100);
+  const connectivity = Math.round(weights.availability * 100);
+  const stability = Math.round(weights.jitter * 100);
+  const freshness = Math.round(weights.freshness * 100);
+  if (freshness > 0) {
+    return `w ${latency}/${connectivity}/${stability}/${freshness}`;
+  }
+  return `w ${connectivity}/${latency}/${stability}`;
 }
 
 function fallbackGroupConfig(testUrl: string): HelperGroupConfig {
@@ -551,6 +631,9 @@ export function App() {
   const [testingDefaultUrlDraft, setTestingDefaultUrlDraft] = useState(config.defaultTestUrl);
   const [trafficProfileDraft, setTrafficProfileDraft] = useState('');
   const [networkUsageWindow, setNetworkUsageWindow] = useState<NetworkUsageWindowId>('24h');
+  const [nodeScoreSearch, setNodeScoreSearch] = useState('');
+  const [selectedNodeScoreGroup, setSelectedNodeScoreGroup] = useState('');
+  const [nodeScoreDropdownOpen, setNodeScoreDropdownOpen] = useState(false);
   const [activeRoute, setActiveRoute] = useState<AppRoute>(() => routeFromHash(window.location.hash));
   const [activeStrategyGroupName, setActiveStrategyGroupName] = useState<string | null>(null);
   const [railExpanded, setRailExpanded] = useState(() => localStorage.getItem('singdeck-rail-expanded') !== 'false');
@@ -658,7 +741,7 @@ export function App() {
       void proxies.refresh();
     }
 
-    if (activeRoute === 'controller' || activeRoute === 'proxies') {
+    if (activeRoute === 'overview' || activeRoute === 'controller' || activeRoute === 'proxies') {
       void useHelperStore
         .getState()
         .syncController()
@@ -818,9 +901,58 @@ export function App() {
   const helperDefaultTestUrl = helper.testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
   const helperDelayTestTimeoutMs =
     helper.testingSettings?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? DEFAULT_DELAY_TEST_TIMEOUT_MS;
+  const helperMinProbeIntervalSec =
+    helper.testingSettings?.minProbeIntervalSec ?? DEFAULT_MIN_PROBE_INTERVAL_SEC;
+  const helperMinProbeIntervalMinutes = Math.max(1, Math.ceil(helperMinProbeIntervalSec / 60));
   const singBoxRemoteProfileUri = buildSingBoxRemoteProfileUri(configQrUrl, 'SingDeck');
   const configQrUrlNeedsLan = !configQrUrl.trim() || isLoopbackUrl(configQrUrl);
   const helperGroupByName = useMemo(() => new Map(helper.groups.map((group) => [group.name, group])), [helper.groups]);
+  const nodeScoreGroups = useMemo(() => {
+    const helperGroupNames = new Set(helper.groups.map((group) => group.name));
+    const fromHelperGroups = helper.groups.map((group) => {
+      const scores =
+        helper.scoresByGroup[group.name] ?? {
+          group: group.name,
+          mode: group.config.mode,
+          scheme: group.config.scheme,
+          testUrl: group.config.testUrl,
+          recommended: null,
+          applyError: null,
+          nodes: []
+        };
+      return {
+        scores,
+        updatedAt: probeSnapshotTimestamp(scores.nodes),
+        failedCount: scores.nodes.filter((node) => node.raw?.success === false || Boolean(node.error)).length
+      };
+    });
+    const fromScoresOnly = Object.values(helper.scoresByGroup)
+      .filter((scores) => !helperGroupNames.has(scores.group))
+      .map((scores) => ({
+          scores,
+          updatedAt: probeSnapshotTimestamp(scores.nodes),
+          failedCount: scores.nodes.filter((node) => node.raw?.success === false || Boolean(node.error)).length
+        }));
+    return [...fromHelperGroups, ...fromScoresOnly].sort(
+      (left, right) => (right.updatedAt?.getTime() ?? 0) - (left.updatedAt?.getTime() ?? 0)
+    );
+  }, [helper.groups, helper.scoresByGroup]);
+  const filteredNodeScoreGroups = useMemo(() => {
+    const query = nodeScoreSearch.trim().toLowerCase();
+    return query
+      ? nodeScoreGroups.filter((item) => item.scores.group.toLowerCase().includes(query))
+      : nodeScoreGroups;
+  }, [nodeScoreGroups, nodeScoreSearch]);
+  const selectedNodeScoreSnapshot = selectedNodeScoreGroup
+    ? nodeScoreGroups.find((item) => item.scores.group === selectedNodeScoreGroup) ?? null
+    : null;
+
+  useEffect(() => {
+    if (selectedNodeScoreGroup && !nodeScoreGroups.some((item) => item.scores.group === selectedNodeScoreGroup)) {
+      setSelectedNodeScoreGroup('');
+    }
+  }, [nodeScoreGroups, selectedNodeScoreGroup]);
+
   const activeHelperGroup = activeStrategyGroup ? helperGroupByName.get(activeStrategyGroup.name) : undefined;
   const activeHelperScores = activeStrategyGroup ? helper.scoresByGroup[activeStrategyGroup.name] : undefined;
   const activeHelperScoreByName = useMemo(
@@ -845,10 +977,11 @@ export function App() {
       ? activeHelperScoreByName.get(activeStrategyGroup.now)
       : undefined;
   const activeSelectedDelay = activeStrategyGroup
-    ? activeSelectedScore?.delayMs ??
-      proxies.groupDelayResults[activeStrategyGroup.name] ??
-      proxyDelayByName.get(activeStrategyGroup.now) ??
-      activeStrategyGroup.delay
+    ? activeProbeExecution?.mode === 'helper-score'
+      ? activeSelectedScore?.delayMs ?? null
+      : proxies.groupDelayResults[activeStrategyGroup.name] ??
+        proxyDelayByName.get(activeStrategyGroup.now) ??
+        activeStrategyGroup.delay
     : null;
   const activeInspectorModel = buildProxyInspectorModel({
     group: activeStrategyGroup,
@@ -1213,9 +1346,14 @@ export function App() {
 
   const saveGroupConfigFor = (groupName: string, currentConfig: HelperGroupConfig, patch: Partial<HelperGroupConfig>) => {
     const hasTestUrlPatch = Object.prototype.hasOwnProperty.call(patch, 'testUrl');
+    const nextProbeIntervalSec =
+      patch.probeIntervalSec === undefined
+        ? currentConfig.probeIntervalSec
+        : Math.max(patch.probeIntervalSec, helperMinProbeIntervalSec);
     const nextConfig: HelperGroupConfig = {
       ...currentConfig,
       ...patch,
+      probeIntervalSec: nextProbeIntervalSec,
       testUrl: ((patch.testUrl ?? currentConfig.testUrl) || helperDefaultTestUrl).trim() || helperDefaultTestUrl,
       testUrlOverridden: patch.testUrlOverridden ?? (hasTestUrlPatch ? true : currentConfig.testUrlOverridden)
     };
@@ -1336,6 +1474,12 @@ export function App() {
       if (backup.helper.testingSettings?.defaultTestUrl) {
         setTestingDefaultUrlDraft(backup.helper.testingSettings.defaultTestUrl);
         await helper.saveDefaultTestUrl(backup.helper.testingSettings.defaultTestUrl);
+        if (backup.helper.testingSettings.delayTestTimeoutMs) {
+          await helper.saveDelayTestTimeout(backup.helper.testingSettings.delayTestTimeoutMs);
+        }
+        if (backup.helper.testingSettings.minProbeIntervalSec) {
+          await helper.saveMinProbeInterval(backup.helper.testingSettings.minProbeIntervalSec);
+        }
       }
       if (backup.helper.trafficSettings) {
         setTrafficProfileDraft(backup.helper.trafficSettings.browserProfile);
@@ -1789,6 +1933,113 @@ export function App() {
             </div>
           </article>
         </section>
+        <article className="node-score-desc-panel" aria-label="node score desc">
+          <div className="node-score-desc-head">
+            <div className="node-score-desc-title">
+              <h2>node score desc</h2>
+              <span>
+                {selectedNodeScoreSnapshot?.updatedAt
+                  ? `updated ${selectedNodeScoreSnapshot.updatedAt.toLocaleTimeString()}`
+                  : 'choose a strategy group'}
+              </span>
+            </div>
+            <div className="node-score-desc-controls">
+              <div className="node-score-select">
+                <button
+                  aria-expanded={nodeScoreDropdownOpen}
+                  aria-haspopup="listbox"
+                  aria-label="Select score strategy group"
+                  className="node-score-select-trigger"
+                  onClick={() => setNodeScoreDropdownOpen((open) => !open)}
+                  type="button"
+                >
+                  <span>Strategy group</span>
+                  <strong>{selectedNodeScoreGroup || 'Select group'}</strong>
+                </button>
+                {nodeScoreDropdownOpen ? (
+                  <div className="node-score-menu" role="listbox">
+                    <input
+                      aria-label="Search score strategy group"
+                      autoFocus
+                      placeholder="search strategy group..."
+                      value={nodeScoreSearch}
+                      onChange={(event) => setNodeScoreSearch(event.target.value)}
+                    />
+                    <div className="node-score-options">
+                      {filteredNodeScoreGroups.map(({ scores, failedCount }) => (
+                        <button
+                          aria-label={`${scores.group} ${scores.nodes.length} nodes`}
+                          className={selectedNodeScoreGroup === scores.group ? 'active' : ''}
+                          key={scores.group}
+                          onClick={() => {
+                            setSelectedNodeScoreGroup(scores.group);
+                            setNodeScoreDropdownOpen(false);
+                          }}
+                          role="option"
+                          type="button"
+                        >
+                          <span>{scores.group}</span>
+                          <small>
+                            {scores.nodes.length} nodes{failedCount > 0 ? ` / ${failedCount} failed` : ''}
+                          </small>
+                        </button>
+                      ))}
+                      {filteredNodeScoreGroups.length === 0 ? (
+                        <div className="node-score-menu-empty">No matching strategy groups.</div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+          {selectedNodeScoreSnapshot && selectedNodeScoreSnapshot.scores.nodes.length > 0 ? (
+            <div className="node-score-window" aria-label={`${selectedNodeScoreSnapshot.scores.group} node score details`}>
+              <div className="node-score-row node-score-row-head">
+                <span>node</span>
+                <span>score</span>
+                <span>real latency</span>
+                <span>connectivity</span>
+                <span>stability</span>
+                <span>freshness gate</span>
+                <span>latency raw</span>
+                <span>conn raw</span>
+                <span>stability raw</span>
+                <span>fresh raw</span>
+                <span>weights</span>
+                <span>state</span>
+                <span>error</span>
+              </div>
+              {selectedNodeScoreSnapshot.scores.nodes.map((node) => (
+                <div className="node-score-row" key={node.name}>
+                  <strong title={node.name}>{node.name}</strong>
+                  <span>{Math.round(node.score)}</span>
+                  <span>{node.components.latency}</span>
+                  <span>{node.components.availability}</span>
+                  <span>{node.components.jitter}</span>
+                  <span>{node.components.freshness}</span>
+                  <span>{rawLatencyLabel(node)}</span>
+                  <span>{rawAvailabilityLabel(node)}</span>
+                  <span>{rawStabilityLabel(node)}</span>
+                  <span>{rawFreshnessLabel(node)}</span>
+                  <span>{rawWeightsLabel(node)}</span>
+                  <span className={node.raw?.success === false || node.error ? 'bad' : 'good'}>
+                    {node.raw?.success === false || node.error ? 'error' : 'ok'}
+                  </span>
+                  <span title={node.error ?? undefined}>{node.error ?? '--'}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="node-score-empty">
+              {selectedNodeScoreGroup
+                ? 'No score snapshot for this group yet.'
+                : nodeScoreGroups.length === 0
+                ? 'No helper probe snapshot yet.'
+                : 'Select a strategy group to inspect node score details.'}
+            </div>
+          )}
+        </article>
           </>
         ) : null}
 
@@ -2032,6 +2283,31 @@ export function App() {
                       }
                     />
                   </label>
+                  <label>
+                    <span>Minimum interval</span>
+                    <input
+                      disabled={!helperServiceAvailable}
+                      max={1440}
+                      min={1}
+                      type="number"
+                      value={helperMinProbeIntervalMinutes}
+                      onBlur={(event) => {
+                        const minutes = Number.parseInt(event.currentTarget.value, 10) || 1;
+                        void helper.saveMinProbeInterval(Math.max(1, minutes) * 60);
+                      }}
+                      onChange={(event) => {
+                        const minutes = Number.parseInt(event.target.value, 10) || 1;
+                        if (helper.testingSettings) {
+                          useHelperStore.setState({
+                            testingSettings: {
+                              ...helper.testingSettings,
+                              minProbeIntervalSec: Math.max(1, minutes) * 60
+                            }
+                          });
+                        }
+                      }}
+                    />
+                  </label>
                 </div>
               </article>
 
@@ -2131,9 +2407,10 @@ export function App() {
                 {healthRow('External UI', 'relative path', 'ok')}
                 {healthRow('Test workers', String(form.delayTestConcurrency ?? 4), 'ok')}
                 {healthRow('Test timeout', `${form.delayTestTimeoutMs ?? helperDelayTestTimeoutMs} ms`, 'ok')}
+                {healthRow('Min probe interval', `${helperMinProbeIntervalMinutes} min`, 'ok')}
               </div>
               <div className="settings-scope-note">
-                Saves controller URL, secret, note, test worker count, and test timeout in browser storage. If helper is ready, the timeout is mirrored to helper.
+                Saves controller URL, secret, note, test worker count, and test timeout in browser storage. If helper is ready, testing limits are mirrored to helper.
               </div>
               <div className="settings-save-row">
                 {localBehaviorStatus ? (
@@ -2206,7 +2483,10 @@ export function App() {
                   const latestGroupUpdate = latestScoreUpdateAt(groupScores);
                   const groupScoreByName = new Map(groupScores.map((score) => [score.name, score]));
                   const selectedScore = execution.mode !== 'native-urltest' ? groupScoreByName.get(proxy.now) : undefined;
-                  const selectedDelayValue = selectedScore?.delayMs ?? proxies.groupDelayResults[proxy.name] ?? selectedDelay;
+                  const selectedDelayValue =
+                    execution.mode === 'helper-score'
+                      ? selectedScore?.delayMs ?? null
+                      : proxies.groupDelayResults[proxy.name] ?? selectedDelay;
                   const selectedScoreTone = selectedScore ? nodeScoreTone(selectedScore, selectedDelay) : 'none';
                   const selectedDelayTone = delayTone(selectedDelayValue);
                   const isProbing = activeProbeGroupNames.has(proxy.name);
@@ -2379,7 +2659,7 @@ export function App() {
                           const canSelect = isSelectableProxyGroup(proxy);
                           const score = execution.mode === 'helper-score' ? groupScoreByName.get(member.name) : undefined;
                           const displayDelay = proxyDelayByName.get(member.name) ?? member.delay;
-                          const nodeDelay = score?.delayMs ?? displayDelay;
+                          const nodeDelay = execution.mode === 'helper-score' ? score?.delayMs ?? null : displayDelay;
                           const scoreTone = score ? nodeScoreTone(score, displayDelay) : 'none';
                           const nodeDelayTone = delayTone(nodeDelay);
                           const cardTone = rowConfig.mode === 'score' && score ? scoreTone : nodeDelayTone;
@@ -2603,12 +2883,13 @@ export function App() {
                       <input
                         disabled={!activeInspectorModel.canSchedule || !activeGroupConfig.autoProbe}
                         max={1440}
-                        min={1}
+                        min={helperMinProbeIntervalMinutes}
                         type="number"
-                        value={activeInspectorModel.intervalMinutes}
+                        value={Math.max(activeInspectorModel.intervalMinutes, helperMinProbeIntervalMinutes)}
                         onChange={(event) =>
                           saveGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
-                            probeIntervalSec: (Number.parseInt(event.target.value, 10) || 1) * 60
+                            probeIntervalSec:
+                              Math.max(Number.parseInt(event.target.value, 10) || 1, helperMinProbeIntervalMinutes) * 60
                           })
                         }
                       />

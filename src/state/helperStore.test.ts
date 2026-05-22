@@ -255,7 +255,8 @@ describe('helper store', () => {
           requests.push({ url, body });
           return jsonResponse({
             defaultTestUrl: body.defaultTestUrl,
-            delayTestTimeoutMs: body.delayTestTimeoutMs
+            delayTestTimeoutMs: body.delayTestTimeoutMs,
+            minProbeIntervalSec: body.minProbeIntervalSec
           });
         }
         if (url.endsWith('/api/v1/groups')) {
@@ -269,7 +270,39 @@ describe('helper store', () => {
 
     expect(requests[0].body).toEqual({
       defaultTestUrl: 'https://api.openai.com',
-      delayTestTimeoutMs: 10000
+      delayTestTimeoutMs: 10000,
+      minProbeIntervalSec: 60
+    });
+  });
+
+  it('saves minimum probe interval with testing settings', async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    useHelperStore.setState({
+      testingSettings: {
+        defaultTestUrl: 'https://cp.cloudflare.com/generate_204',
+        delayTestTimeoutMs: 8000,
+        minProbeIntervalSec: 180
+      }
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/settings/testing')) {
+          const body = init?.body ? JSON.parse(String(init.body)) : null;
+          requests.push({ url, body });
+          return jsonResponse(body);
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().saveMinProbeInterval(300);
+
+    expect(requests[0].body).toEqual({
+      defaultTestUrl: 'https://cp.cloudflare.com/generate_204',
+      delayTestTimeoutMs: 8000,
+      minProbeIntervalSec: 300
     });
   });
 

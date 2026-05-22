@@ -91,7 +91,30 @@ function setupProxyWorkspace() {
             delayMs: 48,
             components: { latency: 100, availability: 100, jitter: 100, freshness: 100 },
             lastTestedAt: null,
-            error: null
+            error: null,
+            raw: {
+              success: true,
+              delayMs: 48,
+              error: null,
+              testedAt: null,
+              sampleCount: 3,
+              successCount: 3,
+              failureCount: 0,
+              sampleWindowSec: 5400,
+              confidence: 0.6,
+              latencyDelayMs: 48,
+              latencyP50Ms: 48,
+              latencyP90Ms: 52,
+              jitterP50Ms: 48,
+              jitterP95Ms: 52,
+              jitterMs: 4,
+              freshnessAgeMs: 1200,
+              freshnessState: 'fresh',
+              gateReason: 'none',
+              mode: 'score',
+              scheme: 'Balanced',
+              weights: { latency: 0.3, availability: 0.6, jitter: 0.1, freshness: 0 }
+            }
           },
           {
             name: 'jp-1',
@@ -99,7 +122,30 @@ function setupProxyWorkspace() {
             delayMs: 212,
             components: { latency: 70, availability: 100, jitter: 60, freshness: 100 },
             lastTestedAt: null,
-            error: null
+            error: null,
+            raw: {
+              success: true,
+              delayMs: 212,
+              error: null,
+              testedAt: null,
+              sampleCount: 2,
+              successCount: 2,
+              failureCount: 0,
+              sampleWindowSec: 5400,
+              confidence: 0.4,
+              latencyDelayMs: 212,
+              latencyP50Ms: 180,
+              latencyP90Ms: 212,
+              jitterP50Ms: 180,
+              jitterP95Ms: 212,
+              jitterMs: 32,
+              freshnessAgeMs: 2400,
+              freshnessState: 'fresh',
+              gateReason: 'none',
+              mode: 'score',
+              scheme: 'Balanced',
+              weights: { latency: 0.3, availability: 0.6, jitter: 0.1, freshness: 0 }
+            }
           }
         ]
       }
@@ -165,6 +211,56 @@ describe('App proxy workspace', () => {
     expect(nodeCards.some((node) => within(node as HTMLElement).queryByText('standby'))).toBe(false);
   });
 
+  it('uses the latest score delay without falling back to controller delay in score mode', () => {
+    useProxyStore.setState((state) => ({
+      proxies: state.proxies.map((proxy) =>
+        proxy.name === 'select'
+          ? { ...proxy, now: 'jp-1', delay: 999 }
+          : proxy.name === 'jp-1'
+            ? { ...proxy, delay: 212 }
+            : proxy
+      ),
+      groupDelayResults: { select: 777 }
+    }));
+    useHelperStore.setState((state) => ({
+      scoresByGroup: {
+        ...state.scoresByGroup,
+        select: {
+          ...state.scoresByGroup.select,
+          nodes: state.scoresByGroup.select.nodes.map((node) =>
+            node.name === 'jp-1'
+              ? {
+                  ...node,
+                  score: 0,
+                  delayMs: null,
+                  error: 'timeout',
+                  raw: {
+                    ...node.raw,
+                    success: false,
+                    delayMs: null,
+                    error: 'timeout',
+                    testedAt: node.raw?.testedAt ?? null,
+                    gateReason: 'latest_failed'
+                  }
+                }
+              : node
+          )
+        }
+      }
+    }));
+
+    const { container } = render(<App />);
+    const groupMeta = container.querySelector('.strategy-card-meta') as HTMLElement;
+    const groupDelayPills = Array.from(groupMeta.querySelectorAll('.delay-pill:not(.score-pill)'));
+    const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card')) as HTMLElement[];
+    const jpNode = nodeCards.find((node) => within(node).queryByText('jp-1')) as HTMLElement;
+
+    expect(groupDelayPills[0]).toHaveTextContent('--');
+    expect(within(jpNode).getByRole('button', { name: /Test jp-1 delay/i })).toHaveTextContent('--');
+    expect(within(jpNode).queryByText('212ms')).not.toBeInTheDocument();
+    expect(within(jpNode).queryByText('777ms')).not.toBeInTheDocument();
+  });
+
   it('shows latest score update in the group header instead of node cards', () => {
     const latest = '2026-05-12T06:30:15.000Z';
     const latestLabel = new Date(latest).toLocaleTimeString();
@@ -228,6 +324,109 @@ describe('App proxy workspace', () => {
     expect(groupHead).toHaveClass('is-scoring');
     expect(hkNode).not.toHaveClass('is-scoring');
     expect(jpNode).toHaveClass('is-scoring');
+  });
+
+  it('shows node score desc at the overview bottom after selecting a strategy group', () => {
+    window.location.hash = '#/overview';
+    useHelperStore.setState((state) => ({
+      scoresByGroup: {
+        ...state.scoresByGroup,
+        select: {
+          ...state.scoresByGroup.select,
+          recommended: 'hk-1',
+          nodes: state.scoresByGroup.select.nodes.map((node) =>
+            node.name === 'jp-1'
+              ? {
+                  ...node,
+                  score: 0,
+                  delayMs: null,
+                  error: 'timeout',
+                  lastTestedAt: '2026-05-22T08:00:00.000Z',
+                  raw: {
+                    success: false,
+                    delayMs: null,
+                    error: 'timeout',
+                    testedAt: '2026-05-22T08:00:00.000Z',
+                    sampleCount: 1,
+                    successCount: 0,
+                    failureCount: 1,
+                    sampleWindowSec: 5400,
+                    confidence: 0.2,
+                    latencyDelayMs: null,
+                    latencyP50Ms: null,
+                    latencyP90Ms: null,
+                    jitterP50Ms: null,
+                    jitterP95Ms: null,
+                    jitterMs: null,
+                    freshnessAgeMs: 0,
+                    freshnessState: 'fresh',
+                    gateReason: 'latest_failed',
+                    mode: 'score',
+                    scheme: 'Balanced',
+                    weights: { latency: 0.3, availability: 0.6, jitter: 0.1, freshness: 0 }
+                  }
+                }
+              : {
+                  ...node,
+                  lastTestedAt: '2026-05-22T08:00:00.000Z',
+                  raw: {
+                    success: true,
+                    delayMs: node.delayMs,
+                    error: null,
+                    testedAt: '2026-05-22T08:00:00.000Z',
+                    sampleCount: 3,
+                    successCount: 3,
+                    failureCount: 0,
+                    sampleWindowSec: 5400,
+                    confidence: 0.6,
+                    latencyDelayMs: node.delayMs,
+                    latencyP50Ms: 48,
+                    latencyP90Ms: 52,
+                    jitterP50Ms: 48,
+                    jitterP95Ms: 52,
+                    jitterMs: 4,
+                    freshnessAgeMs: 1200,
+                    freshnessState: 'fresh',
+                    gateReason: 'none',
+                    mode: 'score',
+                    scheme: 'Balanced',
+                    weights: { latency: 0.3, availability: 0.6, jitter: 0.1, freshness: 0 }
+                  }
+                }
+          )
+        }
+      }
+    }));
+
+    const { container } = render(<App />);
+    const panel = screen.getByLabelText('node score desc');
+
+    expect(panel).toHaveClass('node-score-desc-panel');
+    expect(container.querySelector('.overview-widgets + .node-score-desc-panel')).not.toBeNull();
+    expect(within(panel).getByText('node score desc')).toBeInTheDocument();
+    expect(within(panel).getByText('Select a strategy group to inspect node score details.')).toBeInTheDocument();
+    expect(within(panel).queryByText('hk-1')).not.toBeInTheDocument();
+
+    expect(within(panel).queryByLabelText('Search score strategy group')).not.toBeInTheDocument();
+
+    fireEvent.click(within(panel).getByRole('button', { name: /Select score strategy group/i }));
+    fireEvent.change(within(panel).getByLabelText('Search score strategy group'), {
+      target: { value: 'sel' }
+    });
+    fireEvent.click(within(panel).getByRole('option', { name: /select 2 nodes/i }));
+
+    expect(within(panel).getByText('hk-1')).toBeInTheDocument();
+    expect(within(panel).getByText('jp-1')).toBeInTheDocument();
+    expect(within(panel).getByText('failed')).toBeInTheDocument();
+    expect(within(panel).getByText('real latency')).toBeInTheDocument();
+    expect(within(panel).getByText('connectivity')).toBeInTheDocument();
+    expect(within(panel).getByText('stability')).toBeInTheDocument();
+    expect(within(panel).getByText('freshness gate')).toBeInTheDocument();
+    expect(within(panel).getByText('3/3 · conf 60%')).toBeInTheDocument();
+    expect(within(panel).getByText('p50 48 / p90 52')).toBeInTheDocument();
+    expect(within(panel).getByText('jitter 4ms')).toBeInTheDocument();
+    expect(within(panel).getByText('fresh 1s / none')).toBeInTheDocument();
+    expect(within(panel).getAllByText('w 60/30/10')[0]).toBeInTheDocument();
   });
 
   it('refreshes proxy state after helper auto switch applies a probe result', async () => {

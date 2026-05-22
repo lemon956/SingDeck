@@ -18,7 +18,7 @@ describe('settings backup', () => {
       helper: {
         helperUrl: 'http://127.0.0.1:9531',
         configPath: '/etc/sing-box/config.json',
-        testingSettings: { defaultTestUrl: 'https://github.com', delayTestTimeoutMs: 5000 },
+        testingSettings: { defaultTestUrl: 'https://github.com', delayTestTimeoutMs: 5000, minProbeIntervalSec: 60 },
         trafficSettings: {
           enabled: true,
           browserProfile: '/home/alice/.config/google-chrome/Default'

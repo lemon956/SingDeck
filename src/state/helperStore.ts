@@ -23,6 +23,7 @@ import {
 import { useControllerStore } from './controllerStore';
 
 const ACTIVE_PROBE_POLL_INTERVAL_MS = 120;
+const DEFAULT_MIN_PROBE_INTERVAL_SEC = 60;
 
 type HelperState = {
   helperUrl: string;
@@ -58,6 +59,7 @@ type HelperState = {
   loadNetworkUsageSettings: () => Promise<void>;
   saveDefaultTestUrl: (defaultTestUrl: string) => Promise<void>;
   saveDelayTestTimeout: (delayTestTimeoutMs: number) => Promise<void>;
+  saveMinProbeInterval: (minProbeIntervalSec: number) => Promise<void>;
   saveConfigPath: () => Promise<void>;
   saveTrafficSettings: (settings: HelperTrafficSettings) => Promise<void>;
   saveNetworkUsageSettings: (settings: HelperNetworkUsageSettings) => Promise<void>;
@@ -191,9 +193,11 @@ export const useHelperStore = create<HelperState>()(
           const { config } = useControllerStore.getState();
           const delayTestTimeoutMs =
             get().testingSettings?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? 5000;
+          const minProbeIntervalSec = get().testingSettings?.minProbeIntervalSec ?? DEFAULT_MIN_PROBE_INTERVAL_SEC;
           const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', {
             defaultTestUrl,
-            delayTestTimeoutMs
+            delayTestTimeoutMs,
+            minProbeIntervalSec
           });
           set({ testingSettings, error: null });
           await get().loadGroups();
@@ -205,11 +209,30 @@ export const useHelperStore = create<HelperState>()(
         try {
           const { config } = useControllerStore.getState();
           const defaultTestUrl = get().testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
+          const minProbeIntervalSec = get().testingSettings?.minProbeIntervalSec ?? DEFAULT_MIN_PROBE_INTERVAL_SEC;
           const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', {
             defaultTestUrl,
-            delayTestTimeoutMs
+            delayTestTimeoutMs,
+            minProbeIntervalSec
           });
           set({ testingSettings, error: null });
+        } catch (error) {
+          set({ error: formatHelperError(error) });
+        }
+      },
+      saveMinProbeInterval: async (minProbeIntervalSec) => {
+        try {
+          const { config } = useControllerStore.getState();
+          const defaultTestUrl = get().testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
+          const delayTestTimeoutMs =
+            get().testingSettings?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? 5000;
+          const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', {
+            defaultTestUrl,
+            delayTestTimeoutMs,
+            minProbeIntervalSec
+          });
+          set({ testingSettings, error: null });
+          await get().loadGroups();
         } catch (error) {
           set({ error: formatHelperError(error) });
         }

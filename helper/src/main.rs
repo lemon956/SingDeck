@@ -35,10 +35,15 @@ const MIN_DELAY_TEST_TIMEOUT_MS: i64 = 500;
 const MAX_DELAY_TEST_TIMEOUT_MS: i64 = 60_000;
 const DEFAULT_PROBE_INTERVAL_SEC: i64 = 15 * 60;
 const MIN_PROBE_INTERVAL_SEC: i64 = 60;
+const DEFAULT_MIN_PROBE_INTERVAL_SEC: i64 = MIN_PROBE_INTERVAL_SEC;
 const MAX_PROBE_INTERVAL_SEC: i64 = 24 * 60 * 60;
 const FAILURE_PROBE_COOLDOWN_MS: i64 = 30 * 1000;
 const REALTIME_EVENT_INTERVAL_MS: u64 = 1000;
 const NETWORK_USAGE_SAMPLE_INTERVAL_MS: u64 = 1000;
+const MIN_SCORE_SAMPLE_WINDOW_MS: i64 = 30 * 60 * 1000;
+const SCORE_SAMPLE_WINDOW_INTERVAL_MULTIPLIER: i64 = 6;
+const MAX_SCORE_SAMPLE_COUNT: i64 = 10;
+const CONNECTIVITY_CONFIDENCE_SAMPLE_TARGET: f64 = 5.0;
 
 #[derive(Clone)]
 struct AppState {
@@ -234,6 +239,8 @@ struct TestingSettings {
     default_test_url: String,
     #[serde(default = "default_delay_test_timeout_ms")]
     delay_test_timeout_ms: i64,
+    #[serde(default = "default_min_probe_interval_sec")]
+    min_probe_interval_sec: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,6 +248,7 @@ struct TestingSettings {
 struct TestingSettingsInput {
     default_test_url: String,
     delay_test_timeout_ms: Option<i64>,
+    min_probe_interval_sec: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -315,10 +323,18 @@ struct ProbeStatusResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 enum HelperEvent {
-    ProbeStatus { groups: Vec<ActiveProbeView> },
-    ProbeScores { scores: ScoresResponse },
+    ProbeStatus {
+        groups: Vec<ActiveProbeView>,
+    },
+    ProbeScores {
+        scores: ScoresResponse,
+    },
     ConnectionsSnapshot {
         snapshot: serde_json::Value,
         sampled_at: String,
@@ -332,10 +348,13 @@ enum HelperEvent {
         mode: String,
         sampled_at: String,
     },
-    Error { scope: String, message: String },
+    Error {
+        scope: String,
+        message: String,
+    },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ScoresResponse {
     group: String,
@@ -347,7 +366,7 @@ struct ScoresResponse {
     nodes: Vec<NodeScore>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NodeScore {
     name: String,
@@ -356,11 +375,69 @@ struct NodeScore {
     components: ScoreComponents,
     last_tested_at: Option<String>,
     error: Option<String>,
+    #[serde(default = "default_node_score_raw")]
+    raw: NodeScoreRaw,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct ScoreComponents {
+    latency: f64,
+    availability: f64,
+    jitter: f64,
+    freshness: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct NodeScoreRaw {
+    success: bool,
+    delay_ms: Option<i64>,
+    error: Option<String>,
+    tested_at: Option<String>,
+    #[serde(default)]
+    sample_window_sec: Option<i64>,
+    #[serde(default)]
+    sample_count: usize,
+    #[serde(default)]
+    success_count: usize,
+    #[serde(default)]
+    failure_count: usize,
+    #[serde(default)]
+    confidence: Option<f64>,
+    #[serde(default)]
+    latency_delay_ms: Option<i64>,
+    #[serde(default)]
+    latency_p50_ms: Option<i64>,
+    #[serde(default)]
+    latency_p90_ms: Option<i64>,
+    #[serde(default)]
+    jitter_p50_ms: Option<i64>,
+    #[serde(default)]
+    jitter_p95_ms: Option<i64>,
+    #[serde(default)]
+    jitter_ms: Option<i64>,
+    #[serde(default)]
+    freshness_age_ms: Option<i64>,
+    #[serde(default)]
+    freshness_state: Option<String>,
+    #[serde(default)]
+    gate_reason: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    scheme: Option<String>,
+    #[serde(default)]
+    weights: Option<ScoreWeights>,
+}
+
+fn default_node_score_raw() -> NodeScoreRaw {
+    NodeScoreRaw::default()
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ScoreWeights {
     latency: f64,
     availability: f64,
     jitter: f64,
@@ -598,6 +675,7 @@ async fn testing_settings(
     Ok(Json(TestingSettings {
         default_test_url: load_default_test_url(&state)?,
         delay_test_timeout_ms: load_delay_test_timeout_ms(&state)?,
+        min_probe_interval_sec: load_min_probe_interval_sec(&state)?,
     }))
 }
 
@@ -613,15 +691,25 @@ async fn save_testing_settings(
         normalize_delay_test_timeout(input.delay_test_timeout_ms.unwrap_or_else(|| {
             load_delay_test_timeout_ms(&state).unwrap_or(DEFAULT_DELAY_TEST_TIMEOUT_MS)
         }));
+    let min_probe_interval_sec =
+        normalize_min_probe_interval(input.min_probe_interval_sec.unwrap_or_else(|| {
+            load_min_probe_interval_sec(&state).unwrap_or(DEFAULT_MIN_PROBE_INTERVAL_SEC)
+        }));
     save_string_kv(&state, "default_test_url", default_test_url)?;
     save_string_kv(
         &state,
         "delay_test_timeout_ms",
         &delay_test_timeout_ms.to_string(),
     )?;
+    save_string_kv(
+        &state,
+        "min_probe_interval_sec",
+        &min_probe_interval_sec.to_string(),
+    )?;
     Ok(Json(TestingSettings {
         default_test_url: default_test_url.to_string(),
         delay_test_timeout_ms,
+        min_probe_interval_sec,
     }))
 }
 
@@ -720,8 +808,13 @@ async fn groups(State(state): State<AppState>) -> Result<Json<GroupsResponse>, A
         .into_iter()
         .map(|proxy| {
             let config = load_group_config(&state, &proxy.name)?;
-            let scores = compute_scores_for_group(&state, &proxy.name, &proxy.all, &config)?;
-            let recommended = scores.first().map(|score| score.name.clone());
+            let scores =
+                if let Some(snapshot) = load_last_probe_snapshot(&state, &proxy.name, &config)? {
+                    snapshot.nodes
+                } else {
+                    compute_scores_for_group(&state, &proxy.name, &proxy.all, &config)?
+                };
+            let recommended = recommended_node(&scores);
             Ok(GroupView {
                 name: proxy.name,
                 kind: proxy.kind,
@@ -744,10 +837,7 @@ async fn active_probes(
     }))
 }
 
-async fn helper_events(
-    State(state): State<AppState>,
-    ws: WebSocketUpgrade,
-) -> Response {
+async fn helper_events(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(|socket| async move {
         stream_helper_events(state, socket).await;
     })
@@ -805,8 +895,13 @@ async fn save_group_config(
     AxumPath(group): AxumPath<String>,
     Json(config): Json<GroupConfig>,
 ) -> Result<Json<GroupConfig>, AppError> {
-    save_group_config_row(&state, &group, &config)?;
-    Ok(Json(config))
+    let mut normalized = config;
+    normalized.probe_interval_sec = normalize_probe_interval_with_min(
+        normalized.probe_interval_sec,
+        load_min_probe_interval_sec(&state)?,
+    );
+    save_group_config_row(&state, &group, &normalized)?;
+    Ok(Json(normalized))
 }
 
 async fn probe_group(
@@ -831,13 +926,16 @@ async fn group_scores(
         .get(&group)
         .ok_or_else(|| AppError::bad_request(format!("group not found: {group}")))?;
     let config = load_group_config(&state, &group)?;
+    if let Some(snapshot) = load_last_probe_snapshot(&state, &group, &config)? {
+        return Ok(Json(snapshot));
+    }
     let scores = compute_scores_for_group(&state, &group, &group_proxy.all, &config)?;
     Ok(Json(ScoresResponse {
         group,
         mode: config.mode,
         scheme: config.scheme,
         test_url: config.test_url,
-        recommended: scores.first().map(|score| score.name.clone()),
+        recommended: recommended_node(&scores),
         apply_error: None,
         nodes: scores,
     }))
@@ -855,10 +953,14 @@ async fn apply_group(
         .get(&group)
         .ok_or_else(|| AppError::bad_request(format!("group not found: {group}")))?;
     let config = load_group_config(&state, &group)?;
-    let scores = compute_scores_for_group(&state, &group, &group_proxy.all, &config)?;
+    let scores = if let Some(snapshot) = load_last_probe_snapshot(&state, &group, &config)? {
+        snapshot.nodes
+    } else {
+        compute_scores_for_group(&state, &group, &group_proxy.all, &config)?
+    };
     let target = request
         .node
-        .or_else(|| scores.first().map(|score| score.name.clone()))
+        .or_else(|| recommended_node(&scores))
         .ok_or_else(|| AppError::bad_request("no recommended node available"))?;
 
     let apply_error = apply_recommended_node(&state, &controller, group_proxy, &target).await;
@@ -873,7 +975,7 @@ async fn apply_group(
         },
         all: group_proxy.all.clone(),
         config,
-        recommended: scores.first().map(|score| score.name.clone()),
+        recommended: recommended_node(&scores),
         apply_error,
     }))
 }
@@ -1001,7 +1103,7 @@ async fn probe_node(
     probe_target: &str,
     test_url: &str,
     timeout_ms: i64,
-) -> Result<bool> {
+) -> Result<()> {
     let path = format!(
         "/proxies/{}/delay?timeout={}&url={}",
         url_encode(probe_target),
@@ -1024,9 +1126,10 @@ async fn probe_node(
                 None,
                 tested_at_ms,
             )?;
-            Ok(true)
+            Ok(())
         }
         Err(error) => {
+            let error = error.to_string();
             save_probe_sample(
                 state,
                 group,
@@ -1034,10 +1137,10 @@ async fn probe_node(
                 test_url,
                 None,
                 false,
-                Some(error.to_string()),
+                Some(error.clone()),
                 tested_at_ms,
             )?;
-            Ok(false)
+            Ok(())
         }
     }
 }
@@ -1059,7 +1162,7 @@ async fn probe_group_internal(
     if uses_native_urltest_delay(group_proxy, &config) {
         let scores = compute_scores_for_group(state, group, &group_proxy.all, &config)?;
         let recommended = if group_proxy.now.is_empty() {
-            scores.first().map(|score| score.name.clone())
+            recommended_node(&scores)
         } else {
             Some(group_proxy.now.clone())
         };
@@ -1084,8 +1187,8 @@ async fn probe_group_internal(
 
     probe_group_nodes(state, &controller, group, group_proxy, &config, concurrency).await?;
 
-    let scores = compute_scores_for_group(state, group, &group_proxy.all, &config)?;
-    let recommended = scores.first().map(|score| score.name.clone());
+    let scores = compute_scores_after_probe_run(state, group, &group_proxy.all, &config)?;
+    let recommended = recommended_node(&scores);
     let apply_error = if should_apply_probe_result(apply_urltest, &config) {
         if let Some(target) = recommended.as_deref() {
             apply_recommended_node(state, &controller, group_proxy, target).await
@@ -1105,6 +1208,7 @@ async fn probe_group_internal(
         apply_error,
         nodes: scores,
     };
+    save_last_probe_snapshot(state, &response)?;
     publish_helper_event(
         state,
         HelperEvent::ProbeScores {
@@ -1121,7 +1225,7 @@ async fn probe_group_nodes(
     group_proxy: &ProxyView,
     config: &GroupConfig,
     concurrency: usize,
-) -> Result<usize> {
+) -> Result<()> {
     let concurrency = concurrency.clamp(1, 12);
     let _active_probe = begin_active_probe(state, group);
     let timeout_ms = load_delay_test_timeout_ms(state)?;
@@ -1129,7 +1233,6 @@ async fn probe_group_nodes(
         .await
         .map(|proxies| proxy_map(&proxies))
         .unwrap_or_default();
-    let mut failures = 0usize;
     let mut handles = Vec::new();
     for chunk in group_proxy.all.chunks(concurrency) {
         handles.clear();
@@ -1155,15 +1258,12 @@ async fn probe_group_nodes(
         }
 
         for handle in handles.drain(..) {
-            let ok = handle
+            handle
                 .await
                 .map_err(|error| anyhow!("probe task failed: {error}"))??;
-            if !ok {
-                failures += 1;
-            }
         }
     }
-    Ok(failures)
+    Ok(())
 }
 
 async fn apply_recommended_node(
@@ -1312,7 +1412,8 @@ async fn publish_realtime_snapshot_events(state: &AppState) -> Result<()> {
     let configs = controller_get::<serde_json::Value>(state, &controller, "/configs")
         .await
         .unwrap_or_else(|_| serde_json::json!({}));
-    let connections = controller_get::<serde_json::Value>(state, &controller, "/connections").await?;
+    let connections =
+        controller_get::<serde_json::Value>(state, &controller, "/connections").await?;
     let traffic = controller_traffic_json(state, &controller)
         .await
         .unwrap_or_else(|_| serde_json::json!({}));
@@ -1333,7 +1434,10 @@ fn build_connections_snapshot_event(
     snapshot: serde_json::Value,
     sampled_at: String,
 ) -> HelperEvent {
-    HelperEvent::ConnectionsSnapshot { snapshot, sampled_at }
+    HelperEvent::ConnectionsSnapshot {
+        snapshot,
+        sampled_at,
+    }
 }
 
 fn build_traffic_snapshot_event(
@@ -1343,7 +1447,10 @@ fn build_traffic_snapshot_event(
     sampled_at: String,
 ) -> HelperEvent {
     HelperEvent::TrafficSnapshot {
-        up: traffic.get("up").and_then(|value| value.as_i64()).unwrap_or(0),
+        up: traffic
+            .get("up")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0),
         down: traffic
             .get("down")
             .and_then(|value| value.as_i64())
@@ -1404,9 +1511,9 @@ async fn run_scheduled_probes(state: &AppState, force: bool) -> Result<()> {
 
         probe_group_nodes(state, &controller, &group.name, &group, &config, 4).await?;
 
-        let scores = compute_scores_for_group(state, &group.name, &group.all, &config)?;
+        let scores = compute_scores_after_probe_run(state, &group.name, &group.all, &config)?;
         if config.auto_switch {
-            if let Some(target) = scores.first().map(|score| score.name.clone()) {
+            if let Some(target) = recommended_node(&scores) {
                 if let Some(error) =
                     apply_recommended_node(state, &controller, &group, &target).await
                 {
@@ -1414,20 +1521,17 @@ async fn run_scheduled_probes(state: &AppState, force: bool) -> Result<()> {
                 }
             }
         }
-        publish_helper_event(
-            state,
-            HelperEvent::ProbeScores {
-                scores: ScoresResponse {
-                    group: group.name.clone(),
-                    mode: config.mode,
-                    scheme: config.scheme,
-                    test_url: config.test_url.clone(),
-                    recommended: scores.first().map(|score| score.name.clone()),
-                    apply_error: None,
-                    nodes: scores,
-                },
-            },
-        );
+        let response = ScoresResponse {
+            group: group.name.clone(),
+            mode: config.mode,
+            scheme: config.scheme,
+            test_url: config.test_url.clone(),
+            recommended: recommended_node(&scores),
+            apply_error: None,
+            nodes: scores,
+        };
+        save_last_probe_snapshot(state, &response)?;
+        publish_helper_event(state, HelperEvent::ProbeScores { scores: response });
         save_string_kv(state, &last_key, &now.to_string())?;
     }
 
@@ -1772,6 +1876,13 @@ fn load_delay_test_timeout_ms(state: &AppState) -> Result<i64> {
         .unwrap_or(DEFAULT_DELAY_TEST_TIMEOUT_MS))
 }
 
+fn load_min_probe_interval_sec(state: &AppState) -> Result<i64> {
+    Ok(load_string_kv(state, "min_probe_interval_sec")?
+        .and_then(|value| value.parse::<i64>().ok())
+        .map(normalize_min_probe_interval)
+        .unwrap_or(DEFAULT_MIN_PROBE_INTERVAL_SEC))
+}
+
 fn default_traffic_settings() -> TrafficSettings {
     TrafficSettings {
         enabled: false,
@@ -1805,6 +1916,7 @@ fn save_traffic_settings_row(state: &AppState, settings: &TrafficSettings) -> Re
 
 fn load_group_config(state: &AppState, group: &str) -> Result<GroupConfig> {
     let default_test_url = load_default_test_url(state)?;
+    let min_probe_interval_sec = load_min_probe_interval_sec(state)?;
     let db = state
         .db
         .lock()
@@ -1816,7 +1928,8 @@ fn load_group_config(state: &AppState, group: &str) -> Result<GroupConfig> {
             |row| {
                 let raw_test_url: String = row.get(0)?;
                 let test_url_overridden = row.get::<_, i64>(1)? != 0;
-                let probe_interval_sec = normalize_probe_interval(row.get::<_, i64>(6)?);
+                let probe_interval_sec =
+                    normalize_probe_interval_with_min(row.get::<_, i64>(6)?, min_probe_interval_sec);
                 Ok(GroupConfig {
                     test_url: if test_url_overridden {
                         raw_test_url
@@ -1837,6 +1950,7 @@ fn load_group_config(state: &AppState, group: &str) -> Result<GroupConfig> {
 }
 
 fn save_group_config_row(state: &AppState, group: &str, config: &GroupConfig) -> Result<()> {
+    let min_probe_interval_sec = load_min_probe_interval_sec(state)?;
     let db = state
         .db
         .lock()
@@ -1862,7 +1976,7 @@ fn save_group_config_row(state: &AppState, group: &str, config: &GroupConfig) ->
             scheme_name(config.scheme),
             if config.auto_switch { 1 } else { 0 },
             if config.auto_probe { 1 } else { 0 },
-            normalize_probe_interval(config.probe_interval_sec)
+            normalize_probe_interval_with_min(config.probe_interval_sec, min_probe_interval_sec)
         ],
     )?;
     Ok(())
@@ -1923,6 +2037,56 @@ fn compute_scores_for_group(
     Ok(scores)
 }
 
+fn compute_scores_after_probe_run(
+    state: &AppState,
+    group: &str,
+    nodes: &[String],
+    config: &GroupConfig,
+) -> Result<Vec<NodeScore>> {
+    compute_scores_for_group(state, group, nodes, config)
+}
+
+fn recommended_node(scores: &[NodeScore]) -> Option<String> {
+    scores
+        .iter()
+        .find(|score| score.raw.success)
+        .map(|score| score.name.clone())
+}
+
+fn save_last_probe_snapshot(state: &AppState, response: &ScoresResponse) -> Result<()> {
+    save_json_kv(state, &last_probe_snapshot_key(&response.group), response)
+}
+
+fn load_last_probe_snapshot(
+    state: &AppState,
+    group: &str,
+    config: &GroupConfig,
+) -> Result<Option<ScoresResponse>> {
+    Ok(
+        load_json_kv::<ScoresResponse>(state, &last_probe_snapshot_key(group))?.filter(
+            |snapshot| {
+                snapshot.group == group
+                    && snapshot.mode == config.mode
+                    && snapshot.scheme == config.scheme
+                    && snapshot.test_url == config.test_url
+                    && score_snapshot_matches_current_algorithm(snapshot)
+            },
+        ),
+    )
+}
+
+fn score_snapshot_matches_current_algorithm(snapshot: &ScoresResponse) -> bool {
+    snapshot.nodes.iter().all(|node| {
+        node.raw.sample_window_sec.is_some()
+            && node.raw.confidence.is_some()
+            && node.raw.gate_reason.is_some()
+    })
+}
+
+fn last_probe_snapshot_key(group: &str) -> String {
+    format!("last_probe_snapshot:{group}")
+}
+
 fn sort_node_scores(scores: &mut [NodeScore], config: &GroupConfig) {
     match config.mode {
         ScoreMode::Delay => scores.sort_by(compare_delay_then_name),
@@ -1962,29 +2126,62 @@ fn load_recent_samples(
     let mut stmt = db.prepare(
         r#"
         SELECT delay_ms, success, error, tested_at_ms
-        FROM probe_samples
-        WHERE group_name = ?1 AND node_name = ?2 AND test_url = ?3 AND tested_at_ms >= ?4
+        FROM (
+          SELECT delay_ms, success, error, tested_at_ms
+          FROM probe_samples
+          WHERE group_name = ?1 AND node_name = ?2 AND test_url = ?3 AND tested_at_ms >= ?4
+          ORDER BY tested_at_ms DESC
+          LIMIT ?5
+        )
         ORDER BY tested_at_ms ASC
         "#,
     )?;
-    let rows = stmt.query_map(params![group, node, test_url, window_start], |row| {
-        Ok(Sample {
-            delay_ms: row.get(0)?,
-            success: row.get::<_, i64>(1)? != 0,
-            error: row.get(2)?,
-            tested_at_ms: row.get(3)?,
-        })
-    })?;
+    let rows = stmt.query_map(
+        params![group, node, test_url, window_start, MAX_SCORE_SAMPLE_COUNT],
+        |row| {
+            Ok(Sample {
+                delay_ms: row.get(0)?,
+                success: row.get::<_, i64>(1)? != 0,
+                error: row.get(2)?,
+                tested_at_ms: row.get(3)?,
+            })
+        },
+    )?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 fn score_sample_window_ms(config: &GroupConfig) -> i64 {
-    normalize_probe_interval(config.probe_interval_sec) * 1000
+    (normalize_probe_interval(config.probe_interval_sec)
+        * SCORE_SAMPLE_WINDOW_INTERVAL_MULTIPLIER
+        * 1000)
+        .max(MIN_SCORE_SAMPLE_WINDOW_MS)
+}
+
+fn score_sample_window_sec(config: &GroupConfig) -> i64 {
+    score_sample_window_ms(config) / 1000
 }
 
 fn score_node(name: &str, samples: &[Sample], config: &GroupConfig) -> NodeScore {
-    let now = now_ms();
+    score_node_at(name, samples, config, now_ms())
+}
+
+fn score_node_at(name: &str, samples: &[Sample], config: &GroupConfig, now: i64) -> NodeScore {
+    let raw = score_raw_from_samples(samples, config, now);
     let latest = samples.last();
+    if latest.is_none() {
+        return zero_node_score(name, None, None, raw);
+    }
+    if let Some(sample) = latest.filter(|sample| !sample.success) {
+        return zero_node_score(name, sample.error.clone(), Some(sample.tested_at_ms), raw);
+    }
+    if raw.gate_reason.as_deref() == Some("expired") {
+        return zero_node_score(
+            name,
+            latest.and_then(|sample| sample.error.clone()),
+            latest.map(|sample| sample.tested_at_ms),
+            raw,
+        );
+    }
     let delay_ms = latest.and_then(|sample| {
         if sample.success {
             sample.delay_ms
@@ -1993,15 +2190,18 @@ fn score_node(name: &str, samples: &[Sample], config: &GroupConfig) -> NodeScore
         }
     });
     let components = ScoreComponents {
-        latency: latency_score(delay_ms),
+        latency: real_latency_score(samples),
         availability: availability_score(samples),
         jitter: jitter_score(samples),
-        freshness: freshness_score(latest.map(|sample| sample.tested_at_ms), now),
+        freshness: freshness_gate_score(raw.freshness_state.as_deref()),
     };
-    let score = match config.mode {
+    let mut score = match config.mode {
         ScoreMode::Delay => components.latency,
         ScoreMode::Score => weighted_score(components, config.scheme),
     };
+    if raw.freshness_state.as_deref() == Some("stale") {
+        score = score.min(80.0);
+    }
     NodeScore {
         name: name.to_string(),
         score: round_score(score),
@@ -2009,35 +2209,38 @@ fn score_node(name: &str, samples: &[Sample], config: &GroupConfig) -> NodeScore
         components: round_components(components),
         last_tested_at: latest.map(|sample| format_time(sample.tested_at_ms)),
         error: latest.and_then(|sample| sample.error.clone()),
+        raw,
     }
 }
 
-fn latency_score(delay_ms: Option<i64>) -> f64 {
-    let Some(delay) = delay_ms else {
-        return 0.0;
-    };
-    if delay <= 80 {
-        100.0
-    } else if delay <= 300 {
-        linear(delay as f64, 80.0, 300.0, 100.0, 70.0)
-    } else if delay <= 800 {
-        linear(delay as f64, 300.0, 800.0, 70.0, 30.0)
-    } else if delay <= 2000 {
-        linear(delay as f64, 800.0, 2000.0, 30.0, 5.0)
-    } else {
-        0.0
+fn zero_node_score(
+    name: &str,
+    error: Option<String>,
+    tested_at_ms: Option<i64>,
+    mut raw: NodeScoreRaw,
+) -> NodeScore {
+    if raw.error.is_none() {
+        raw.error = error.clone();
+    }
+    if raw.tested_at.is_none() {
+        raw.tested_at = tested_at_ms.map(format_time);
+    }
+    NodeScore {
+        name: name.to_string(),
+        score: 0.0,
+        delay_ms: None,
+        components: ScoreComponents::default(),
+        last_tested_at: tested_at_ms.map(format_time),
+        error: error.clone(),
+        raw,
     }
 }
 
-fn availability_score(samples: &[Sample]) -> f64 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let success = samples.iter().filter(|sample| sample.success).count() as f64;
-    success / samples.len() as f64 * 100.0
-}
-
-fn jitter_score(samples: &[Sample]) -> f64 {
+fn score_raw_from_samples(samples: &[Sample], config: &GroupConfig, now: i64) -> NodeScoreRaw {
+    let latest = samples.last();
+    let success_count = samples.iter().filter(|sample| sample.success).count();
+    let failure_count = samples.len().saturating_sub(success_count);
+    let confidence = sample_confidence(samples.len());
     let mut delays = samples
         .iter()
         .filter_map(|sample| {
@@ -2048,47 +2251,184 @@ fn jitter_score(samples: &[Sample]) -> f64 {
             }
         })
         .collect::<Vec<_>>();
-    if delays.len() < 2 {
-        return if delays.is_empty() { 0.0 } else { 100.0 };
+    delays.sort_unstable();
+    let latency_p50_ms = (!delays.is_empty()).then(|| percentile(&delays, 0.50));
+    let latency_p90_ms = (!delays.is_empty()).then(|| percentile(&delays, 0.90));
+    let jitter_ms = latency_p50_ms
+        .zip(latency_p90_ms)
+        .map(|(p50, p95)| (p95 - p50).max(0));
+    let latest_tested_at = latest.map(|sample| sample.tested_at_ms);
+    let weights = score_weights(config.scheme);
+    let freshness_age_ms = latest_tested_at.map(|tested_at| (now - tested_at).max(0));
+    let freshness_state = freshness_age_ms.map(|age| freshness_state(age, config).to_string());
+    let gate_reason = score_gate_reason(latest, freshness_state.as_deref());
+    NodeScoreRaw {
+        success: latest.map(|sample| sample.success).unwrap_or(false),
+        delay_ms: latest.and_then(|sample| {
+            if sample.success {
+                sample.delay_ms
+            } else {
+                None
+            }
+        }),
+        error: latest.and_then(|sample| sample.error.clone()),
+        tested_at: latest_tested_at.map(format_time),
+        sample_window_sec: Some(score_sample_window_sec(config)),
+        sample_count: samples.len(),
+        success_count,
+        failure_count,
+        confidence: Some(confidence),
+        latency_delay_ms: latest.and_then(|sample| {
+            if sample.success {
+                sample.delay_ms
+            } else {
+                None
+            }
+        }),
+        latency_p50_ms,
+        latency_p90_ms,
+        jitter_p50_ms: latency_p50_ms,
+        jitter_p95_ms: latency_p90_ms,
+        jitter_ms,
+        freshness_age_ms,
+        freshness_state,
+        gate_reason: Some(gate_reason.to_string()),
+        mode: Some(mode_name(config.mode).to_string()),
+        scheme: Some(scheme_name(config.scheme).to_string()),
+        weights: Some(weights),
+    }
+}
+
+fn real_latency_score(samples: &[Sample]) -> f64 {
+    let mut delays = successful_delays(samples);
+    if delays.is_empty() {
+        return 0.0;
     }
     delays.sort_unstable();
     let p50 = percentile(&delays, 0.50);
-    let p95 = percentile(&delays, 0.95);
-    let jitter = (p95 - p50).max(0) as f64;
-    if jitter <= 50.0 {
+    let p90 = percentile(&delays, 0.90);
+    latency_curve_score(Some(p50)) * 0.70 + latency_curve_score(Some(p90)) * 0.30
+}
+
+fn latency_curve_score(delay_ms: Option<i64>) -> f64 {
+    let Some(delay) = delay_ms else {
+        return 0.0;
+    };
+    if delay <= 120 {
         100.0
-    } else if jitter <= 400.0 {
-        linear(jitter, 50.0, 400.0, 100.0, 0.0)
+    } else if delay <= 400 {
+        linear(delay as f64, 120.0, 400.0, 100.0, 75.0)
+    } else if delay <= 1000 {
+        linear(delay as f64, 400.0, 1000.0, 75.0, 35.0)
+    } else if delay <= 2500 {
+        linear(delay as f64, 1000.0, 2500.0, 35.0, 5.0)
     } else {
         0.0
     }
 }
 
-fn freshness_score(last_tested_at: Option<i64>, now: i64) -> f64 {
-    let Some(last) = last_tested_at else {
+fn availability_score(samples: &[Sample]) -> f64 {
+    if samples.is_empty() {
         return 0.0;
-    };
-    let age = (now - last).max(0) as f64;
-    let two_min = 2.0 * 60.0 * 1000.0;
-    let fifteen_min = 15.0 * 60.0 * 1000.0;
-    if age <= two_min {
+    }
+    let success = samples.iter().filter(|sample| sample.success).count() as f64;
+    success / samples.len() as f64 * sample_confidence(samples.len()) * 100.0
+}
+
+fn jitter_score(samples: &[Sample]) -> f64 {
+    let mut delays = successful_delays(samples);
+    if delays.len() < 2 {
+        return if delays.is_empty() { 0.0 } else { 50.0 };
+    }
+    delays.sort_unstable();
+    let p50 = percentile(&delays, 0.50);
+    let p90 = percentile(&delays, 0.90);
+    let jitter = (p90 - p50).max(0) as f64;
+    if jitter <= 80.0 {
         100.0
-    } else if age <= fifteen_min {
-        linear(age, two_min, fifteen_min, 100.0, 0.0)
+    } else if jitter <= 500.0 {
+        linear(jitter, 80.0, 500.0, 100.0, 0.0)
     } else {
         0.0
     }
+}
+
+fn successful_delays(samples: &[Sample]) -> Vec<i64> {
+    samples
+        .iter()
+        .filter_map(|sample| {
+            if sample.success {
+                sample.delay_ms
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn sample_confidence(sample_count: usize) -> f64 {
+    (sample_count as f64 / CONNECTIVITY_CONFIDENCE_SAMPLE_TARGET).min(1.0)
+}
+
+fn freshness_state(age_ms: i64, config: &GroupConfig) -> &'static str {
+    let fresh_ms = freshness_fresh_threshold_ms(config);
+    if age_ms <= fresh_ms {
+        "fresh"
+    } else if age_ms <= fresh_ms * 3 {
+        "stale"
+    } else {
+        "expired"
+    }
+}
+
+fn freshness_fresh_threshold_ms(config: &GroupConfig) -> i64 {
+    (normalize_probe_interval(config.probe_interval_sec) * 1000).max(120 * 1000)
+}
+
+fn freshness_gate_score(state: Option<&str>) -> f64 {
+    match state {
+        Some("fresh") => 100.0,
+        Some("stale") => 80.0,
+        _ => 0.0,
+    }
+}
+
+fn score_gate_reason(latest: Option<&Sample>, freshness_state: Option<&str>) -> &'static str {
+    let Some(latest) = latest else {
+        return "no_sample";
+    };
+    if !latest.success {
+        return "latest_failed";
+    }
+    if freshness_state == Some("expired") {
+        return "expired";
+    }
+    "none"
 }
 
 fn weighted_score(components: ScoreComponents, scheme: ScoreScheme) -> f64 {
-    let weights = match scheme {
-        ScoreScheme::LatencyFirst => (0.70, 0.15, 0.10, 0.05),
-        ScoreScheme::Balanced => (0.45, 0.30, 0.15, 0.10),
-    };
-    components.latency * weights.0
-        + components.availability * weights.1
-        + components.jitter * weights.2
-        + components.freshness * weights.3
+    let weights = score_weights(scheme);
+    components.latency * weights.latency
+        + components.availability * weights.availability
+        + components.jitter * weights.jitter
+        + components.freshness * weights.freshness
+}
+
+fn score_weights(scheme: ScoreScheme) -> ScoreWeights {
+    match scheme {
+        ScoreScheme::LatencyFirst => ScoreWeights {
+            latency: 0.45,
+            availability: 0.45,
+            jitter: 0.10,
+            freshness: 0.0,
+        },
+        ScoreScheme::Balanced => ScoreWeights {
+            latency: 0.30,
+            availability: 0.60,
+            jitter: 0.10,
+            freshness: 0.0,
+        },
+    }
 }
 
 fn linear(value: f64, from_value: f64, to_value: f64, from_score: f64, to_score: f64) -> f64 {
@@ -2146,12 +2486,27 @@ fn normalize_probe_interval(value: i64) -> i64 {
     value.clamp(MIN_PROBE_INTERVAL_SEC, MAX_PROBE_INTERVAL_SEC)
 }
 
+fn normalize_probe_interval_with_min(value: i64, minimum: i64) -> i64 {
+    value.clamp(
+        normalize_min_probe_interval(minimum),
+        MAX_PROBE_INTERVAL_SEC,
+    )
+}
+
+fn normalize_min_probe_interval(value: i64) -> i64 {
+    value.clamp(MIN_PROBE_INTERVAL_SEC, MAX_PROBE_INTERVAL_SEC)
+}
+
 fn normalize_delay_test_timeout(value: i64) -> i64 {
     value.clamp(MIN_DELAY_TEST_TIMEOUT_MS, MAX_DELAY_TEST_TIMEOUT_MS)
 }
 
 fn default_delay_test_timeout_ms() -> i64 {
     DEFAULT_DELAY_TEST_TIMEOUT_MS
+}
+
+fn default_min_probe_interval_sec() -> i64 {
+    DEFAULT_MIN_PROBE_INTERVAL_SEC
 }
 
 fn public_config_url() -> Option<String> {
@@ -2307,7 +2662,11 @@ fn active_probe_groups(state: &AppState) -> Vec<ActiveProbeView> {
     let mut groups = active_probes
         .iter()
         .map(|(group, active_probe)| {
-            let mut active_nodes = active_probe.active_nodes.keys().cloned().collect::<Vec<_>>();
+            let mut active_nodes = active_probe
+                .active_nodes
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
             active_nodes.sort();
             ActiveProbeView {
                 group: group.clone(),
@@ -2342,10 +2701,7 @@ fn publish_probe_status(state: &AppState) {
     );
 }
 
-fn remove_idle_active_probe(
-    active_probes: &mut HashMap<String, ActiveProbeState>,
-    group: &str,
-) {
+fn remove_idle_active_probe(active_probes: &mut HashMap<String, ActiveProbeState>, group: &str) {
     let should_remove = active_probes
         .get(group)
         .map(|active_probe| active_probe.count == 0 && active_probe.active_nodes.is_empty())
@@ -2399,11 +2755,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn latency_score_favors_low_latency() {
-        assert_eq!(latency_score(Some(40)), 100.0);
-        assert!(latency_score(Some(200)) > latency_score(Some(700)));
-        assert_eq!(latency_score(Some(2500)), 0.0);
-        assert_eq!(latency_score(None), 0.0);
+    fn latency_curve_favors_low_latency() {
+        assert_eq!(latency_curve_score(Some(40)), 100.0);
+        assert!(latency_curve_score(Some(200)) > latency_curve_score(Some(700)));
+        assert_eq!(latency_curve_score(Some(2500)), 5.0);
+        assert_eq!(latency_curve_score(Some(2501)), 0.0);
+        assert_eq!(latency_curve_score(None), 0.0);
     }
 
     #[test]
@@ -2418,6 +2775,127 @@ mod tests {
             weighted_score(components, ScoreScheme::Balanced)
                 > weighted_score(components, ScoreScheme::LatencyFirst)
         );
+    }
+
+    #[test]
+    fn connectivity_score_uses_sample_confidence() {
+        let now = now_ms();
+        let success = |tested_at_ms| Sample {
+            delay_ms: Some(120),
+            success: true,
+            error: None,
+            tested_at_ms,
+        };
+        let failure = |tested_at_ms| Sample {
+            delay_ms: None,
+            success: false,
+            error: Some("timeout".to_string()),
+            tested_at_ms,
+        };
+
+        assert_eq!(round_score(availability_score(&[success(now)])), 20.0);
+        assert_eq!(
+            round_score(availability_score(&[
+                success(now),
+                success(now + 1),
+                success(now + 2)
+            ])),
+            60.0
+        );
+        assert_eq!(
+            round_score(availability_score(&[
+                success(now),
+                success(now + 1),
+                success(now + 2),
+                success(now + 3),
+                success(now + 4),
+            ])),
+            100.0
+        );
+        assert_eq!(
+            round_score(availability_score(&[
+                success(now),
+                success(now + 1),
+                success(now + 2),
+                success(now + 3),
+                failure(now + 4),
+            ])),
+            80.0
+        );
+    }
+
+    #[test]
+    fn real_latency_uses_p50_and_p90_successful_samples() {
+        let now = now_ms();
+        let samples = vec![
+            Sample {
+                delay_ms: Some(100),
+                success: true,
+                error: None,
+                tested_at_ms: now,
+            },
+            Sample {
+                delay_ms: Some(200),
+                success: true,
+                error: None,
+                tested_at_ms: now + 1,
+            },
+            Sample {
+                delay_ms: Some(800),
+                success: true,
+                error: None,
+                tested_at_ms: now + 2,
+            },
+        ];
+
+        let score = score_node("hk", &samples, &GroupConfig::default());
+
+        assert_eq!(score.raw.latency_p50_ms, Some(200));
+        assert_eq!(score.raw.latency_p90_ms, Some(800));
+        assert_eq!(score.raw.jitter_ms, Some(600));
+        assert!(score.components.latency < 90.0);
+        assert!(score.components.jitter < 10.0);
+    }
+
+    #[test]
+    fn stale_and_expired_samples_gate_final_score() {
+        let now = now_ms();
+        let config = GroupConfig {
+            probe_interval_sec: 15 * 60,
+            ..GroupConfig::default()
+        };
+        let stale_score = score_node_at(
+            "stale",
+            &[Sample {
+                delay_ms: Some(120),
+                success: true,
+                error: None,
+                tested_at_ms: now - 20 * 60 * 1000,
+            }],
+            &config,
+            now,
+        );
+        let expired_score = score_node_at(
+            "expired",
+            &[Sample {
+                delay_ms: Some(120),
+                success: true,
+                error: None,
+                tested_at_ms: now - 60 * 60 * 1000,
+            }],
+            &config,
+            now,
+        );
+
+        assert_eq!(stale_score.raw.freshness_state.as_deref(), Some("stale"));
+        assert_eq!(stale_score.raw.gate_reason.as_deref(), Some("none"));
+        assert!(stale_score.score <= 80.0);
+        assert_eq!(
+            expired_score.raw.freshness_state.as_deref(),
+            Some("expired")
+        );
+        assert_eq!(expired_score.raw.gate_reason.as_deref(), Some("expired"));
+        assert_eq!(expired_score.score, 0.0);
     }
 
     #[test]
@@ -2439,8 +2917,56 @@ mod tests {
         ];
         let score = score_node("hk", &samples, &GroupConfig::default());
         assert_eq!(score.name, "hk");
-        assert!(score.score > 80.0);
+        assert!(score.score > 60.0);
         assert_eq!(score.delay_ms, Some(120));
+    }
+
+    #[test]
+    fn score_node_raw_explains_component_inputs() {
+        let now = now_ms();
+        let samples = vec![
+            Sample {
+                delay_ms: Some(90),
+                success: true,
+                error: None,
+                tested_at_ms: now - 2_000,
+            },
+            Sample {
+                delay_ms: None,
+                success: false,
+                error: Some("timeout".to_string()),
+                tested_at_ms: now - 1_000,
+            },
+            Sample {
+                delay_ms: Some(140),
+                success: true,
+                error: None,
+                tested_at_ms: now,
+            },
+        ];
+
+        let score = score_node("hk", &samples, &GroupConfig::default());
+
+        assert_eq!(score.raw.sample_count, 3);
+        assert_eq!(score.raw.success_count, 2);
+        assert_eq!(score.raw.failure_count, 1);
+        assert_eq!(score.raw.latency_delay_ms, Some(140));
+        assert_eq!(score.raw.jitter_p50_ms, Some(140));
+        assert_eq!(score.raw.jitter_p95_ms, Some(140));
+        assert_eq!(score.raw.jitter_ms, Some(0));
+        assert_eq!(score.raw.sample_window_sec, Some(90 * 60));
+        assert_eq!(score.raw.confidence, Some(0.6));
+        assert_eq!(score.raw.latency_p50_ms, Some(140));
+        assert_eq!(score.raw.latency_p90_ms, Some(140));
+        assert_eq!(score.raw.freshness_state.as_deref(), Some("fresh"));
+        assert_eq!(score.raw.gate_reason.as_deref(), Some("none"));
+        assert_eq!(score.raw.mode.as_deref(), Some("score"));
+        assert_eq!(score.raw.scheme.as_deref(), Some("Balanced"));
+        assert_eq!(
+            score.raw.weights.as_ref().map(|weights| weights.latency),
+            Some(0.30)
+        );
+        assert!(score.raw.freshness_age_ms.unwrap_or(i64::MAX) < 1_000);
     }
 
     #[test]
@@ -2476,10 +3002,51 @@ mod tests {
 
         assert_eq!(scores[0].delay_ms, Some(120));
         assert!(scores[0].score > 0.0);
+        assert_eq!(scores[0].raw.sample_window_sec, Some(90 * 60));
+    }
+
+    #[test]
+    fn score_sample_window_keeps_latest_ten_samples() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            events: helper_event_channel(),
+        };
+        let config = GroupConfig {
+            test_url: "https://latency.example.test".to_string(),
+            probe_interval_sec: 15 * 60,
+            ..GroupConfig::default()
+        };
+        let now = now_ms();
+        for index in 0..12 {
+            save_probe_sample(
+                &state,
+                "select",
+                "hk",
+                &config.test_url,
+                Some(100 + index),
+                true,
+                None,
+                now - (12 - index) * 60 * 1000,
+            )
+            .unwrap();
+        }
+
+        let scores =
+            compute_scores_for_group(&state, "select", &["hk".to_string()], &config).unwrap();
+
+        assert_eq!(scores[0].raw.sample_count, 10);
+        assert_eq!(scores[0].raw.success_count, 10);
+        assert_eq!(scores[0].raw.latency_p50_ms, Some(107));
     }
 
     #[test]
     fn delay_mode_recommends_lowest_recent_delay() {
+        let now = now_ms();
         let config = GroupConfig {
             mode: ScoreMode::Delay,
             ..GroupConfig::default()
@@ -2491,7 +3058,7 @@ mod tests {
                     delay_ms: Some(60),
                     success: true,
                     error: None,
-                    tested_at_ms: 1,
+                    tested_at_ms: now,
                 }],
                 &config,
             ),
@@ -2501,7 +3068,7 @@ mod tests {
                     delay_ms: Some(40),
                     success: true,
                     error: None,
-                    tested_at_ms: 1,
+                    tested_at_ms: now,
                 }],
                 &config,
             ),
@@ -2577,6 +3144,160 @@ mod tests {
     }
 
     #[test]
+    fn current_probe_snapshot_scores_failed_nodes_zero_and_persists_raw_values() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            events: helper_event_channel(),
+        };
+        let config = GroupConfig::default();
+        let tested_at_ms = now_ms();
+        let scores = vec![
+            score_node(
+                "hk",
+                &[Sample {
+                    delay_ms: Some(82),
+                    success: true,
+                    error: None,
+                    tested_at_ms,
+                }],
+                &config,
+            ),
+            score_node(
+                "jp",
+                &[Sample {
+                    delay_ms: None,
+                    success: false,
+                    error: Some("timeout".to_string()),
+                    tested_at_ms,
+                }],
+                &config,
+            ),
+        ];
+        let failed = scores.iter().find(|score| score.name == "jp").unwrap();
+
+        assert_eq!(failed.score, 0.0);
+        assert_eq!(failed.components, ScoreComponents::default());
+        assert_eq!(failed.raw.delay_ms, None);
+        assert!(!failed.raw.success);
+        assert_eq!(failed.raw.error.as_deref(), Some("timeout"));
+
+        let response = ScoresResponse {
+            group: "select".to_string(),
+            mode: config.mode,
+            scheme: config.scheme,
+            test_url: config.test_url.clone(),
+            recommended: scores.first().map(|score| score.name.clone()),
+            apply_error: None,
+            nodes: scores,
+        };
+        save_last_probe_snapshot(&state, &response).unwrap();
+
+        let restored = load_last_probe_snapshot(&state, "select", &config)
+            .unwrap()
+            .unwrap();
+        let restored_failed = restored
+            .nodes
+            .iter()
+            .find(|score| score.name == "jp")
+            .unwrap();
+        assert_eq!(restored_failed.score, 0.0);
+        assert_eq!(restored_failed.raw.error.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn probe_run_scores_are_recomputed_from_historical_samples() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            events: helper_event_channel(),
+        };
+        let config = GroupConfig::default();
+        let now = now_ms();
+        for index in 0..4 {
+            save_probe_sample(
+                &state,
+                "select",
+                "hk",
+                &config.test_url,
+                Some(100 + index),
+                true,
+                None,
+                now - (5 - index) * 60 * 1000,
+            )
+            .unwrap();
+        }
+        save_probe_sample(
+            &state,
+            "select",
+            "hk",
+            &config.test_url,
+            Some(90),
+            true,
+            None,
+            now,
+        )
+        .unwrap();
+
+        let scores =
+            compute_scores_after_probe_run(&state, "select", &["hk".to_string()], &config).unwrap();
+
+        assert_eq!(scores[0].raw.sample_count, 5);
+        assert_eq!(scores[0].raw.success_count, 5);
+        assert_eq!(scores[0].components.availability, 100.0);
+    }
+
+    #[test]
+    fn legacy_probe_snapshots_are_ignored() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            events: helper_event_channel(),
+        };
+        let config = GroupConfig::default();
+        let legacy_response = ScoresResponse {
+            group: "select".to_string(),
+            mode: config.mode,
+            scheme: config.scheme,
+            test_url: config.test_url.clone(),
+            recommended: Some("hk".to_string()),
+            apply_error: None,
+            nodes: vec![NodeScore {
+                name: "hk".to_string(),
+                score: 100.0,
+                delay_ms: Some(40),
+                components: ScoreComponents::default(),
+                last_tested_at: None,
+                error: None,
+                raw: NodeScoreRaw {
+                    success: true,
+                    delay_ms: Some(40),
+                    error: None,
+                    tested_at: None,
+                    ..NodeScoreRaw::default()
+                },
+            }],
+        };
+        save_last_probe_snapshot(&state, &legacy_response).unwrap();
+
+        assert!(load_last_probe_snapshot(&state, "select", &config)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn score_mode_ties_prefer_lower_current_delay() {
         let config = GroupConfig::default();
         let mut scores = vec![
@@ -2587,6 +3308,13 @@ mod tests {
                 components: ScoreComponents::default(),
                 last_tested_at: None,
                 error: None,
+                raw: NodeScoreRaw {
+                    success: true,
+                    delay_ms: Some(280),
+                    error: None,
+                    tested_at: None,
+                    ..NodeScoreRaw::default()
+                },
             },
             NodeScore {
                 name: "z-faster".to_string(),
@@ -2595,6 +3323,13 @@ mod tests {
                 components: ScoreComponents::default(),
                 last_tested_at: None,
                 error: None,
+                raw: NodeScoreRaw {
+                    success: true,
+                    delay_ms: Some(80),
+                    error: None,
+                    tested_at: None,
+                    ..NodeScoreRaw::default()
+                },
             },
         ];
 
@@ -2890,7 +3625,10 @@ mod tests {
             .map(|_| serde_json::to_value(receiver.try_recv().unwrap()).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(events[0]["groups"][0]["activeNodes"], serde_json::json!([]));
-        assert_eq!(events[1]["groups"][0]["activeNodes"], serde_json::json!(["hk-1"]));
+        assert_eq!(
+            events[1]["groups"][0]["activeNodes"],
+            serde_json::json!(["hk-1"])
+        );
         assert_eq!(events[2]["groups"][0]["activeNodes"], serde_json::json!([]));
         assert_eq!(events[3]["groups"], serde_json::json!([]));
     }
