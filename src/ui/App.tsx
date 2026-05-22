@@ -1413,6 +1413,18 @@ export function App() {
     void saveLocalBehavior();
   };
 
+  const commitDelayTestTimeout = async (timeout: number) => {
+    setForm((current) => ({ ...current, delayTestTimeoutMs: timeout }));
+    if (!helperServiceAvailable) {
+      updateConfig({ delayTestTimeoutMs: timeout });
+      return;
+    }
+
+    await useHelperStore.getState().saveDelayTestTimeout(timeout);
+    const savedTimeout = useHelperStore.getState().testingSettings?.delayTestTimeoutMs ?? timeout;
+    updateConfig({ delayTestTimeoutMs: savedTimeout });
+  };
+
   const handleConfigFileLoad = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
@@ -2363,10 +2375,7 @@ export function App() {
                       value={form.delayTestTimeoutMs ?? helperDelayTestTimeoutMs}
                       onBlur={(event) => {
                         const timeout = Number.parseInt(event.currentTarget.value, 10) || DEFAULT_DELAY_TEST_TIMEOUT_MS;
-                        updateConfig({ delayTestTimeoutMs: timeout });
-                        if (helperServiceAvailable) {
-                          void helper.saveDelayTestTimeout(timeout);
-                        }
+                        void commitDelayTestTimeout(timeout);
                       }}
                       onChange={(event) =>
                         setForm({

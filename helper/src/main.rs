@@ -1336,40 +1336,87 @@ async fn probe_group_nodes(
     let progress = ProbeProgressContext {
         config: config.clone(),
     };
-    let mut handles = Vec::new();
-    for chunk in group_proxy.all.chunks(concurrency) {
-        handles.clear();
-        for node in chunk {
-            let state_clone = state.clone();
-            let controller_clone = controller.clone();
-            let group_name = group.to_string();
-            let test_url = config.test_url.clone();
-            let node_name = node.clone();
-            let probe_target = resolve_leaf_proxy_name(node, proxy_map);
-            let progress = progress.clone();
-            handles.push(tokio::spawn(async move {
-                probe_node(
-                    &state_clone,
-                    &controller_clone,
-                    &group_name,
-                    &node_name,
-                    &probe_target,
-                    &test_url,
-                    timeout_ms,
-                    concurrency,
-                    Some(progress),
-                )
-                .await
-            }));
-        }
+    let nodes = group_proxy.all.clone();
+    let mut next_index = 0_usize;
+    let mut tasks = tokio::task::JoinSet::new();
+    spawn_probe_workers(
+        &mut tasks,
+        &mut next_index,
+        &nodes,
+        concurrency,
+        concurrency,
+        state,
+        controller,
+        group,
+        config,
+        proxy_map,
+        timeout_ms,
+        &progress,
+    );
 
-        for handle in handles.drain(..) {
-            handle
-                .await
-                .map_err(|error| anyhow!("probe task failed: {error}"))??;
-        }
+    while let Some(result) = tasks.join_next().await {
+        result.map_err(|error| anyhow!("probe task failed: {error}"))??;
+        spawn_probe_workers(
+            &mut tasks,
+            &mut next_index,
+            &nodes,
+            1,
+            concurrency,
+            state,
+            controller,
+            group,
+            config,
+            proxy_map,
+            timeout_ms,
+            &progress,
+        );
     }
     Ok(ProbeRunStatus::Ran)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_probe_workers(
+    tasks: &mut tokio::task::JoinSet<Result<()>>,
+    next_index: &mut usize,
+    nodes: &[String],
+    max_to_spawn: usize,
+    concurrency: usize,
+    state: &AppState,
+    controller: &ControllerConfig,
+    group: &str,
+    config: &GroupConfig,
+    proxy_map: &HashMap<String, ProxyView>,
+    timeout_ms: i64,
+    progress: &ProbeProgressContext,
+) {
+    for _ in 0..max_to_spawn {
+        let Some(node) = nodes.get(*next_index) else {
+            return;
+        };
+        *next_index += 1;
+
+        let state_clone = state.clone();
+        let controller_clone = controller.clone();
+        let group_name = group.to_string();
+        let test_url = config.test_url.clone();
+        let node_name = node.clone();
+        let probe_target = resolve_leaf_proxy_name(node, proxy_map);
+        let progress = progress.clone();
+        tasks.spawn(async move {
+            probe_node(
+                &state_clone,
+                &controller_clone,
+                &group_name,
+                &node_name,
+                &probe_target,
+                &test_url,
+                timeout_ms,
+                concurrency,
+                Some(progress),
+            )
+            .await
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2938,7 +2985,7 @@ fn url_encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -3969,6 +4016,46 @@ mod tests {
         assert_eq!(proxy_request_count.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn probe_group_fills_finished_worker_slots_without_waiting_for_slow_nodes() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        let next_started = Arc::new(AtomicBool::new(false));
+        let release_slow = Arc::new(tokio::sync::Notify::new());
+        let controller_url =
+            spawn_dynamic_queue_probe_controller(next_started.clone(), release_slow.clone()).await;
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+
+        let probe_state = state.clone();
+        let probe = tokio::spawn(async move { probe_group_internal(&probe_state, "select", 2, false).await });
+
+        let started_before_slow_finished = wait_for_atomic_bool(&next_started, Duration::from_millis(300)).await;
+        release_slow.notify_waiters();
+        let response = probe.await.unwrap().unwrap();
+
+        assert!(
+            started_before_slow_finished,
+            "next node should start as soon as a worker slot finishes, before slow nodes time out"
+        );
+        assert_eq!(response.nodes.len(), 3);
+    }
+
     async fn spawn_one_delay_response_server(delay_ms: i64) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3985,6 +4072,66 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    async fn spawn_dynamic_queue_probe_controller(
+        next_started: Arc<AtomicBool>,
+        release_slow: Arc<tokio::sync::Notify>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let next_started = next_started.clone();
+                let release_slow = release_slow.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 2048];
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..read]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let body = if path == "/proxies" {
+                        r#"{"proxies":{"select":{"name":"select","type":"Selector","now":"slow","all":["slow","fast","next"]},"slow":{"name":"slow","type":"Trojan","now":"","all":[]},"fast":{"name":"fast","type":"Trojan","now":"","all":[]},"next":{"name":"next","type":"Trojan","now":"","all":[]}}}"#.to_string()
+                    } else if path.starts_with("/proxies/slow/delay") {
+                        release_slow.notified().await;
+                        r#"{"delay":900}"#.to_string()
+                    } else if path.starts_with("/proxies/fast/delay") {
+                        r#"{"delay":50}"#.to_string()
+                    } else if path.starts_with("/proxies/next/delay") {
+                        next_started.store(true, Ordering::SeqCst);
+                        r#"{"delay":60}"#.to_string()
+                    } else {
+                        r#"{"error":"not found"}"#.to_string()
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    async fn wait_for_atomic_bool(value: &AtomicBool, timeout: Duration) -> bool {
+        let started_at = tokio::time::Instant::now();
+        loop {
+            if value.load(Ordering::SeqCst) {
+                return true;
+            }
+            if started_at.elapsed() >= timeout {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     async fn spawn_counting_probe_controller(proxy_request_count: Arc<AtomicUsize>) -> String {

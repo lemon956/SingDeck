@@ -725,6 +725,61 @@ describe('App proxy workspace', () => {
     expect(saveNetworkUsageSettings).toHaveBeenCalledWith({ enabled: true, retentionDays: 7 });
   });
 
+  it('keeps edited timeout visible while helper timeout save is pending', async () => {
+    window.location.hash = '#/controller';
+    let resolveSave!: () => void;
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/settings/testing') && init?.method === 'PUT') {
+          const body = JSON.parse(String(init.body));
+          requests.push(body);
+          return new Promise<Response>((resolve) => {
+            resolveSave = () =>
+              resolve(
+                new Response(JSON.stringify(body), {
+                  status: 200,
+                  headers: { 'content-type': 'application/json' }
+                })
+              );
+          });
+        }
+        return new Response(JSON.stringify({ nodes: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      })
+    );
+    useControllerStore.setState((state) => ({
+      config: {
+        ...state.config,
+        delayTestTimeoutMs: 5000
+      }
+    }));
+    useHelperStore.setState({
+      testingSettings: {
+        defaultTestUrl: groupConfig.testUrl,
+        delayTestTimeoutMs: 5000,
+        minProbeIntervalSec: 60,
+        probeConcurrency: 4
+      }
+    });
+
+    render(<App />);
+
+    const timeoutInput = screen.getByLabelText('Timeout ms') as HTMLInputElement;
+    fireEvent.change(timeoutInput, { target: { value: '2000' } });
+    fireEvent.blur(timeoutInput);
+
+    await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ delayTestTimeoutMs: 2000 })));
+    await waitFor(() => expect(timeoutInput.value).toBe('2000'));
+
+    resolveSave();
+    await waitFor(() => expect(useControllerStore.getState().config.delayTestTimeoutMs).toBe(2000));
+  });
+
   it('shows local behavior save status on the save button without inserting a status block', async () => {
     window.location.hash = '#/controller';
     useControllerStore.setState({
