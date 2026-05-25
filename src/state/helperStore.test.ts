@@ -19,6 +19,7 @@ describe('helper store', () => {
       trafficSettings: null,
       networkUsageSettings: null,
       groups: [],
+      nodeSources: [],
       scoresByGroup: {},
       activeProbeGroups: [],
       activeProbeNodesByGroup: {},
@@ -124,6 +125,35 @@ describe('helper store', () => {
 
     expect(useHelperStore.getState().groups.map((group) => group.name)).toEqual(['GLOBAL', 'download']);
     expect(Object.keys(useHelperStore.getState().scoresByGroup).sort()).toEqual(['GLOBAL', 'download']);
+  });
+
+  it('loads node sources from the helper API', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/node-sources')) {
+          return jsonResponse({
+            sources: [
+              {
+                name: 'bing-us',
+                url: 'https://example.com/sub',
+                associate: true,
+                lastSyncedAt: '2026-05-25T10:00:00+08:00',
+                lastError: null,
+                nodeCount: 2,
+                nodes: ['us-1', 'us-2']
+              }
+            ]
+          });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().loadNodeSources();
+
+    expect(useHelperStore.getState().nodeSources.map((source) => source.name)).toEqual(['bing-us']);
   });
 
   it('keeps previous scores visible while strategy groups refresh', async () => {

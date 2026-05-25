@@ -13,7 +13,7 @@ Environment overrides:
   SINGDECK_HELPER_SERVICE=singdeck-helper.service
   SINGDECK_SING_BOX_SERVICE=sing-box.service
   SINGDECK_WEB_SERVICE=                 optional nginx/caddy service to reload
-  SINGDECK_RESTART_MODE=sing-box        sing-box|sb|helper|both|none
+  SINGDECK_RESTART_MODE=sing-box        sing-box|sb|helper|both|combined|none
   INSTALL_FRONTEND=1                    1|0
   INSTALL_HELPER=1                      1|0
   RUN_TESTS=0                           1|0
@@ -25,6 +25,7 @@ Examples:
   scripts/local-redeploy.sh
   SINGDECK_SING_BOX_SERVICE=sb.service scripts/local-redeploy.sh
   RUN_TESTS=1 SINGDECK_RESTART_MODE=both scripts/local-redeploy.sh
+  SINGDECK_RESTART_MODE=combined scripts/local-redeploy.sh
   DRY_RUN=1 scripts/local-redeploy.sh
 EOF
 }
@@ -174,6 +175,9 @@ restart_services() {
 
   case "$RESTART_MODE" in
     sing-box|sb)
+      run_sudo systemctl restart "$SING_BOX_SERVICE"
+      ;;
+    combined|sb-helper|sing-box-helper)
       run_sudo systemctl restart "$SING_BOX_SERVICE"
       ;;
     helper)

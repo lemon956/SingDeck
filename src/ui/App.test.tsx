@@ -78,6 +78,7 @@ function setupProxyWorkspace() {
         applyError: null
       }
     ],
+    nodeSources: [],
     scoresByGroup: {
       select: {
         group: 'select',
@@ -356,6 +357,86 @@ describe('App proxy workspace', () => {
     expect(scoreMarks.map((mark) => mark.textContent)).toEqual(['--', '--']);
     expect(within(hkNode).getByRole('button', { name: /Test hk-1 delay/i })).toHaveTextContent('48ms');
     expect(within(jpNode).getByRole('button', { name: /Test jp-1 delay/i })).toHaveTextContent('212ms');
+  });
+
+  it('filters strategy wall node display by selected node source', () => {
+    useHelperStore.setState({
+      nodeSources: [
+        {
+          name: 'provider-hk',
+          url: 'https://example.com/sub',
+          associate: true,
+          lastSyncedAt: '2026-05-25T10:00:00+08:00',
+          lastError: null,
+          nodeCount: 1,
+          nodes: ['hk-1']
+        }
+      ]
+    });
+
+    const { container } = render(<App />);
+    const sourceSelect = screen.getByLabelText('Filter nodes by source');
+    fireEvent.change(sourceSelect, { target: { value: 'provider-hk' } });
+
+    const wall = screen.getByLabelText('Strategy groups');
+    const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card')) as HTMLElement[];
+
+    expect(within(wall).getAllByText('hk-1').length).toBeGreaterThan(0);
+    expect(nodeCards.some((node) => within(node).queryByText('jp-1'))).toBe(false);
+  });
+
+  it('keeps source filtering out of group probe requests', async () => {
+    const requestBodies: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/groups/select/probe')) {
+          requestBodies.push(init?.body ? JSON.parse(String(init.body)) : null);
+          return new Response(
+            JSON.stringify({
+              group: 'select',
+              mode: 'score',
+              scheme: 'Balanced',
+              testUrl: groupConfig.testUrl,
+              recommended: 'hk-1',
+              applyError: null,
+              nodes: []
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        if (url.endsWith('/api/v1/probes')) {
+          return new Response(JSON.stringify({ groups: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+        return new Response(JSON.stringify({ nodes: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      })
+    );
+    useHelperStore.setState({
+      nodeSources: [
+        {
+          name: 'provider-hk',
+          url: 'https://example.com/sub',
+          associate: true,
+          lastSyncedAt: null,
+          lastError: null,
+          nodeCount: 1,
+          nodes: ['hk-1']
+        }
+      ]
+    });
+
+    render(<App />);
+    fireEvent.change(screen.getByLabelText('Filter nodes by source'), { target: { value: 'provider-hk' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run score' }));
+
+    await waitFor(() => expect(requestBodies).toEqual([{ concurrency: 4 }]));
   });
 
   it('uses the latest score delay without falling back to controller delay in score mode', () => {

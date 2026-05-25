@@ -654,6 +654,7 @@ export function App() {
   const [nodeScoreSearch, setNodeScoreSearch] = useState('');
   const [selectedNodeScoreGroup, setSelectedNodeScoreGroup] = useState('');
   const [nodeScoreDropdownOpen, setNodeScoreDropdownOpen] = useState(false);
+  const [selectedNodeSourceName, setSelectedNodeSourceName] = useState('');
   const [activeRoute, setActiveRoute] = useState<AppRoute>(() => routeFromHash(window.location.hash));
   const [activeStrategyGroupName, setActiveStrategyGroupName] = useState<string | null>(null);
   const [railExpanded, setRailExpanded] = useState(() => localStorage.getItem('singdeck-rail-expanded') !== 'false');
@@ -768,6 +769,7 @@ export function App() {
     }
 
     void useHelperStore.getState().loadGroups();
+    void useHelperStore.getState().loadNodeSources();
   }, [activeRoute, helper.helperUrl, helperAvailability]);
 
   useEffect(() => {
@@ -872,6 +874,26 @@ export function App() {
     () => applyStrategyWallOrder(strategyGroups, strategyGroupOrder),
     [strategyGroupOrder, strategyGroups]
   );
+  const selectedNodeSource = useMemo(
+    () => helper.nodeSources.find((source) => source.name === selectedNodeSourceName) ?? null,
+    [helper.nodeSources, selectedNodeSourceName]
+  );
+  const selectedNodeSourceNodes = useMemo(
+    () => new Set(selectedNodeSource?.nodes ?? []),
+    [selectedNodeSource]
+  );
+  const sourceFilteredStrategyGroups = useMemo(() => {
+    if (!selectedNodeSource) {
+      return orderedStrategyGroups;
+    }
+
+    return orderedStrategyGroups
+      .map((group) => ({
+        ...group,
+        all: group.all.filter((member) => selectedNodeSourceNodes.has(member))
+      }))
+      .filter((group) => group.all.length > 0);
+  }, [orderedStrategyGroups, selectedNodeSource, selectedNodeSourceNodes]);
   const allProxyNodes = useMemo(() => proxies.proxies.filter((proxy) => !isProxyGroup(proxy)), [proxies.proxies]);
   const proxyNodes = allProxyNodes;
   const proxyByName = useMemo(() => new Map(proxies.proxies.map((proxy) => [proxy.name, proxy])), [proxies.proxies]);
@@ -1032,6 +1054,12 @@ export function App() {
     }
   }, [nodeScoreGroups, selectedNodeScoreGroup]);
 
+  useEffect(() => {
+    if (selectedNodeSourceName && !helper.nodeSources.some((source) => source.name === selectedNodeSourceName)) {
+      setSelectedNodeSourceName('');
+    }
+  }, [helper.nodeSources, selectedNodeSourceName]);
+
   const activeHelperGroup = activeStrategyGroup ? helperGroupByName.get(activeStrategyGroup.name) : undefined;
   const activeHelperScores = activeStrategyGroup ? helper.scoresByGroup[activeStrategyGroup.name] : undefined;
   const activeHelperScoreByName = useMemo(
@@ -1087,12 +1115,12 @@ export function App() {
   );
   const strategyWallGroups = useMemo(() => {
     return buildStrategyWallGroups({
-      groups: orderedStrategyGroups,
+      groups: sourceFilteredStrategyGroups,
       activeName: activeStrategyGroup?.name ?? null,
       proxyByName,
       query: proxyQuery
     });
-  }, [activeStrategyGroup?.name, orderedStrategyGroups, proxyByName, proxyQuery]);
+  }, [activeStrategyGroup?.name, proxyByName, proxyQuery, sourceFilteredStrategyGroups]);
   const strategyWallColumns = useMemo(() => {
     const groupByName = new Map(strategyWallGroups.map((group) => [group.name, group]));
     return distributeStrategyWallColumns(
@@ -2554,6 +2582,21 @@ export function App() {
                   <span>Strategy wall</span>
                   <strong>{strategyWallGroups.length} / {strategyGroups.length} groups</strong>
                 </div>
+                <label className="proxy-source-filter">
+                  <span>Source</span>
+                  <select
+                    aria-label="Filter nodes by source"
+                    value={selectedNodeSourceName}
+                    onChange={(event) => setSelectedNodeSourceName(event.currentTarget.value)}
+                  >
+                    <option value="">All sources</option>
+                    {helper.nodeSources.map((source) => (
+                      <option key={source.name} value={source.name}>
+                        {source.name} · {source.nodeCount}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <label className="proxy-search-box">
                   <Search size={14} />
                   <input
@@ -2572,7 +2615,13 @@ export function App() {
               </div>
 
               <div className="strategy-wall" aria-label="Strategy groups">
-                {strategyWallGroups.length === 0 ? <span className="selector-empty">No strategy groups match the current search.</span> : null}
+                {strategyWallGroups.length === 0 ? (
+                  <span className="selector-empty">
+                    {selectedNodeSource
+                      ? 'No strategy groups match the selected source and search.'
+                      : 'No strategy groups match the current search.'}
+                  </span>
+                ) : null}
                 {strategyWallColumns.map((column, columnIndex) => (
                   <div className="strategy-wall-column" key={`strategy-column-${columnIndex}`}>
                     {column.map((proxy) => {

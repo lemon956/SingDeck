@@ -9,6 +9,8 @@ import {
   type HelperGroupConfig,
   type HelperGroupsResponse,
   type HelperHealth,
+  type HelperNodeSource,
+  type HelperNodeSourcesResponse,
   type HelperNetworkUsageConnections,
   type HelperNetworkUsageSettings,
   type HelperNetworkUsageSummary,
@@ -34,6 +36,7 @@ type HelperState = {
   trafficSettings: HelperTrafficSettings | null;
   networkUsageSettings: HelperNetworkUsageSettings | null;
   groups: HelperGroup[];
+  nodeSources: HelperNodeSource[];
   scoresByGroup: Record<string, HelperScoresResponse>;
   activeProbeGroups: string[];
   activeProbeNodesByGroup: Record<string, string[]>;
@@ -66,6 +69,7 @@ type HelperState = {
   saveTrafficSettings: (settings: HelperTrafficSettings) => Promise<void>;
   saveNetworkUsageSettings: (settings: HelperNetworkUsageSettings) => Promise<void>;
   loadGroups: () => Promise<void>;
+  loadNodeSources: () => Promise<void>;
   loadActiveProbes: () => Promise<void>;
   setEventStreamConnected: (connected: boolean) => void;
   saveGroupConfig: (group: string, config: HelperGroupConfig) => Promise<void>;
@@ -87,6 +91,7 @@ export const useHelperStore = create<HelperState>()(
       trafficSettings: null,
       networkUsageSettings: null,
       groups: [],
+      nodeSources: [],
       scoresByGroup: {},
       activeProbeGroups: [],
       activeProbeNodesByGroup: {},
@@ -116,6 +121,7 @@ export const useHelperStore = create<HelperState>()(
             eventStreamConnected: helperUrlChanged ? false : state.eventStreamConnected,
             activeProbeGroups: helperUrlChanged ? [] : state.activeProbeGroups,
             activeProbeNodesByGroup: helperUrlChanged ? {} : state.activeProbeNodesByGroup,
+            nodeSources: helperUrlChanged ? [] : state.nodeSources,
             error: helperUrlChanged ? null : state.error,
             lastCheckedAt: helperUrlChanged ? null : state.lastCheckedAt,
             lastSyncedControllerKey: helperUrlChanged ? null : state.lastSyncedControllerKey
@@ -339,6 +345,14 @@ export const useHelperStore = create<HelperState>()(
           }));
         } catch (error) {
           set({ loading: false, error: formatHelperError(error) });
+        }
+      },
+      loadNodeSources: async () => {
+        try {
+          const response = await client().getJson<HelperNodeSourcesResponse>('/api/v1/node-sources');
+          set({ nodeSources: Array.isArray(response.sources) ? response.sources : [], error: null });
+        } catch (error) {
+          set({ error: formatHelperError(error) });
         }
       },
       loadActiveProbes: async () => {

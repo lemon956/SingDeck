@@ -62,6 +62,20 @@ export type HelperGroupsResponse = {
   groups: HelperGroup[];
 };
 
+export type HelperNodeSource = {
+  name: string;
+  url: string;
+  associate: boolean;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+  nodeCount: number;
+  nodes: string[];
+};
+
+export type HelperNodeSourcesResponse = {
+  sources: HelperNodeSource[];
+};
+
 export type HelperActiveProbe = {
   group: string;
   startedAt: string;

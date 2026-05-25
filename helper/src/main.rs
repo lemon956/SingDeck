@@ -1,8 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     env, fs,
     net::{IpAddr, SocketAddr, UdpSocket},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -17,6 +17,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
+};
+use base64::{
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
+    Engine as _,
 };
 use chrono::{DateTime, Local, TimeZone};
 use reqwest::Client;
@@ -47,6 +51,11 @@ const MIN_SCORE_SAMPLE_WINDOW_MS: i64 = 30 * 60 * 1000;
 const SCORE_SAMPLE_WINDOW_INTERVAL_MULTIPLIER: i64 = 6;
 const MAX_SCORE_SAMPLE_COUNT: i64 = 10;
 const CONNECTIVITY_CONFIDENCE_SAMPLE_TARGET: f64 = 5.0;
+const SINGDECK_CONFIG_FILE: &str = "singdeck.json";
+const SINGDECK_CONFIG_JSONC_FILE: &str = "singdeck.jsonc";
+const NODE_SOURCE_STARTUP_SYNC_ATTEMPTS: usize = 30;
+const NODE_SOURCE_STARTUP_SYNC_RETRY_MS: u64 = 2_000;
+const NODE_SOURCE_FETCH_USER_AGENT: &str = "SingDeck-helper/0.1.0";
 
 #[derive(Clone)]
 struct AppState {
@@ -348,6 +357,26 @@ struct ConfigSourceRequest {
     path: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct NodeSourceConfig {
+    sources: Vec<NodeSourceConfigEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct NodeSourceConfigEntry {
+    name: String,
+    url: String,
+    associate: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SingDeckSidecarConfig {
+    #[serde(default)]
+    node_sources: Vec<NodeSourceConfigEntry>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ClashProxiesResponse {
     proxies: Option<HashMap<String, ClashProxy>>,
@@ -390,6 +419,24 @@ struct GroupView {
 #[serde(rename_all = "camelCase")]
 struct GroupsResponse {
     groups: Vec<GroupView>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct NodeSourcesResponse {
+    sources: Vec<NodeSourceView>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct NodeSourceView {
+    name: String,
+    url: String,
+    associate: bool,
+    last_synced_at: Option<String>,
+    last_error: Option<String>,
+    node_count: usize,
+    nodes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -599,6 +646,7 @@ async fn main() -> Result<()> {
         .allow_origin(Any);
 
     spawn_probe_scheduler(state.clone());
+    spawn_node_source_startup_sync(state.clone());
     spawn_realtime_event_publisher(state.clone());
     spawn_network_usage_sampler(state.clone());
 
@@ -618,6 +666,7 @@ async fn main() -> Result<()> {
             get(network_usage_settings).put(save_network_usage_settings),
         )
         .route("/api/v1/groups", get(groups))
+        .route("/api/v1/node-sources", get(node_sources))
         .route("/api/v1/events", get(helper_events))
         .route("/api/v1/probes", get(active_probes))
         .route("/api/v1/groups/:group/config", put(save_group_config))
@@ -668,6 +717,19 @@ fn init_db(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_probe_group_node_time
           ON probe_samples(group_name, node_name, tested_at_ms);
+        CREATE TABLE IF NOT EXISTS node_sources (
+          name TEXT PRIMARY KEY,
+          url TEXT NOT NULL,
+          associate INTEGER NOT NULL,
+          last_synced_ms INTEGER,
+          last_error TEXT,
+          node_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS node_source_nodes (
+          source_name TEXT NOT NULL,
+          node_name TEXT NOT NULL,
+          PRIMARY KEY (source_name, node_name)
+        );
         "#,
     )?;
     network_usage::init_db(conn)?;
@@ -916,6 +978,10 @@ async fn groups(State(state): State<AppState>) -> Result<Json<GroupsResponse>, A
     Ok(Json(GroupsResponse { groups }))
 }
 
+async fn node_sources(State(state): State<AppState>) -> Result<Json<NodeSourcesResponse>, AppError> {
+    Ok(Json(load_node_sources_response(&state)?))
+}
+
 async fn active_probes(
     State(state): State<AppState>,
 ) -> Result<Json<ProbeStatusResponse>, AppError> {
@@ -1129,6 +1195,431 @@ fn push_config_path_candidate(candidates: &mut Vec<String>, path: impl AsRef<str
         return;
     }
     candidates.push(path.to_string());
+}
+
+fn node_source_config_path(config_path: &Path) -> Option<PathBuf> {
+    config_path
+        .parent()
+        .map(|parent| parent.join(SINGDECK_CONFIG_FILE))
+        .or_else(|| Some(PathBuf::from(SINGDECK_CONFIG_FILE)))
+}
+
+fn node_source_config_candidate_paths(config_path: &Path) -> Vec<PathBuf> {
+    let primary = node_source_config_path(config_path)
+        .unwrap_or_else(|| PathBuf::from(SINGDECK_CONFIG_FILE));
+    let fallback = primary.with_file_name(SINGDECK_CONFIG_JSONC_FILE);
+    if primary == fallback {
+        vec![primary]
+    } else {
+        vec![primary, fallback]
+    }
+}
+
+fn read_node_source_config_for_config_path(config_path: &Path) -> Result<NodeSourceConfig> {
+    for sidecar_path in node_source_config_candidate_paths(config_path) {
+        if !sidecar_path.exists() {
+            continue;
+        }
+
+        let content = fs::read_to_string(&sidecar_path)
+            .with_context(|| format!("read {}", sidecar_path.display()))?;
+        let parse_content = if sidecar_path.extension().and_then(|value| value.to_str()) == Some("jsonc") {
+            normalize_jsonc(&content)
+        } else {
+            content
+        };
+        let config: SingDeckSidecarConfig = serde_json::from_str(&parse_content)
+            .with_context(|| format!("parse {}", sidecar_path.display()))?;
+        return Ok(NodeSourceConfig {
+            sources: config.node_sources,
+        });
+    }
+
+    Ok(NodeSourceConfig::default())
+}
+
+fn normalize_jsonc(content: &str) -> String {
+    strip_jsonc_trailing_commas(&strip_jsonc_comments(content))
+}
+
+fn strip_jsonc_comments(content: &str) -> String {
+    let mut output = String::with_capacity(content.len());
+    let mut chars = content.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while let Some(character) = chars.next() {
+        if in_string {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if character == '"' {
+            in_string = true;
+            output.push(character);
+            continue;
+        }
+
+        if character != '/' {
+            output.push(character);
+            continue;
+        }
+
+        match chars.peek().copied() {
+            Some('/') => {
+                chars.next();
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        output.push('\n');
+                        break;
+                    }
+                }
+            }
+            Some('*') => {
+                chars.next();
+                let mut previous = '\0';
+                for next in chars.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    if next == '\n' {
+                        output.push('\n');
+                    }
+                    previous = next;
+                }
+            }
+            _ => output.push(character),
+        }
+    }
+
+    output
+}
+
+fn strip_jsonc_trailing_commas(content: &str) -> String {
+    let mut output = String::with_capacity(content.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for character in content.chars() {
+        if in_string {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if character == '"' {
+            in_string = true;
+            output.push(character);
+            continue;
+        }
+
+        if character == '}' || character == ']' {
+            if let Some((comma_index, _)) = output
+                .char_indices()
+                .rev()
+                .find(|(_, existing)| !existing.is_whitespace())
+                .filter(|(_, existing)| *existing == ',')
+            {
+                output.truncate(comma_index);
+            }
+        }
+        output.push(character);
+    }
+
+    output
+}
+
+async fn sync_node_sources_on_startup(state: &AppState) -> Result<()> {
+    let Some(config_path) = load_string_kv(state, "config_path")? else {
+        return Ok(());
+    };
+    let source_config = read_node_source_config_for_config_path(Path::new(config_path.trim()))?;
+    hide_unconfigured_node_sources(state, &source_config)?;
+    if source_config.sources.is_empty() {
+        return Ok(());
+    }
+
+    let controller = load_controller(state)?;
+    let current_nodes = match fetch_proxies(state, &controller).await {
+        Ok(proxies) => proxy_node_names(&proxies),
+        Err(error) => {
+            let message = format!("controller proxies unavailable: {error}");
+            for source in source_config.sources.iter().filter(|source| source.associate) {
+                save_node_source_error(state, source, message.clone())?;
+            }
+            return Err(anyhow!(message));
+        }
+    };
+
+    sync_node_sources_with_nodes(state, &source_config, &current_nodes).await
+}
+
+async fn sync_node_sources_on_startup_with_retries(
+    state: &AppState,
+    attempts: usize,
+    retry_delay: Duration,
+) -> Result<()> {
+    let attempts = attempts.max(1);
+    let mut last_error = None;
+    for attempt in 1..=attempts {
+        match sync_node_sources_on_startup(state).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < attempts {
+                    tokio::time::sleep(retry_delay).await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("node source startup sync failed")))
+}
+
+async fn sync_node_sources_with_nodes(
+    state: &AppState,
+    config: &NodeSourceConfig,
+    current_nodes: &[String],
+) -> Result<()> {
+    hide_unconfigured_node_sources(state, config)?;
+
+    let mut seen = BTreeSet::new();
+    let mut source_errors = Vec::new();
+    for source in &config.sources {
+        if !seen.insert(source.name.clone()) {
+            let message = "duplicate source name".to_string();
+            save_node_source_error(state, source, message.clone())?;
+            source_errors.push(format!("{}: {message}", source.name.trim()));
+            continue;
+        }
+
+        if !source.associate {
+            save_node_source_metadata_preserving_links(state, source)?;
+            continue;
+        }
+
+        let result = async {
+            let content = state
+                .http
+                .get(source.url.trim())
+                .header(header::USER_AGENT, NODE_SOURCE_FETCH_USER_AGENT)
+                .send()
+                .await
+                .with_context(|| format!("fetch {}", source.url))?
+                .error_for_status()
+                .with_context(|| format!("fetch {}", source.url))?
+                .text()
+                .await
+                .with_context(|| format!("read {}", source.url))?;
+            let subscription_names = extract_subscription_node_names(&content)?;
+            Ok::<_, anyhow::Error>(match_subscription_nodes(&subscription_names, current_nodes))
+        }
+        .await;
+
+        match result {
+            Ok(nodes) => save_node_source_links(state, source, &nodes, None)?,
+            Err(error) => {
+                let message = format!("{error:#}");
+                save_node_source_error(state, source, message.clone())?;
+                source_errors.push(format!("{}: {message}", source.name.trim()));
+            }
+        }
+    }
+    if source_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!("node source sync failed: {}", source_errors.join("; ")))
+    }
+}
+
+fn hide_unconfigured_node_sources(state: &AppState, config: &NodeSourceConfig) -> Result<()> {
+    let configured_names = config
+        .sources
+        .iter()
+        .map(|source| source.name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
+    if configured_names.is_empty() {
+        db.execute("DELETE FROM node_sources", [])?;
+        return Ok(());
+    }
+
+    let existing_names = {
+        let mut stmt = db.prepare("SELECT name FROM node_sources")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+    for name in existing_names {
+        if !configured_names.contains(name.trim()) {
+            db.execute("DELETE FROM node_sources WHERE name = ?1", params![name])?;
+        }
+    }
+    Ok(())
+}
+
+fn load_node_sources_response(state: &AppState) -> Result<NodeSourcesResponse> {
+    let db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
+    let mut stmt = db.prepare(
+        "SELECT name, url, associate, last_synced_ms, last_error, node_count
+         FROM node_sources
+         ORDER BY name",
+    )?;
+    let source_rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? != 0,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut sources = Vec::with_capacity(source_rows.len());
+    for (name, url, associate, last_synced_ms, last_error, node_count) in source_rows {
+        let nodes = load_node_source_nodes_from_db(&db, &name)?;
+        sources.push(NodeSourceView {
+            name,
+            url,
+            associate,
+            last_synced_at: last_synced_ms.map(format_time),
+            last_error,
+            node_count: node_count.max(0) as usize,
+            nodes,
+        });
+    }
+    Ok(NodeSourcesResponse { sources })
+}
+
+fn load_node_source_nodes_from_db(db: &Connection, source_name: &str) -> Result<Vec<String>> {
+    let mut stmt = db.prepare(
+        "SELECT node_name FROM node_source_nodes WHERE source_name = ?1 ORDER BY node_name",
+    )?;
+    let nodes = stmt
+        .query_map(params![source_name], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(nodes)
+}
+
+fn save_node_source_metadata_preserving_links(
+    state: &AppState,
+    source: &NodeSourceConfigEntry,
+) -> Result<()> {
+    let db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
+    let node_count = count_node_source_nodes_from_db(&db, &source.name)?;
+    db.execute(
+        "INSERT INTO node_sources (name, url, associate, last_synced_ms, last_error, node_count)
+         VALUES (?1, ?2, ?3, COALESCE((SELECT last_synced_ms FROM node_sources WHERE name = ?1), NULL), NULL, ?4)
+         ON CONFLICT(name) DO UPDATE SET
+           url = excluded.url,
+           associate = excluded.associate,
+           last_error = NULL,
+           node_count = excluded.node_count",
+        params![source.name.trim(), source.url.trim(), bool_int(source.associate), node_count],
+    )?;
+    Ok(())
+}
+
+fn save_node_source_links(
+    state: &AppState,
+    source: &NodeSourceConfigEntry,
+    nodes: &[String],
+    error: Option<String>,
+) -> Result<()> {
+    let mut db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO node_sources (name, url, associate, last_synced_ms, last_error, node_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(name) DO UPDATE SET
+           url = excluded.url,
+           associate = excluded.associate,
+           last_synced_ms = excluded.last_synced_ms,
+           last_error = excluded.last_error,
+           node_count = excluded.node_count",
+        params![
+            source.name.trim(),
+            source.url.trim(),
+            bool_int(source.associate),
+            now_ms(),
+            error,
+            nodes.len() as i64
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM node_source_nodes WHERE source_name = ?1",
+        params![source.name.trim()],
+    )?;
+    for node in nodes {
+        tx.execute(
+            "INSERT OR IGNORE INTO node_source_nodes (source_name, node_name) VALUES (?1, ?2)",
+            params![source.name.trim(), node],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn save_node_source_error(
+    state: &AppState,
+    source: &NodeSourceConfigEntry,
+    error: String,
+) -> Result<()> {
+    let db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
+    let node_count = count_node_source_nodes_from_db(&db, &source.name)?;
+    db.execute(
+        "INSERT INTO node_sources (name, url, associate, last_synced_ms, last_error, node_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(name) DO UPDATE SET
+           url = excluded.url,
+           associate = excluded.associate,
+           last_synced_ms = excluded.last_synced_ms,
+           last_error = excluded.last_error,
+           node_count = excluded.node_count",
+        params![
+            source.name.trim(),
+            source.url.trim(),
+            bool_int(source.associate),
+            now_ms(),
+            error,
+            node_count
+        ],
+    )?;
+    Ok(())
+}
+
+fn count_node_source_nodes_from_db(db: &Connection, source_name: &str) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT COUNT(*) FROM node_source_nodes WHERE source_name = ?1",
+        params![source_name.trim()],
+        |row| row.get::<_, i64>(0),
+    )?)
+}
+
+fn bool_int(value: bool) -> i64 {
+    if value {
+        1
+    } else {
+        0
+    }
 }
 
 async fn read_config_raw(State(state): State<AppState>) -> Result<Response, AppError> {
@@ -1496,6 +1987,20 @@ fn spawn_probe_scheduler(state: AppState) {
             if let Err(error) = run_scheduled_probes(&state, false).await {
                 eprintln!("scheduled probe failed: {error}");
             }
+        }
+    });
+}
+
+fn spawn_node_source_startup_sync(state: AppState) {
+    tokio::spawn(async move {
+        if let Err(error) = sync_node_sources_on_startup_with_retries(
+            &state,
+            NODE_SOURCE_STARTUP_SYNC_ATTEMPTS,
+            Duration::from_millis(NODE_SOURCE_STARTUP_SYNC_RETRY_MS),
+        )
+        .await
+        {
+            eprintln!("node source startup sync failed: {error}");
         }
     });
 }
@@ -1960,6 +2465,128 @@ fn proxy_map(response: &ClashProxiesResponse) -> HashMap<String, ProxyView> {
     proxy_groups(response)
         .into_iter()
         .map(|proxy| (proxy.name.clone(), proxy))
+        .collect()
+}
+
+fn proxy_node_names(response: &ClashProxiesResponse) -> Vec<String> {
+    let mut names = response
+        .proxies
+        .as_ref()
+        .into_iter()
+        .flat_map(|proxies| proxies.iter())
+        .filter_map(|(name, proxy)| {
+            if proxy.all.as_ref().is_some_and(|all| !all.is_empty()) {
+                return None;
+            }
+            Some(proxy.name.clone().unwrap_or_else(|| name.clone()))
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+fn extract_subscription_node_names(content: &str) -> Result<Vec<String>> {
+    let decoded = decode_base64_text(content)?;
+    let mut names = Vec::new();
+    decoded
+        .lines()
+        .filter_map(subscription_line_node_name)
+        .for_each(|name| {
+            if !names.iter().any(|existing| existing == &name) {
+                names.push(name);
+            }
+        });
+    Ok(names)
+}
+
+fn decode_base64_text(content: &str) -> Result<String> {
+    let compact = content.split_whitespace().collect::<String>();
+    for engine in [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD] {
+        if let Ok(bytes) = engine.decode(&compact) {
+            return String::from_utf8(bytes).context("subscription is not utf-8 after base64 decode");
+        }
+    }
+    Err(anyhow!("subscription is not valid base64"))
+}
+
+fn subscription_line_node_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    if let Some(encoded) = line.strip_prefix("vmess://") {
+        return decode_base64_text(encoded)
+            .ok()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+            .and_then(|value| value.get("ps").and_then(|item| item.as_str()).map(str::to_string))
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+    }
+
+    line.rsplit_once('#')
+        .map(|(_, fragment)| percent_decode(fragment))
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2])) {
+                output.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(if bytes[index] == b'+' { b' ' } else { bytes[index] });
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).to_string()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn match_subscription_nodes(subscription_names: &[String], current_nodes: &[String]) -> Vec<String> {
+    let current_by_exact = current_nodes
+        .iter()
+        .map(|node| (node.as_str(), node.as_str()))
+        .collect::<HashMap<_, _>>();
+    let mut current_by_normalized = HashMap::new();
+    current_nodes.iter().for_each(|node| {
+        current_by_normalized
+            .entry(normalize_node_name(node))
+            .or_insert(node.as_str());
+    });
+    let mut matched = BTreeSet::new();
+
+    subscription_names.iter().for_each(|name| {
+        if let Some(node) = current_by_exact.get(name.as_str()) {
+            matched.insert((*node).to_string());
+            return;
+        }
+        if let Some(node) = current_by_normalized.get(&normalize_node_name(name)) {
+            matched.insert((*node).to_string());
+        }
+    });
+
+    matched.into_iter().collect()
+}
+
+fn normalize_node_name(name: &str) -> String {
+    name.chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_alphanumeric())
         .collect()
 }
 
@@ -4074,6 +4701,79 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_subscription_server(body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn spawn_subscription_server_requiring_user_agent(body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0_u8; 2048];
+            let read = stream.read(&mut buffer).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            if !request.to_ascii_lowercase().contains("\r\nuser-agent:") {
+                let response =
+                    "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                stream.write_all(response.as_bytes()).await.unwrap();
+                return;
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn spawn_flaky_proxy_controller(failures: usize, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let request_count = Arc::new(AtomicUsize::new(0));
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let request_count = request_count.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 2048];
+                    let _ = stream.read(&mut buffer).await.unwrap_or(0);
+                    let index = request_count.fetch_add(1, Ordering::SeqCst);
+                    if index < failures {
+                        let response =
+                            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        return;
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
     async fn spawn_dynamic_queue_probe_controller(
         next_started: Arc<AtomicBool>,
         release_slow: Arc<tokio::sync::Notify>,
@@ -4334,5 +5034,415 @@ mod tests {
         );
         assert!(config_path_candidates(None).is_empty());
         assert!(config_path_candidates(Some("  ".to_string())).is_empty());
+    }
+
+    #[test]
+    fn node_source_tables_are_initialized() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO node_sources (name, url, associate, last_synced_ms, last_error, node_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                "provider-a",
+                "https://example.com/sub",
+                1_i64,
+                123_i64,
+                Option::<String>::None,
+                2_i64
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO node_source_nodes (source_name, node_name) VALUES (?1, ?2)",
+            params!["provider-a", "hk-1"],
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM node_source_nodes WHERE source_name = 'provider-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn node_source_config_path_uses_singdeck_json_next_to_sing_box_config() {
+        assert_eq!(
+            node_source_config_path(Path::new("/etc/sing-box/config.jsonc")),
+            Some(Path::new("/etc/sing-box/singdeck.json").to_path_buf())
+        );
+        assert_eq!(
+            node_source_config_path(Path::new("config.jsonc")),
+            Some(Path::new("singdeck.json").to_path_buf())
+        );
+    }
+
+    #[test]
+    fn reads_node_sources_from_singdeck_sidecar_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.jsonc");
+        let sidecar_path = temp_dir.path().join("singdeck.json");
+        fs::write(
+            &sidecar_path,
+            r#"{"nodeSources":[{"name":"bing-us","url":"https://example.com/sub","associate":true}]}"#,
+        )
+        .unwrap();
+
+        let config = read_node_source_config_for_config_path(&config_path).unwrap();
+
+        assert_eq!(config.sources.len(), 1);
+        assert_eq!(config.sources[0].name, "bing-us");
+        assert!(config.sources[0].associate);
+    }
+
+    #[test]
+    fn reads_node_sources_from_singdeck_jsonc_when_json_is_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.jsonc");
+        let sidecar_path = temp_dir.path().join("singdeck.jsonc");
+        fs::write(
+            &sidecar_path,
+            r#"{"nodeSources":[{"name":"west-data","url":"https://example.com/sub","associate":true}]}"#,
+        )
+        .unwrap();
+
+        let config = read_node_source_config_for_config_path(&config_path).unwrap();
+
+        assert_eq!(config.sources.len(), 1);
+        assert_eq!(config.sources[0].name, "west-data");
+    }
+
+    #[test]
+    fn reads_node_sources_from_jsonc_with_comments_and_trailing_commas() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.jsonc");
+        let sidecar_path = temp_dir.path().join("singdeck.jsonc");
+        fs::write(
+            &sidecar_path,
+            r#"
+            {
+              // provider source list
+              "nodeSources": [
+                {
+                  "name": "west-data",
+                  "url": "https://example.com/sub",
+                  "associate": true,
+                },
+              ],
+            }
+            "#,
+        )
+        .unwrap();
+
+        let config = read_node_source_config_for_config_path(&config_path).unwrap();
+
+        assert_eq!(config.sources.len(), 1);
+        assert_eq!(config.sources[0].name, "west-data");
+    }
+
+    #[test]
+    fn extracts_node_names_from_base64_subscription() {
+        let encoded = "dHJvamFuOi8vcGFzc0BleGFtcGxlLmNvbTo0NDMjVW5pdGVkJTIwU3RhdGVzJTIwJTdDJTIwMDEKdmxlc3M6Ly9pZEBleGFtcGxlLmNvbTo0NDMjSG9uZyUyMEtvbmclMjAlN0MlMjAwMQ==";
+
+        let names = extract_subscription_node_names(encoded).unwrap();
+
+        assert_eq!(names, vec!["United States | 01".to_string(), "Hong Kong | 01".to_string()]);
+    }
+
+    #[test]
+    fn matches_subscription_nodes_against_current_leaf_proxies() {
+        let proxies: ClashProxiesResponse = serde_json::from_str(
+            r#"{"proxies":{"select":{"type":"Selector","all":["United States | 01","Hong Kong | 01"]},"United States | 01":{"type":"Trojan"},"Hong Kong | 01":{"type":"Trojan"},"Other":{"type":"Trojan"}}}"#,
+        )
+        .unwrap();
+
+        let matched = match_subscription_nodes(
+            &["united-states-01".to_string(), "Hong Kong | 01".to_string()],
+            &proxy_node_names(&proxies),
+        );
+
+        assert_eq!(matched, vec!["Hong Kong | 01".to_string(), "United States | 01".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn sync_node_sources_associates_enabled_sources_and_preserves_disabled_sources() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "manual".to_string(),
+                url: "http://127.0.0.1:1/not-requested".to_string(),
+                associate: false,
+            },
+            &["manual-node".to_string()],
+            None,
+        )
+        .unwrap();
+        let subscription_url = spawn_subscription_server(
+            "dHJvamFuOi8vcGFzc0BleGFtcGxlLmNvbTo0NDMjaGstMQp2bGVzczovL2lkQGV4YW1wbGUuY29tOjQ0MyNtaXNzaW5n",
+        )
+        .await;
+        let config = NodeSourceConfig {
+            sources: vec![
+                NodeSourceConfigEntry {
+                    name: "auto".to_string(),
+                    url: subscription_url,
+                    associate: true,
+                },
+                NodeSourceConfigEntry {
+                    name: "manual".to_string(),
+                    url: "http://127.0.0.1:1/not-requested".to_string(),
+                    associate: false,
+                },
+            ],
+        };
+
+        sync_node_sources_with_nodes(&state, &config, &["hk-1".to_string(), "manual-node".to_string()])
+            .await
+            .unwrap();
+        let response = load_node_sources_response(&state).unwrap();
+
+        let auto = response.sources.iter().find(|source| source.name == "auto").unwrap();
+        assert_eq!(auto.nodes, vec!["hk-1".to_string()]);
+        assert_eq!(auto.node_count, 1);
+        assert!(auto.last_error.is_none());
+
+        let manual = response.sources.iter().find(|source| source.name == "manual").unwrap();
+        assert_eq!(manual.nodes, vec!["manual-node".to_string()]);
+        assert_eq!(manual.node_count, 1);
+        assert!(manual.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_node_sources_sends_user_agent_when_fetching_subscription() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        let subscription_url = spawn_subscription_server_requiring_user_agent(
+            "dHJvamFuOi8vcGFzc0BleGFtcGxlLmNvbTo0NDMjaGstMQ==",
+        )
+        .await;
+        let config = NodeSourceConfig {
+            sources: vec![NodeSourceConfigEntry {
+                name: "west-data".to_string(),
+                url: subscription_url,
+                associate: true,
+            }],
+        };
+
+        sync_node_sources_with_nodes(&state, &config, &["hk-1".to_string()])
+            .await
+            .unwrap();
+
+        let response = load_node_sources_response(&state).unwrap();
+        let source = response.sources.iter().find(|source| source.name == "west-data").unwrap();
+        assert_eq!(source.nodes, vec!["hk-1".to_string()]);
+        assert!(source.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_node_source_sync_reports_controller_unavailable_as_retryable_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.jsonc");
+        let sidecar_path = temp_dir.path().join("singdeck.json");
+        fs::write(
+            &sidecar_path,
+            r#"{"nodeSources":[{"name":"west-data","url":"https://example.com/sub","associate":true}]}"#,
+        )
+        .unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        save_string_kv(&state, "config_path", config_path.to_str().unwrap()).unwrap();
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url: "http://127.0.0.1:1".to_string(),
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+
+        let error = sync_node_sources_on_startup(&state).await.unwrap_err();
+
+        assert!(error.to_string().contains("controller proxies unavailable"));
+        let response = load_node_sources_response(&state).unwrap();
+        let source = response.sources.iter().find(|source| source.name == "west-data").unwrap();
+        assert_eq!(source.node_count, 0);
+        assert!(source
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("controller proxies unavailable"));
+    }
+
+    #[tokio::test]
+    async fn startup_node_source_sync_retries_until_controller_is_ready() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.jsonc");
+        let sidecar_path = temp_dir.path().join("singdeck.json");
+        let subscription_url = spawn_subscription_server(
+            "dHJvamFuOi8vcGFzc0BleGFtcGxlLmNvbTo0NDMjaGstMQ==",
+        )
+        .await;
+        fs::write(
+            &sidecar_path,
+            format!(
+                r#"{{"nodeSources":[{{"name":"west-data","url":"{subscription_url}","associate":true}}]}}"#
+            ),
+        )
+        .unwrap();
+        let controller_url = spawn_flaky_proxy_controller(
+            1,
+            r#"{"proxies":{"select":{"type":"Selector","all":["hk-1"]},"hk-1":{"type":"Trojan"}}}"#,
+        )
+        .await;
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        save_string_kv(&state, "config_path", config_path.to_str().unwrap()).unwrap();
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+
+        sync_node_sources_on_startup_with_retries(&state, 2, Duration::from_millis(1))
+            .await
+            .unwrap();
+
+        let response = load_node_sources_response(&state).unwrap();
+        let source = response.sources.iter().find(|source| source.name == "west-data").unwrap();
+        assert_eq!(source.nodes, vec!["hk-1".to_string()]);
+        assert!(source.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_node_source_sync_retries_until_subscription_is_ready() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.jsonc");
+        let sidecar_path = temp_dir.path().join("singdeck.json");
+        let subscription_url = spawn_flaky_proxy_controller(
+            1,
+            "dHJvamFuOi8vcGFzc0BleGFtcGxlLmNvbTo0NDMjaGstMQ==",
+        )
+        .await;
+        fs::write(
+            &sidecar_path,
+            format!(
+                r#"{{"nodeSources":[{{"name":"west-data","url":"{subscription_url}","associate":true}}]}}"#
+            ),
+        )
+        .unwrap();
+        let controller_url = spawn_flaky_proxy_controller(
+            0,
+            r#"{"proxies":{"select":{"type":"Selector","all":["hk-1"]},"hk-1":{"type":"Trojan"}}}"#,
+        )
+        .await;
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        save_string_kv(&state, "config_path", config_path.to_str().unwrap()).unwrap();
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+
+        sync_node_sources_on_startup_with_retries(&state, 2, Duration::from_millis(1))
+            .await
+            .unwrap();
+
+        let response = load_node_sources_response(&state).unwrap();
+        let source = response.sources.iter().find(|source| source.name == "west-data").unwrap();
+        assert_eq!(source.nodes, vec!["hk-1".to_string()]);
+        assert!(source.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_node_sources_hides_unconfigured_sources_but_keeps_links() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "removed".to_string(),
+                url: "https://example.com/removed".to_string(),
+                associate: true,
+            },
+            &["kept-node".to_string()],
+            None,
+        )
+        .unwrap();
+
+        sync_node_sources_with_nodes(&state, &NodeSourceConfig::default(), &[])
+            .await
+            .unwrap();
+
+        let response = load_node_sources_response(&state).unwrap();
+        assert!(response.sources.is_empty());
+
+        let db = state.db.lock().unwrap();
+        let link_count = count_node_source_nodes_from_db(&db, "removed").unwrap();
+        assert_eq!(link_count, 1);
     }
 }

@@ -4712,7 +4712,7 @@ body {
 
 .proxy-board-toolbar {
   display: grid;
-  grid-template-columns: minmax(150px, 0.45fr) minmax(260px, 1fr) auto;
+  grid-template-columns: minmax(150px, 0.38fr) minmax(160px, 0.25fr) minmax(260px, 1fr) auto;
   gap: 10px;
   align-items: center;
   min-height: 52px;
@@ -4761,6 +4761,48 @@ body {
   border: 0;
   outline: 0;
   background: transparent;
+}
+
+.proxy-source-filter {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(5, 7, 8, 0.84);
+}
+
+.proxy-source-filter span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.proxy-source-filter select {
+  min-width: 0;
+  width: 100%;
+  color: var(--text);
+  border: 0;
+  outline: 0;
+  background: transparent;
+}
+
+.proxy-source-filter select option {
+  color: var(--text);
+  background: #070b0c;
+}
+
+.proxy-source-filter select option:checked {
+  color: #f2fbf7;
+  background: #123927;
+}
+
+.proxy-source-filter select option:disabled {
+  color: var(--muted);
+  background: #101719;
 }
 
 .proxy-board-status {
