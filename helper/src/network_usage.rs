@@ -132,6 +132,15 @@ pub struct UsageConnectionsResponse {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct UsageWindowResponse {
+    pub summary: UsageSummaryResponse,
+    pub top_hosts: UsageTopResponse,
+    pub top_outbounds: UsageTopResponse,
+    pub connections: UsageConnectionsResponse,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct UsageConnectionRow {
     pub id: String,
     pub host: String,
@@ -200,6 +209,12 @@ pub fn init_db(conn: &Connection) -> Result<()> {
           ON network_usage_buckets(bucket_start_ms);
         CREATE INDEX IF NOT EXISTS idx_usage_buckets_host_time
           ON network_usage_buckets(host, bucket_start_ms);
+        CREATE INDEX IF NOT EXISTS idx_usage_buckets_outbound_time
+          ON network_usage_buckets(outbound, bucket_start_ms);
+        CREATE INDEX IF NOT EXISTS idx_usage_buckets_rule_time
+          ON network_usage_buckets(rule, bucket_start_ms);
+        CREATE INDEX IF NOT EXISTS idx_usage_buckets_connection_time
+          ON network_usage_buckets(connection_id, bucket_start_ms);
         CREATE INDEX IF NOT EXISTS idx_usage_connections_last_seen
           ON network_usage_connections(last_seen_ms);
         "#,
@@ -612,6 +627,22 @@ pub fn query_connections(
     Ok(UsageConnectionsResponse { connections })
 }
 
+pub fn query_window(
+    conn: &Connection,
+    from_ms: i64,
+    to_ms: i64,
+    bucket: UsageBucket,
+    limit: i64,
+    query: Option<&str>,
+) -> Result<UsageWindowResponse> {
+    Ok(UsageWindowResponse {
+        summary: query_summary(conn, from_ms, to_ms, bucket)?,
+        top_hosts: query_top(conn, from_ms, to_ms, UsageGroupBy::Host, limit)?,
+        top_outbounds: query_top(conn, from_ms, to_ms, UsageGroupBy::Outbound, limit)?,
+        connections: query_connections(conn, from_ms, to_ms, limit, query)?,
+    })
+}
+
 fn rows_to_connections<F>(rows: rusqlite::MappedRows<'_, F>) -> Result<Vec<UsageConnectionRow>>
 where
     F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<UsageConnectionRow>,
@@ -851,6 +882,52 @@ mod tests {
         assert_eq!(rows.connections[0].host, "example.com");
         assert_eq!(rows.connections[0].outbound, "proxy-a");
         assert_eq!(rows.connections[0].download_bytes, 2000);
+    }
+
+    #[test]
+    fn query_window_combines_usage_summary_top_lists_and_connections() {
+        let conn = test_db();
+        apply_connections_snapshot(
+            &conn,
+            &json!({
+                "connections": [{
+                    "id": "conn-1",
+                    "metadata": { "host": "example.com", "network": "tcp" },
+                    "chains": ["proxy-a"],
+                    "rule": "DOMAIN",
+                    "rulePayload": "example.com",
+                    "upload": 100,
+                    "download": 200
+                }]
+            }),
+            60_000,
+        )
+        .unwrap();
+        apply_connections_snapshot(
+            &conn,
+            &json!({
+                "connections": [{
+                    "id": "conn-1",
+                    "metadata": { "host": "example.com", "network": "tcp" },
+                    "chains": ["proxy-a"],
+                    "rule": "DOMAIN",
+                    "rulePayload": "example.com",
+                    "upload": 160,
+                    "download": 360
+                }]
+            }),
+            61_000,
+        )
+        .unwrap();
+
+        let window = query_window(&conn, 0, 120_000, UsageBucket::Minute, 10, None).unwrap();
+
+        assert_eq!(window.summary.total_bytes, 220);
+        assert_eq!(window.top_hosts.group_by, "host");
+        assert_eq!(window.top_hosts.items[0].label, "example.com");
+        assert_eq!(window.top_outbounds.group_by, "outbound");
+        assert_eq!(window.top_outbounds.items[0].label, "proxy-a");
+        assert_eq!(window.connections.connections[0].id, "conn-1");
     }
 
     #[test]

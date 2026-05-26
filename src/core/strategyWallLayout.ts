@@ -89,6 +89,16 @@ export function moveStrategyWallGroupOrder(
   targetName: string,
   allNames: string[]
 ): string[] {
+  return moveStrategyWallGroupOrderNearTarget(currentOrder, sourceName, targetName, 'before', allNames);
+}
+
+export function moveStrategyWallGroupOrderNearTarget(
+  currentOrder: string[],
+  sourceName: string,
+  targetName: string,
+  placement: 'before' | 'after',
+  allNames: string[]
+): string[] {
   if (sourceName === targetName) {
     return normalizeStrategyWallOrder(currentOrder, allNames);
   }
@@ -105,7 +115,7 @@ export function moveStrategyWallGroupOrder(
     return nextOrder;
   }
 
-  nextOrder.splice(targetIndex, 0, sourceName);
+  nextOrder.splice(placement === 'after' ? targetIndex + 1 : targetIndex, 0, sourceName);
   return nextOrder;
 }
 

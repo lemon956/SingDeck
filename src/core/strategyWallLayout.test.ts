@@ -4,6 +4,7 @@ import {
   buildStrategyWallGroups,
   distributeStrategyWallColumns,
   moveStrategyWallGroupOrder,
+  moveStrategyWallGroupOrderNearTarget,
   selectVisibleStrategyWallMembers
 } from './strategyWallLayout';
 
@@ -90,6 +91,18 @@ describe('strategy wall layout', () => {
     );
 
     expect(nextOrder).toEqual(['claude-us', 'openai-us', 'download-node', 'gemini-us']);
+  });
+
+  it('moves a dragged group after the hovered target when requested', () => {
+    const nextOrder = moveStrategyWallGroupOrderNearTarget(
+      ['claude-us', 'download-node', 'openai-us'],
+      'claude-us',
+      'download-node',
+      'after',
+      ['claude-us', 'download-node', 'gemini-us', 'openai-us']
+    );
+
+    expect(nextOrder).toEqual(['download-node', 'claude-us', 'openai-us', 'gemini-us']);
   });
 
   it('shows members only according to the group collapsed state', () => {

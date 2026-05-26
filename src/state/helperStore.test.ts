@@ -339,6 +339,52 @@ describe('helper store', () => {
     expect(useHelperStore.getState().eventStreamConnected).toBe(false);
   });
 
+  it('marks helper ready as soon as health returns while settings are still loading', async () => {
+    let resolveTestingSettings!: () => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/health')) {
+          return jsonResponse({
+            ok: true,
+            version: '0.1.0',
+            sqlite: true,
+            controllerConfigured: true,
+            controllerReachable: true,
+            mobileConfigUrl: null,
+            error: null
+          });
+        }
+        if (url.endsWith('/api/v1/settings/testing')) {
+          await new Promise<void>((resolve) => {
+            resolveTestingSettings = resolve;
+          });
+          return jsonResponse({
+            defaultTestUrl: 'https://cp.cloudflare.com/generate_204',
+            delayTestTimeoutMs: 5000,
+            minProbeIntervalSec: 60,
+            probeConcurrency: 4
+          });
+        }
+        if (url.endsWith('/api/v1/settings/traffic')) {
+          return jsonResponse({ enabled: false, browserProfile: '' });
+        }
+        if (url.endsWith('/api/v1/settings/network-usage')) {
+          return jsonResponse({ enabled: false, retentionDays: 7 });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    const healthCheck = useHelperStore.getState().checkHealth();
+    await vi.waitFor(() => expect(useHelperStore.getState().health?.ok).toBe(true));
+    expect(useHelperStore.getState().loading).toBe(false);
+
+    resolveTestingSettings();
+    await healthCheck;
+  });
+
   it('clears active probe state when polling active probes fails', async () => {
     useHelperStore.setState({
       activeProbeGroups: ['select'],
@@ -751,72 +797,105 @@ describe('helper store', () => {
     });
   });
 
-  it('loads a network usage window from summary, top, and connection endpoints', async () => {
+  it('loads a network usage window through the aggregate endpoint while keeping stale data visible', async () => {
     const requests: string[] = [];
+    useHelperStore.setState({
+      networkUsageSummary: {
+        fromMs: 0,
+        toMs: 500,
+        uploadBytes: 1,
+        downloadBytes: 2,
+        totalBytes: 3,
+        connectionCount: 1,
+        buckets: []
+      },
+      networkUsageTopHosts: { groupBy: 'host', items: [] },
+      networkUsageTopOutbounds: { groupBy: 'outbound', items: [] },
+      networkUsageConnections: { connections: [] }
+    });
+    let resolveWindow!: () => void;
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         requests.push(url);
         const parsed = new URL(url);
-        if (parsed.pathname.endsWith('/api/v1/network-usage/summary')) {
-          return jsonResponse({
-            fromMs: 1000,
-            toMs: 2000,
-            uploadBytes: 512,
-            downloadBytes: 2048,
-            totalBytes: 2560,
-            connectionCount: 2,
-            buckets: []
+        if (parsed.pathname.endsWith('/api/v1/network-usage/window')) {
+          await new Promise<void>((resolve) => {
+            resolveWindow = resolve;
           });
-        }
-        if (parsed.pathname.endsWith('/api/v1/network-usage/top')) {
           return jsonResponse({
-            groupBy: parsed.searchParams.get('groupBy'),
-            items: [
-              {
-                label: parsed.searchParams.get('groupBy') === 'outbound' ? 'proxy-a' : 'example.com',
-                uploadBytes: 128,
-                downloadBytes: 1024,
-                totalBytes: 1152,
-                connectionCount: 1
-              }
-            ]
-          });
-        }
-        if (parsed.pathname.endsWith('/api/v1/network-usage/connections')) {
-          return jsonResponse({
-            connections: [
-              {
-                id: 'conn-1',
-                host: 'example.com',
-                network: 'tcp',
-                rule: 'DOMAIN example.com',
-                outbound: 'proxy-a',
-                chains: ['proxy-a'],
-                firstSeenMs: 1000,
-                lastSeenMs: 2000,
-                uploadBytes: 128,
-                downloadBytes: 1024,
-                totalBytes: 1152
-              }
-            ]
+            summary: {
+              fromMs: 1000,
+              toMs: 2000,
+              uploadBytes: 512,
+              downloadBytes: 2048,
+              totalBytes: 2560,
+              connectionCount: 2,
+              buckets: []
+            },
+            topHosts: {
+              groupBy: 'host',
+              items: [
+                {
+                  label: 'example.com',
+                  uploadBytes: 128,
+                  downloadBytes: 1024,
+                  totalBytes: 1152,
+                  connectionCount: 1
+                }
+              ]
+            },
+            topOutbounds: {
+              groupBy: 'outbound',
+              items: [
+                {
+                  label: 'proxy-a',
+                  uploadBytes: 128,
+                  downloadBytes: 1024,
+                  totalBytes: 1152,
+                  connectionCount: 1
+                }
+              ]
+            },
+            connections: {
+              connections: [
+                {
+                  id: 'conn-1',
+                  host: 'example.com',
+                  network: 'tcp',
+                  rule: 'DOMAIN example.com',
+                  outbound: 'proxy-a',
+                  chains: ['proxy-a'],
+                  firstSeenMs: 1000,
+                  lastSeenMs: 2000,
+                  uploadBytes: 128,
+                  downloadBytes: 1024,
+                  totalBytes: 1152
+                }
+              ]
+            }
           });
         }
         return new Response('not found', { status: 404 });
       })
     );
 
-    await useHelperStore.getState().loadNetworkUsageWindow({
+    const request = useHelperStore.getState().loadNetworkUsageWindow({
       from: 1000,
       to: 2000,
       bucket: 'minute',
       limit: 5
     });
 
-    expect(requests.some((url) => url.includes('/api/v1/network-usage/summary'))).toBe(true);
-    expect(requests.some((url) => url.includes('groupBy=host'))).toBe(true);
-    expect(requests.some((url) => url.includes('groupBy=outbound'))).toBe(true);
+    expect(useHelperStore.getState().networkUsageLoading).toBe(true);
+    expect(useHelperStore.getState().networkUsageSummary?.totalBytes).toBe(3);
+    resolveWindow();
+    await request;
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toContain('/api/v1/network-usage/window');
+    expect(requests[0]).toContain('limit=5');
     expect(useHelperStore.getState().networkUsageSummary?.totalBytes).toBe(2560);
     expect(useHelperStore.getState().networkUsageTopHosts?.items[0]?.label).toBe('example.com');
     expect(useHelperStore.getState().networkUsageTopOutbounds?.items[0]?.label).toBe('proxy-a');

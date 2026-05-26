@@ -17,4 +17,14 @@ describe('config download URL', () => {
       'http://192.168.31.8:9531/api/v1/config/raw'
     );
   });
+
+  it('does not invent a LAN QR URL when helper only reports a loopback URL', () => {
+    expect(
+      resolveConfigDownloadUrl({
+        helperUrl: 'http://127.0.0.1:9531',
+        mobileConfigUrl: null,
+        pageHostname: '192.168.31.8'
+      })
+    ).toBe('');
+  });
 });

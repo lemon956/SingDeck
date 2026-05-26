@@ -1247,6 +1247,7 @@ h1 {
 }
 
 .page-fill {
+  position: relative;
   display: grid;
   min-height: calc(100vh - 94px);
   margin-top: 12px;
@@ -1319,6 +1320,15 @@ h1 {
   padding: 12px;
   border: 1px solid rgba(38, 56, 61, 0.8);
   background: rgba(7, 10, 11, 0.42);
+  cursor: pointer;
+}
+
+.connection-row:hover,
+.connection-row:focus-visible,
+.connection-row.selected {
+  border-color: rgba(88, 216, 141, 0.34);
+  background: rgba(13, 24, 22, 0.78);
+  outline: 0;
 }
 
 .connection-row div,
@@ -1336,6 +1346,61 @@ h1 {
 .connection-row span {
   color: var(--muted);
   font-family: var(--font-sans);
+  font-size: 12px;
+}
+
+.connection-detail-drawer {
+  position: fixed;
+  z-index: 30;
+  top: 0;
+  right: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  width: min(420px, calc(100vw - 32px));
+  height: 100vh;
+  padding: 18px;
+  border-left: 1px solid var(--line-strong);
+  background: rgba(8, 12, 13, 0.98);
+  box-shadow: -18px 0 36px rgba(0, 0, 0, 0.32);
+}
+
+.connection-detail-head {
+  display: flex;
+  gap: 12px;
+  align-items: start;
+  justify-content: space-between;
+}
+
+.connection-detail-head div,
+.connection-detail-grid {
+  min-width: 0;
+}
+
+.connection-detail-head span,
+.connection-detail-grid > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.connection-detail-head strong {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  font-size: 17px;
+}
+
+.connection-detail-grid {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-content: start;
+  gap: 9px 12px;
+  overflow: auto;
+}
+
+.connection-detail-grid strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 12px;
 }
 
@@ -3711,6 +3776,25 @@ body {
 
 .qr-action {
   gap: 6px;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    transform 90ms ease;
+}
+
+.qr-action:hover:not(:disabled),
+.qr-action:focus-visible {
+  border-color: rgba(88, 216, 141, 0.36);
+  background: rgba(88, 216, 141, 0.08);
+}
+
+.qr-action:active:not(:disabled) {
+  transform: translateY(1px) scale(0.985);
+}
+
+.qr-action.loading {
+  color: var(--green);
+  border-color: rgba(88, 216, 141, 0.3);
 }
 
 .qr-backdrop {
@@ -3725,8 +3809,8 @@ body {
 }
 
 .qr-panel {
-  width: min(640px, calc(100vw - 40px));
-  padding: 14px;
+  width: min(520px, calc(100vw - 40px));
+  padding: 12px;
   border: 1px solid rgba(219, 237, 241, 0.14);
   border-radius: var(--radius);
   background: rgba(12, 17, 19, 0.98);
@@ -3738,7 +3822,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  margin-bottom: 14px;
+  margin-bottom: 11px;
 }
 
 .qr-title {
@@ -3764,8 +3848,8 @@ body {
 
 .qr-body {
   display: grid;
-  grid-template-columns: 252px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 188px minmax(0, 1fr);
+  gap: 12px;
   align-items: stretch;
 }
 
@@ -3773,7 +3857,7 @@ body {
   display: grid;
   place-items: center;
   aspect-ratio: 1;
-  min-height: 252px;
+  min-height: 188px;
   border: 1px solid rgba(219, 237, 241, 0.18);
   border-radius: 7px;
   background: #f6fbf9;
@@ -3786,8 +3870,8 @@ body {
 }
 
 .qr-code-box img {
-  width: 224px;
-  height: 224px;
+  width: 168px;
+  height: 168px;
   display: block;
 }
 
@@ -3807,7 +3891,7 @@ body {
 .qr-meta {
   display: grid;
   align-content: start;
-  gap: 11px;
+  gap: 9px;
   min-width: 0;
 }
 
@@ -3865,9 +3949,13 @@ body {
 }
 
 .qr-url-field small {
-  color: var(--amber);
+  color: var(--muted);
   font-size: 11px;
   line-height: 1.35;
+}
+
+.qr-state.warn ~ .qr-url-field small {
+  color: var(--amber);
 }
 
 .qr-copy {
@@ -4712,7 +4800,7 @@ body {
 
 .proxy-board-toolbar {
   display: grid;
-  grid-template-columns: minmax(150px, 0.38fr) minmax(160px, 0.25fr) minmax(260px, 1fr) auto;
+  grid-template-columns: minmax(150px, 0.3fr) auto minmax(160px, 0.23fr) minmax(260px, 1fr) auto;
   gap: 10px;
   align-items: center;
   min-height: 52px;
@@ -4739,6 +4827,12 @@ body {
   font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.proxy-board-bulk-actions {
+  display: flex;
+  gap: 6px;
+  min-width: max-content;
 }
 
 .proxy-search-box {

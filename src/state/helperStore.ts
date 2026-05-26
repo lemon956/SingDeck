@@ -15,6 +15,7 @@ import {
   type HelperNetworkUsageSettings,
   type HelperNetworkUsageSummary,
   type HelperNetworkUsageTop,
+  type HelperNetworkUsageWindow,
   type HelperNetworkUsageWindowRequest,
   type HelperProbeStatusResponse,
   type HelperScoresResponse,
@@ -131,18 +132,21 @@ export const useHelperStore = create<HelperState>()(
         set({ loading: true, error: null });
         try {
           const health = await client().getJson<HelperHealth>('/api/v1/health');
-          const testingSettings = await client().getJson<HelperTestingSettings>('/api/v1/settings/testing');
-          const trafficSettings = await client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic');
-          const networkUsageSettings = await client().getJson<HelperNetworkUsageSettings>(
-            '/api/v1/settings/network-usage'
-          );
           set({
             health,
+            loading: false,
+            lastCheckedAt: new Date().toISOString(),
+            error: health.error
+          });
+          const [testingSettings, trafficSettings, networkUsageSettings] = await Promise.all([
+            client().getJson<HelperTestingSettings>('/api/v1/settings/testing'),
+            client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic'),
+            client().getJson<HelperNetworkUsageSettings>('/api/v1/settings/network-usage')
+          ]);
+          set({
             testingSettings,
             trafficSettings,
             networkUsageSettings,
-            loading: false,
-            lastCheckedAt: new Date().toISOString(),
             error: health.error
           });
         } catch (error) {
@@ -170,19 +174,22 @@ export const useHelperStore = create<HelperState>()(
             secret: config.secret
           });
           const health = await client().getJson<HelperHealth>('/api/v1/health');
-          const testingSettings = await client().getJson<HelperTestingSettings>('/api/v1/settings/testing');
-          const trafficSettings = await client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic');
-          const networkUsageSettings = await client().getJson<HelperNetworkUsageSettings>(
-            '/api/v1/settings/network-usage'
-          );
           set({
             health,
-            testingSettings,
-            trafficSettings,
-            networkUsageSettings,
             loading: false,
             lastCheckedAt: new Date().toISOString(),
             lastSyncedControllerKey: syncKey,
+            error: health.error
+          });
+          const [testingSettings, trafficSettings, networkUsageSettings] = await Promise.all([
+            client().getJson<HelperTestingSettings>('/api/v1/settings/testing'),
+            client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic'),
+            client().getJson<HelperNetworkUsageSettings>('/api/v1/settings/network-usage')
+          ]);
+          set({
+            testingSettings,
+            trafficSettings,
+            networkUsageSettings,
             error: health.error
           });
         } catch (error) {
@@ -495,25 +502,14 @@ export const useHelperStore = create<HelperState>()(
         set({ networkUsageLoading: true, networkUsageError: null });
         try {
           const limit = request.limit ?? 10;
-          const [summary, topHosts, topOutbounds, connections] = await Promise.all([
-            client().getJson<HelperNetworkUsageSummary>(
-              `/api/v1/network-usage/summary?${networkUsageQuery(request)}`
-            ),
-            client().getJson<HelperNetworkUsageTop>(
-              `/api/v1/network-usage/top?${networkUsageQuery({ ...request, groupBy: 'host', limit })}`
-            ),
-            client().getJson<HelperNetworkUsageTop>(
-              `/api/v1/network-usage/top?${networkUsageQuery({ ...request, groupBy: 'outbound', limit })}`
-            ),
-            client().getJson<HelperNetworkUsageConnections>(
-              `/api/v1/network-usage/connections?${networkUsageQuery({ ...request, limit })}`
-            )
-          ]);
+          const window = await client().getJson<HelperNetworkUsageWindow>(
+            `/api/v1/network-usage/window?${networkUsageQuery({ ...request, limit })}`
+          );
           set({
-            networkUsageSummary: summary,
-            networkUsageTopHosts: topHosts,
-            networkUsageTopOutbounds: topOutbounds,
-            networkUsageConnections: connections,
+            networkUsageSummary: window.summary,
+            networkUsageTopHosts: window.topHosts,
+            networkUsageTopOutbounds: window.topOutbounds,
+            networkUsageConnections: window.connections,
             networkUsageLoading: false,
             networkUsageError: null
           });

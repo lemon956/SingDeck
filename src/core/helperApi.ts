@@ -228,6 +228,13 @@ export type HelperNetworkUsageConnections = {
   connections: HelperNetworkUsageConnection[];
 };
 
+export type HelperNetworkUsageWindow = {
+  summary: HelperNetworkUsageSummary;
+  topHosts: HelperNetworkUsageTop;
+  topOutbounds: HelperNetworkUsageTop;
+  connections: HelperNetworkUsageConnections;
+};
+
 export type HelperNetworkUsageWindowRequest = {
   from: number;
   to: number;

@@ -620,6 +620,16 @@ struct NetworkUsageConnectionsQuery {
     q: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkUsageWindowQuery {
+    from: Option<i64>,
+    to: Option<i64>,
+    bucket: Option<String>,
+    limit: Option<i64>,
+    q: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let bind = env::var("SINGDECK_HELPER_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
@@ -678,6 +688,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/config/source", put(save_config_source))
         .route("/api/v1/traffic", get(read_traffic))
         .route("/api/v1/network-usage/summary", get(network_usage_summary))
+        .route("/api/v1/network-usage/window", get(network_usage_window))
         .route("/api/v1/network-usage/top", get(network_usage_top))
         .route(
             "/api/v1/network-usage/connections",
@@ -951,6 +962,26 @@ async fn network_usage_connections(
         from_ms,
         to_ms,
         query.limit.unwrap_or(20),
+        query.q.as_deref(),
+    )?))
+}
+
+async fn network_usage_window(
+    State(state): State<AppState>,
+    Query(query): Query<NetworkUsageWindowQuery>,
+) -> Result<Json<network_usage::UsageWindowResponse>, AppError> {
+    let (from_ms, to_ms) = resolve_usage_window(query.from, query.to);
+    let bucket = network_usage::UsageBucket::parse(query.bucket.as_deref());
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::internal("database lock poisoned"))?;
+    Ok(Json(network_usage::query_window(
+        &db,
+        from_ms,
+        to_ms,
+        bucket,
+        query.limit.unwrap_or(10),
         query.q.as_deref(),
     )?))
 }
@@ -3355,7 +3386,7 @@ fn mobile_config_url_for_bind(bind: &str, lan_ip: Option<String>) -> Option<Stri
     let host = if ip.is_unspecified() {
         lan_ip?
     } else if ip.is_loopback() {
-        lan_ip?
+        return None;
     } else {
         format_host(ip)
     };
@@ -5000,7 +5031,7 @@ mod tests {
         );
         assert_eq!(
             mobile_config_url_for_bind("127.0.0.1:9531", Some("10.0.0.12".to_string())),
-            Some("http://10.0.0.12:9531/api/v1/config/raw".to_string())
+            None
         );
         assert_eq!(mobile_config_url_for_bind("127.0.0.1:9531", None), None);
     }

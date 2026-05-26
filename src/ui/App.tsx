@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   QrCode,
   RefreshCw,
+  Save,
   Search,
   Settings as SettingsIcon,
   ScrollText,
@@ -27,7 +28,7 @@ import {
   applyStrategyWallOrder,
   buildStrategyWallGroups,
   distributeStrategyWallColumns,
-  moveStrategyWallGroupOrder,
+  moveStrategyWallGroupOrderNearTarget,
   selectVisibleStrategyWallMembers
 } from '../core/strategyWallLayout';
 import {
@@ -268,6 +269,14 @@ function buildNetworkUsageRequest(windowId: NetworkUsageWindowId) {
     bucket: windowConfig.bucket,
     limit: 10
   };
+}
+
+function parseIntegerDraft(value: string, fallback: number, min: number, max: number): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, parsed));
 }
 
 function formatLastSeen(timestampMs: number): string {
@@ -649,17 +658,30 @@ export function App() {
   const helperStatusTone = helperAvailability === 'ready' ? 'ok' : helperAvailability === 'checking' ? 'neutral' : 'bad';
   const [form, setForm] = useState(config);
   const [testingDefaultUrlDraft, setTestingDefaultUrlDraft] = useState(config.defaultTestUrl);
+  const [delayConcurrencyDraft, setDelayConcurrencyDraft] = useState(String(config.delayTestConcurrency ?? 4));
+  const [delayTimeoutDraft, setDelayTimeoutDraft] = useState(
+    String(config.delayTestTimeoutMs ?? DEFAULT_DELAY_TEST_TIMEOUT_MS)
+  );
+  const [minProbeIntervalDraft, setMinProbeIntervalDraft] = useState('1');
+  const [activeProbeIntervalDraft, setActiveProbeIntervalDraft] = useState('');
   const [trafficProfileDraft, setTrafficProfileDraft] = useState('');
   const [networkUsageWindow, setNetworkUsageWindow] = useState<NetworkUsageWindowId>('24h');
   const [nodeScoreSearch, setNodeScoreSearch] = useState('');
   const [selectedNodeScoreGroup, setSelectedNodeScoreGroup] = useState('');
   const [nodeScoreDropdownOpen, setNodeScoreDropdownOpen] = useState(false);
   const [selectedNodeSourceName, setSelectedNodeSourceName] = useState('');
+  const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
+  const [groupConfigSaveStatus, setGroupConfigSaveStatus] = useState<{
+    groupName: string;
+    tone: 'saving' | 'ok' | 'bad';
+    text: string;
+  } | null>(null);
   const [activeRoute, setActiveRoute] = useState<AppRoute>(() => routeFromHash(window.location.hash));
   const [activeStrategyGroupName, setActiveStrategyGroupName] = useState<string | null>(null);
   const [railExpanded, setRailExpanded] = useState(() => localStorage.getItem('singdeck-rail-expanded') !== 'false');
   const [topologyPaused, setTopologyPaused] = useState(false);
   const [configQrOpen, setConfigQrOpen] = useState(false);
+  const [configQrOpening, setConfigQrOpening] = useState(false);
   const [configQrUrl, setConfigQrUrl] = useState('');
   const [configQrDataUrl, setConfigQrDataUrl] = useState('');
   const [configQrCopied, setConfigQrCopied] = useState(false);
@@ -671,10 +693,12 @@ export function App() {
   const [collapsedStrategyGroups, setCollapsedStrategyGroups] = useState<Set<string>>(() => new Set());
   const [strategyGroupOrder, setStrategyGroupOrder] = useState<string[]>(readStrategyGroupOrder);
   const [draggingStrategyGroupName, setDraggingStrategyGroupName] = useState<string | null>(null);
+  const [groupConfigDrafts, setGroupConfigDrafts] = useState<Record<string, HelperGroupConfig>>({});
   const topologyChartRef = useRef<HTMLDivElement | null>(null);
   const topologyChartInstanceRef = useRef<echarts.EChartsType | null>(null);
   const settingsImportInputRef = useRef<HTMLInputElement | null>(null);
   const previousHelperActiveProbeGroupsRef = useRef<Set<string>>(new Set());
+  const strategyGroupsAutoCollapsedRef = useRef(false);
 
   useEffect(() => {
     applyBrowserStartup(window.location.hash, window.location.origin, window.location.pathname);
@@ -737,6 +761,13 @@ export function App() {
       proxies.setGroupTestUrl(group.name, group.config.testUrl);
     });
   }, [helper.groups, proxies.setGroupTestUrl]);
+
+  useEffect(() => {
+    const knownGroups = new Set(helper.groups.map((group) => group.name));
+    setGroupConfigDrafts((current) =>
+      Object.fromEntries(Object.entries(current).filter(([group]) => knownGroups.has(group)))
+    );
+  }, [helper.groups]);
 
   useEffect(() => {
     localStorage.setItem('singdeck-rail-expanded', String(railExpanded));
@@ -870,6 +901,14 @@ export function App() {
   const proxyQuery = proxies.query.toLowerCase();
   const allStrategyGroups = useMemo(() => proxies.proxies.filter(isZashboardVisibleStrategyGroup), [proxies.proxies]);
   const strategyGroups = allStrategyGroups;
+  useEffect(() => {
+    if (strategyGroupsAutoCollapsedRef.current || allStrategyGroups.length === 0) {
+      return;
+    }
+
+    strategyGroupsAutoCollapsedRef.current = true;
+    setCollapsedStrategyGroups(new Set(allStrategyGroups.map((group) => group.name)));
+  }, [allStrategyGroups]);
   const orderedStrategyGroups = useMemo(
     () => applyStrategyWallOrder(strategyGroups, strategyGroupOrder),
     [strategyGroupOrder, strategyGroups]
@@ -986,6 +1025,15 @@ export function App() {
   const helperMinProbeIntervalSec =
     helper.testingSettings?.minProbeIntervalSec ?? DEFAULT_MIN_PROBE_INTERVAL_SEC;
   const helperMinProbeIntervalMinutes = Math.max(1, Math.ceil(helperMinProbeIntervalSec / 60));
+  useEffect(() => {
+    setDelayConcurrencyDraft(String(config.delayTestConcurrency ?? 4));
+  }, [config.delayTestConcurrency]);
+  useEffect(() => {
+    setDelayTimeoutDraft(String(helperDelayTestTimeoutMs));
+  }, [helperDelayTestTimeoutMs]);
+  useEffect(() => {
+    setMinProbeIntervalDraft(String(helperMinProbeIntervalMinutes));
+  }, [helperMinProbeIntervalMinutes]);
   const localBehaviorButtonLabel = detecting
     ? 'Saving...'
     : localBehaviorStatus?.tone === 'ok'
@@ -1006,7 +1054,8 @@ export function App() {
   const helperButtonTitle = (action: string) =>
     helperStatusAction === action && helperActionStatus ? helperActionStatus.text : undefined;
   const singBoxRemoteProfileUri = buildSingBoxRemoteProfileUri(configQrUrl, 'SingDeck');
-  const configQrUrlNeedsLan = !configQrUrl.trim() || isLoopbackUrl(configQrUrl);
+  const configQrResolving = configQrOpening && !configQrUrl.trim();
+  const configQrUrlNeedsLan = !configQrResolving && (!configQrUrl.trim() || isLoopbackUrl(configQrUrl));
   const helperGroupByName = useMemo(() => new Map(helper.groups.map((group) => [group.name, group])), [helper.groups]);
   const nodeScoreGroups = useMemo(() => {
     const helperGroupNames = new Set(helper.groups.map((group) => group.name));
@@ -1060,6 +1109,16 @@ export function App() {
     }
   }, [helper.nodeSources, selectedNodeSourceName]);
 
+  useEffect(() => {
+    if (activeRoute !== 'connections') {
+      setSelectedConnectionId(null);
+      return;
+    }
+    if (selectedConnectionId && !connections.connections.some((connection) => connection.id === selectedConnectionId)) {
+      setSelectedConnectionId(null);
+    }
+  }, [activeRoute, connections.connections, selectedConnectionId]);
+
   const activeHelperGroup = activeStrategyGroup ? helperGroupByName.get(activeStrategyGroup.name) : undefined;
   const activeHelperScores = activeStrategyGroup ? helper.scoresByGroup[activeStrategyGroup.name] : undefined;
   const activeHelperScoreByName = useMemo(
@@ -1070,7 +1129,10 @@ export function App() {
     activeStrategyGroup
       ? activeHelperGroup?.config.testUrl || proxies.groupTestUrls[activeStrategyGroup.name] || helperDefaultTestUrl
       : helperDefaultTestUrl;
-  const activeGroupConfig = activeHelperGroup?.config ?? fallbackGroupConfig(activeGroupTestUrl);
+  const activeGroupConfig =
+    activeStrategyGroup && groupConfigDrafts[activeStrategyGroup.name]
+      ? groupConfigDrafts[activeStrategyGroup.name]
+      : activeHelperGroup?.config ?? fallbackGroupConfig(activeGroupTestUrl);
   const activeProbeExecution = activeStrategyGroup
     ? resolveProbeExecution(activeStrategyGroup, activeGroupConfig.mode)
     : null;
@@ -1099,6 +1161,14 @@ export function App() {
     selectedScore: activeSelectedScore,
     testUrl: activeProbeExecution?.mode === 'native-urltest' ? 'sing-box urltest.url' : activeGroupTestUrl
   });
+  const activeGroupConfigSaveStatus =
+    activeStrategyGroup && groupConfigSaveStatus?.groupName === activeStrategyGroup.name ? groupConfigSaveStatus : null;
+  useEffect(() => {
+    setActiveProbeIntervalDraft(String(activeInspectorModel.intervalMinutes));
+  }, [activeInspectorModel.intervalMinutes, activeStrategyGroup?.name]);
+  useEffect(() => {
+    setGroupConfigSaveStatus(null);
+  }, [activeStrategyGroup?.name]);
   const activeGroupBusy = Boolean(
     activeStrategyGroup && (activeProbeGroupNames.has(activeStrategyGroup.name) || activeNativeGroupTesting)
   );
@@ -1148,6 +1218,10 @@ export function App() {
       .slice(0, 6);
   }, [allProxyNodes]);
   const topology = useMemo(() => buildConnectionTopology(connections.connections), [connections.connections]);
+  const selectedConnection = useMemo(
+    () => connections.connections.find((connection) => connection.id === selectedConnectionId) ?? null,
+    [connections.connections, selectedConnectionId]
+  );
   const ruleHitSummary = useMemo(() => {
     const counts = connections.connections.reduce<Record<string, number>>((accumulator, connection) => {
       const rule = topologyRuleLabel(connection.rule || 'unknown');
@@ -1443,6 +1517,7 @@ export function App() {
 
   const commitDelayTestTimeout = async (timeout: number) => {
     setForm((current) => ({ ...current, delayTestTimeoutMs: timeout }));
+    setDelayTimeoutDraft(String(timeout));
     if (!helperServiceAvailable) {
       updateConfig({ delayTestTimeoutMs: timeout });
       return;
@@ -1451,6 +1526,36 @@ export function App() {
     await useHelperStore.getState().saveDelayTestTimeout(timeout);
     const savedTimeout = useHelperStore.getState().testingSettings?.delayTestTimeoutMs ?? timeout;
     updateConfig({ delayTestTimeoutMs: savedTimeout });
+    setDelayTimeoutDraft(String(savedTimeout));
+  };
+
+  const commitDelayConcurrency = (fallback = config.delayTestConcurrency ?? 4) => {
+    const concurrency = parseIntegerDraft(delayConcurrencyDraft, fallback, 1, 64);
+    setDelayConcurrencyDraft(String(concurrency));
+    setForm((current) => ({ ...current, delayTestConcurrency: concurrency }));
+    updateConfig({ delayTestConcurrency: concurrency });
+  };
+
+  const commitMinimumProbeInterval = async () => {
+    const minutes = parseIntegerDraft(minProbeIntervalDraft, helperMinProbeIntervalMinutes, 1, 1440);
+    setMinProbeIntervalDraft(String(minutes));
+    await helper.saveMinProbeInterval(minutes * 60);
+  };
+
+  const commitActiveProbeInterval = () => {
+    if (!activeStrategyGroup) {
+      return;
+    }
+    const minutes = parseIntegerDraft(
+      activeProbeIntervalDraft,
+      activeInspectorModel.intervalMinutes,
+      helperMinProbeIntervalMinutes,
+      1440
+    );
+    setActiveProbeIntervalDraft(String(minutes));
+    saveGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+      probeIntervalSec: minutes * 60
+    });
   };
 
   const handleConfigFileLoad = (event: ChangeEvent<HTMLInputElement>) => {
@@ -1464,7 +1569,10 @@ export function App() {
     void file.text().then((content) => configWorkspace.loadConfigFile(content, `file:${file.name}`));
   };
 
-  const saveGroupConfigFor = (groupName: string, currentConfig: HelperGroupConfig, patch: Partial<HelperGroupConfig>) => {
+  const buildNextGroupConfig = (
+    currentConfig: HelperGroupConfig,
+    patch: Partial<HelperGroupConfig>
+  ): HelperGroupConfig => {
     const hasTestUrlPatch = Object.prototype.hasOwnProperty.call(patch, 'testUrl');
     const nextProbeIntervalSec =
       patch.probeIntervalSec === undefined
@@ -1477,8 +1585,61 @@ export function App() {
       testUrl: ((patch.testUrl ?? currentConfig.testUrl) || helperDefaultTestUrl).trim() || helperDefaultTestUrl,
       testUrlOverridden: patch.testUrlOverridden ?? (hasTestUrlPatch ? true : currentConfig.testUrlOverridden)
     };
+    return nextConfig;
+  };
+
+  const draftGroupConfigFor = (groupName: string, currentConfig: HelperGroupConfig, patch: Partial<HelperGroupConfig>) => {
+    const nextConfig = buildNextGroupConfig(currentConfig, patch);
+    setGroupConfigDrafts((current) => ({ ...current, [groupName]: nextConfig }));
     proxies.setGroupTestUrl(groupName, nextConfig.testUrl);
+    return nextConfig;
+  };
+
+  const saveGroupConfigFor = (groupName: string, currentConfig: HelperGroupConfig, patch: Partial<HelperGroupConfig>) => {
+    const nextConfig = draftGroupConfigFor(groupName, currentConfig, patch);
     void helper.saveGroupConfig(groupName, nextConfig);
+  };
+
+  const saveActiveGroupConfig = async () => {
+    if (!activeStrategyGroup || !helperServiceAvailable) {
+      return;
+    }
+
+    const intervalMinutes = parseIntegerDraft(
+      activeProbeIntervalDraft,
+      activeInspectorModel.intervalMinutes,
+      helperMinProbeIntervalMinutes,
+      1440
+    );
+    const nextConfig = buildNextGroupConfig(activeGroupConfig, {
+      probeIntervalSec: intervalMinutes * 60
+    });
+    setActiveProbeIntervalDraft(String(intervalMinutes));
+    setGroupConfigDrafts((current) => ({ ...current, [activeStrategyGroup.name]: nextConfig }));
+    proxies.setGroupTestUrl(activeStrategyGroup.name, nextConfig.testUrl);
+    commitDelayConcurrency(4);
+
+    setGroupConfigSaveStatus({
+      groupName: activeStrategyGroup.name,
+      tone: 'saving',
+      text: 'Saving...'
+    });
+    await helper.saveGroupConfig(activeStrategyGroup.name, nextConfig);
+    const saveError = useHelperStore.getState().error;
+    if (saveError) {
+      setGroupConfigSaveStatus({
+        groupName: activeStrategyGroup.name,
+        tone: 'bad',
+        text: 'Save failed'
+      });
+      return;
+    }
+
+    setGroupConfigSaveStatus({
+      groupName: activeStrategyGroup.name,
+      tone: 'ok',
+      text: 'Saved'
+    });
   };
 
   const runGroupProbe = async (group: ProxyRecord | null) => {
@@ -1487,7 +1648,10 @@ export function App() {
     }
 
     const helperGroup = helperGroupByName.get(group.name);
-    const rowConfig = helperGroup?.config ?? fallbackGroupConfig(proxies.groupTestUrls[group.name] || helperDefaultTestUrl);
+    const rowConfig =
+      groupConfigDrafts[group.name] ??
+      helperGroup?.config ??
+      fallbackGroupConfig(proxies.groupTestUrls[group.name] || helperDefaultTestUrl);
     await useHelperStore.getState().probeGroup(group.name, config.delayTestConcurrency ?? 4);
     const probeResult = useHelperStore.getState().scoresByGroup[group.name];
     if (rowConfig.autoSwitch && isSelectableProxyGroup(group) && probeResult?.applyError === null) {
@@ -1502,7 +1666,10 @@ export function App() {
     }
 
     const helperGroup = helperGroupByName.get(group.name);
-    const rowConfig = helperGroup?.config ?? fallbackGroupConfig(proxies.groupTestUrls[group.name] || helperDefaultTestUrl);
+    const rowConfig =
+      groupConfigDrafts[group.name] ??
+      helperGroup?.config ??
+      fallbackGroupConfig(proxies.groupTestUrls[group.name] || helperDefaultTestUrl);
     const execution = resolveProbeExecution(group, rowConfig.mode);
     if (execution.mode === 'native-urltest') {
       await proxies.testNativeGroupDelay(group.name, rowConfig.testUrl);
@@ -1517,16 +1684,24 @@ export function App() {
   };
 
   const openConfigQr = async () => {
-    await helper.saveConfigPath();
-    await helper.checkHealth();
-    const liveHelper = useHelperStore.getState();
-    const nextUrl = resolveConfigDownloadUrl({
-      helperUrl: liveHelper.helperUrl,
-      mobileConfigUrl: liveHelper.health?.mobileConfigUrl,
-      pageHostname: window.location.hostname
-    });
-    setConfigQrUrl(nextUrl && !isLoopbackUrl(nextUrl) ? nextUrl : '');
+    setConfigQrOpening(true);
     setConfigQrOpen(true);
+    setConfigQrUrl('');
+    setConfigQrCopied(false);
+    try {
+      await helper.saveConfigPath();
+      await helper.checkHealth();
+      const liveHelper = useHelperStore.getState();
+      const nextUrl = resolveConfigDownloadUrl({
+        helperUrl: liveHelper.helperUrl,
+        mobileConfigUrl: liveHelper.health?.mobileConfigUrl,
+        pageHostname: window.location.hostname
+      });
+      setConfigQrUrl(nextUrl && !isLoopbackUrl(nextUrl) ? nextUrl : '');
+      setConfigQrOpen(true);
+    } finally {
+      setConfigQrOpening(false);
+    }
   };
 
   const copyConfigQrUrl = async () => {
@@ -1646,13 +1821,24 @@ export function App() {
       return next;
     });
   };
+  const collapseAllStrategyGroups = () => {
+    setCollapsedStrategyGroups(new Set(strategyWallGroups.map((group) => group.name)));
+  };
+  const expandAllStrategyGroups = () => {
+    setCollapsedStrategyGroups(new Set());
+  };
 
-  const moveStrategyGroupBefore = (sourceName: string, targetName: string) => {
+  const moveStrategyGroupNearTarget = (
+    sourceName: string,
+    targetName: string,
+    placement: 'before' | 'after'
+  ) => {
     setStrategyGroupOrder((current) =>
-      moveStrategyWallGroupOrder(
+      moveStrategyWallGroupOrderNearTarget(
         current,
         sourceName,
         targetName,
+        placement,
         strategyGroups.map((group) => group.name)
       )
     );
@@ -1664,12 +1850,27 @@ export function App() {
     setDraggingStrategyGroupName(groupName);
   };
 
+  const handleStrategyGroupDragOver = (event: DragEvent<HTMLElement>, targetName: string) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const sourceName = event.dataTransfer.getData('text/plain') || draggingStrategyGroupName;
+    if (!sourceName || sourceName === targetName) {
+      return;
+    }
+
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const placement = event.clientY > bounds.top + bounds.height / 2 ? 'after' : 'before';
+    moveStrategyGroupNearTarget(sourceName, targetName, placement);
+  };
+
   const handleStrategyGroupDrop = (event: DragEvent<HTMLElement>, targetName: string) => {
     event.preventDefault();
     event.stopPropagation();
     const sourceName = event.dataTransfer.getData('text/plain') || draggingStrategyGroupName;
     if (sourceName && sourceName !== targetName) {
-      moveStrategyGroupBefore(sourceName, targetName);
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const placement = event.clientY > bounds.top + bounds.height / 2 ? 'after' : 'before';
+      moveStrategyGroupNearTarget(sourceName, targetName, placement);
     }
     setDraggingStrategyGroupName(null);
   };
@@ -1778,13 +1979,13 @@ export function App() {
           </div>
           <div className="quick-stats">
             <button
-              className="ghost-action qr-action"
-              disabled={!helperServiceAvailable}
+              className={`ghost-action qr-action ${configQrOpening ? 'loading' : ''}`}
+              disabled={!helperServiceAvailable || configQrOpening}
               onClick={() => void openConfigQr()}
               type="button"
             >
               <QrCode size={14} />
-              Config QR
+              {configQrOpening ? 'Opening QR' : 'Config QR'}
             </button>
             <span className={`status-chip ${detection?.ok ? 'ok' : 'warn'}`}>
               <Wifi size={14} />
@@ -1809,7 +2010,13 @@ export function App() {
               <div className="qr-head">
                 <div className="qr-title">
                   <strong>Config QR</strong>
-                  <span>{configQrUrlNeedsLan ? 'LAN helper URL required' : 'Remote profile import'}</span>
+                  <span>
+                    {configQrResolving
+                      ? 'Preparing remote profile'
+                      : configQrUrlNeedsLan
+                        ? 'LAN helper URL required'
+                        : 'Remote profile import'}
+                  </span>
                 </div>
                 <button
                   aria-label="Close config QR"
@@ -1822,7 +2029,9 @@ export function App() {
               </div>
               <div className="qr-body">
                 <div className={`qr-code-box ${configQrUrlNeedsLan ? 'blocked' : ''}`}>
-                  {configQrUrlNeedsLan ? (
+                  {configQrResolving ? (
+                    <span className="qr-code-hint">Preparing URL</span>
+                  ) : configQrUrlNeedsLan ? (
                     <span className="qr-code-hint">LAN helper URL required</span>
                   ) : configQrDataUrl ? (
                     <img src={configQrDataUrl} alt="sing-box config download QR" />
@@ -1833,12 +2042,16 @@ export function App() {
                 <div className="qr-meta">
                   <div className={`qr-state ${configQrUrlNeedsLan ? 'warn' : 'ok'}`}>
                     <span aria-hidden="true" />
-                    {configQrUrlNeedsLan ? 'Needs LAN URL' : 'Ready to scan'}
+                    {configQrResolving ? 'Preparing URL' : configQrUrlNeedsLan ? 'Needs LAN URL' : 'Ready to scan'}
                   </div>
                   <label className="qr-url-field">
                     <span>Download URL</span>
                     <input value={configQrUrl} onChange={(event) => setConfigQrUrl(event.target.value)} />
-                    {configQrUrlNeedsLan ? <small>Use the helper machine LAN address or SINGDECK_HELPER_PUBLIC_URL.</small> : null}
+                    <small>
+                      {configQrUrlNeedsLan
+                        ? 'No reachable LAN URL. Start helper on 0.0.0.0:9531 or set SINGDECK_HELPER_PUBLIC_URL.'
+                        : 'If the phone reports connection refused, allow TCP 9531 through the helper machine firewall.'}
+                    </small>
                   </label>
                   <button
                     className="ghost-action compact-icon-action qr-copy"
@@ -2387,10 +2600,9 @@ export function App() {
                       max={12}
                       min={1}
                       type="number"
-                      value={form.delayTestConcurrency ?? 4}
-                      onChange={(event) =>
-                        setForm({ ...form, delayTestConcurrency: Number.parseInt(event.target.value, 10) || 1 })
-                      }
+                      value={delayConcurrencyDraft}
+                      onBlur={() => commitDelayConcurrency(4)}
+                      onChange={(event) => setDelayConcurrencyDraft(event.target.value)}
                     />
                   </label>
                   <label>
@@ -2400,17 +2612,17 @@ export function App() {
                       min={500}
                       step={500}
                       type="number"
-                      value={form.delayTestTimeoutMs ?? helperDelayTestTimeoutMs}
+                      value={delayTimeoutDraft}
                       onBlur={(event) => {
-                        const timeout = Number.parseInt(event.currentTarget.value, 10) || DEFAULT_DELAY_TEST_TIMEOUT_MS;
+                        const timeout = parseIntegerDraft(
+                          event.currentTarget.value,
+                          helperDelayTestTimeoutMs,
+                          500,
+                          60000
+                        );
                         void commitDelayTestTimeout(timeout);
                       }}
-                      onChange={(event) =>
-                        setForm({
-                          ...form,
-                          delayTestTimeoutMs: Number.parseInt(event.target.value, 10) || DEFAULT_DELAY_TEST_TIMEOUT_MS
-                        })
-                      }
+                      onChange={(event) => setDelayTimeoutDraft(event.target.value)}
                     />
                   </label>
                   <label>
@@ -2420,22 +2632,9 @@ export function App() {
                       max={1440}
                       min={1}
                       type="number"
-                      value={helperMinProbeIntervalMinutes}
-                      onBlur={(event) => {
-                        const minutes = Number.parseInt(event.currentTarget.value, 10) || 1;
-                        void helper.saveMinProbeInterval(Math.max(1, minutes) * 60);
-                      }}
-                      onChange={(event) => {
-                        const minutes = Number.parseInt(event.target.value, 10) || 1;
-                        if (helper.testingSettings) {
-                          useHelperStore.setState({
-                            testingSettings: {
-                              ...helper.testingSettings,
-                              minProbeIntervalSec: Math.max(1, minutes) * 60
-                            }
-                          });
-                        }
-                      }}
+                      value={minProbeIntervalDraft}
+                      onBlur={() => void commitMinimumProbeInterval()}
+                      onChange={(event) => setMinProbeIntervalDraft(event.target.value)}
                     />
                   </label>
                 </div>
@@ -2582,6 +2781,26 @@ export function App() {
                   <span>Strategy wall</span>
                   <strong>{strategyWallGroups.length} / {strategyGroups.length} groups</strong>
                 </div>
+                <div className="proxy-board-bulk-actions" aria-label="Strategy wall display controls">
+                  <button
+                    aria-label="Collapse all strategy groups"
+                    className="quiet-action"
+                    disabled={strategyWallGroups.length === 0}
+                    onClick={collapseAllStrategyGroups}
+                    type="button"
+                  >
+                    Collapse all
+                  </button>
+                  <button
+                    aria-label="Expand all strategy groups"
+                    className="quiet-action"
+                    disabled={strategyWallGroups.length === 0}
+                    onClick={expandAllStrategyGroups}
+                    type="button"
+                  >
+                    Expand all
+                  </button>
+                </div>
                 <label className="proxy-source-filter">
                   <span>Source</span>
                   <select
@@ -2628,7 +2847,10 @@ export function App() {
                   const selectedProxy = proxyByName.get(proxy.now);
                   const selectedDelay = proxyDelayByName.get(proxy.now) ?? proxy.delay;
                   const helperGroup = helperGroupByName.get(proxy.name);
-                  const rowConfig = helperGroup?.config ?? fallbackGroupConfig(proxies.groupTestUrls[proxy.name] || helperDefaultTestUrl);
+                  const rowConfig =
+                    groupConfigDrafts[proxy.name] ??
+                    helperGroup?.config ??
+                    fallbackGroupConfig(proxies.groupTestUrls[proxy.name] || helperDefaultTestUrl);
                   const execution = resolveProbeExecution(proxy, rowConfig.mode);
                   const groupScores = helper.scoresByGroup[proxy.name]?.nodes ?? [];
                   const latestGroupUpdate = latestScoreUpdateAt(groupScores);
@@ -2675,10 +2897,7 @@ export function App() {
                       draggable
                       key={proxy.name}
                       onDragEnd={() => setDraggingStrategyGroupName(null)}
-                      onDragOver={(event) => {
-                        event.preventDefault();
-                        event.dataTransfer.dropEffect = 'move';
-                      }}
+                      onDragOver={(event) => handleStrategyGroupDragOver(event, proxy.name)}
                       onDragStart={(event) => handleStrategyGroupDragStart(event, proxy.name)}
                       onDrop={(event) => handleStrategyGroupDrop(event, proxy.name)}
                       onClick={() => setActiveStrategyGroupName(proxy.name)}
@@ -2915,11 +3134,9 @@ export function App() {
                     <div className="mini-stat"><span>Schedule</span><strong>{activeInspectorModel.scheduleLabel}</strong></div>
                   </div>
 
-                  {!helperServiceAvailable ? (
+                  {helperAvailability === 'offline' ? (
                     <div className="inspector-warning">
-                      {helperAvailability === 'checking'
-                        ? 'Checking helper service. Score, helper delay, schedule, and URL settings will enable when ready.'
-                        : 'Helper service is offline. Score, helper delay, schedule, and URL settings are disabled.'}
+                      Helper service is offline. Score, helper delay, schedule, and URL settings are disabled.
                     </div>
                   ) : null}
                   {activeHelperScores?.applyError ? (
@@ -2974,8 +3191,13 @@ export function App() {
                             ? 'sing-box urltest.url'
                             : activeGroupConfig.testUrl
                         }
-                        onChange={(event) =>
+                        onBlur={(event) =>
                           saveGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+                            testUrl: event.currentTarget.value
+                          })
+                        }
+                        onChange={(event) =>
+                          draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
                             testUrl: event.target.value
                           })
                         }
@@ -3039,13 +3261,9 @@ export function App() {
                         max={1440}
                         min={helperMinProbeIntervalMinutes}
                         type="number"
-                        value={Math.max(activeInspectorModel.intervalMinutes, helperMinProbeIntervalMinutes)}
-                        onChange={(event) =>
-                          saveGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
-                            probeIntervalSec:
-                              Math.max(Number.parseInt(event.target.value, 10) || 1, helperMinProbeIntervalMinutes) * 60
-                          })
-                        }
+                        value={activeProbeIntervalDraft}
+                        onBlur={commitActiveProbeInterval}
+                        onChange={(event) => setActiveProbeIntervalDraft(event.target.value)}
                       />
                     </label>
 
@@ -3056,17 +3274,29 @@ export function App() {
                         max={64}
                         min={1}
                         type="number"
-                        value={config.delayTestConcurrency ?? 4}
-                        onChange={(event) =>
-                          updateConfig({
-                            delayTestConcurrency: Number.parseInt(event.target.value, 10) || 1
-                          })
-                        }
+                        value={delayConcurrencyDraft}
+                        onBlur={() => commitDelayConcurrency(4)}
+                        onChange={(event) => setDelayConcurrencyDraft(event.target.value)}
                       />
                     </label>
                   </form>
 
                   <div className="inspector-actions">
+                    <button
+                      className={`ghost-action ${
+                        activeGroupConfigSaveStatus?.tone === 'ok'
+                          ? 'status-ok'
+                          : activeGroupConfigSaveStatus?.tone === 'bad'
+                            ? 'status-warn'
+                            : ''
+                      }`}
+                      disabled={!helperServiceAvailable || activeGroupConfigSaveStatus?.tone === 'saving'}
+                      onClick={() => void saveActiveGroupConfig()}
+                      type="button"
+                    >
+                      <Save size={14} />
+                      {activeGroupConfigSaveStatus?.text ?? 'Save settings'}
+                    </button>
                     <button className="primary-action" disabled={!activeCanRunProbe} onClick={runActiveGroupProbe} type="button">
                       {activeGroupActivity
                         ? activeGroupConfig.mode === 'score'
@@ -3125,7 +3355,20 @@ export function App() {
                     .includes(connections.query.toLowerCase())
                 )
                 .map((connection) => (
-                  <div className="connection-row" key={connection.id}>
+                  <div
+                    className={`connection-row ${selectedConnectionId === connection.id ? 'selected' : ''}`}
+                    key={connection.id}
+                    onClick={() => setSelectedConnectionId(connection.id)}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter' && event.key !== ' ') {
+                        return;
+                      }
+                      event.preventDefault();
+                      setSelectedConnectionId(connection.id);
+                    }}
+                    role="button"
+                    tabIndex={0}
+                  >
                     <div>
                       <strong>{connection.target}</strong>
                       <span>{connection.rule}</span>
@@ -3136,13 +3379,64 @@ export function App() {
                         {connection.download} / {connection.upload}
                       </span>
                     </div>
-                    <button className="ghost-action danger" onClick={() => void connections.closeConnection(connection.id)}>
+                    <button
+                      className="ghost-action danger"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void connections.closeConnection(connection.id);
+                      }}
+                    >
                       Drop
                     </button>
                   </div>
                 ))}
             </div>
           </article>
+          {selectedConnection ? (
+            <aside className="connection-detail-drawer" aria-label="Connection details">
+              <div className="connection-detail-head">
+                <div>
+                  <span>Connection</span>
+                  <strong>{selectedConnection.target}</strong>
+                </div>
+                <button
+                  aria-label="Close connection details"
+                  className="quiet-action icon"
+                  onClick={() => setSelectedConnectionId(null)}
+                  type="button"
+                >
+                  <X size={15} />
+                </button>
+              </div>
+              <div className="connection-detail-grid">
+                <span>ID</span>
+                <strong>{selectedConnection.id}</strong>
+                <span>Source</span>
+                <strong>{selectedConnection.source}</strong>
+                <span>Target</span>
+                <strong>{selectedConnection.target}</strong>
+                <span>Network</span>
+                <strong>{selectedConnection.network}</strong>
+                <span>Rule</span>
+                <strong>{selectedConnection.rule}</strong>
+                <span>Outbound</span>
+                <strong>{selectedConnection.outbound}</strong>
+                <span>Chains</span>
+                <strong>{selectedConnection.chains.length > 0 ? selectedConnection.chains.join(' -> ') : '--'}</strong>
+                <span>Traffic</span>
+                <strong>{selectedConnection.download} / {selectedConnection.upload}</strong>
+                <span>Started</span>
+                <strong>{selectedConnection.startedAt || '--'}</strong>
+              </div>
+              <button
+                className="ghost-action danger"
+                onClick={() => void connections.closeConnection(selectedConnection.id)}
+                type="button"
+              >
+                Drop connection
+              </button>
+            </aside>
+          ) : null}
         </section>
         ) : null}
 

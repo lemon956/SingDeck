@@ -123,6 +123,27 @@ describe('proxy store latency tests', () => {
     expect(useProxyStore.getState().proxies.find((proxy) => proxy.name === 'Other')?.delay).toBe(120);
   });
 
+  it('updates only the tested node delay without refreshing every proxy', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.endsWith('/proxies')) {
+          return new Response('unexpected full refresh', { status: 500 });
+        }
+        return jsonResponse({ delay: 55 });
+      })
+    );
+
+    await useProxyStore.getState().testProxy('hk-1', 'Auto');
+
+    expect(urls.some((url) => url.endsWith('/proxies'))).toBe(false);
+    expect(useProxyStore.getState().proxies.find((proxy) => proxy.name === 'hk-1')?.delay).toBe(55);
+    expect(useProxyStore.getState().proxies.find((proxy) => proxy.name === 'jp-1')?.delay).toBe(88);
+  });
+
   it('updates selected proxy immediately while the controller switch is pending', async () => {
     let resolveSwitch!: () => void;
     vi.stubGlobal(

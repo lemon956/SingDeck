@@ -34,5 +34,8 @@ export function resolveConfigDownloadUrl(input: {
   if (input.mobileConfigUrl && !isLoopbackUrl(input.mobileConfigUrl)) {
     return input.mobileConfigUrl;
   }
+  if (isLoopbackUrl(input.helperUrl)) {
+    return '';
+  }
   return buildConfigDownloadUrl(input.helperUrl, input.pageHostname);
 }

@@ -161,10 +161,18 @@ export const useProxyStore = create<ProxyState>()(
 
         try {
           const target = resolveNowProxyName(name, proxyMapFrom(get().proxies));
-          await client.getJson(buildProxyDelayPath(target, { timeout, url }));
-          await get().refresh();
+          const response = await client.getJson(buildProxyDelayPath(target, { timeout, url }));
+          const delay = delayFromResponse(response);
+          set((current) => ({
+            proxies: current.proxies.map((proxy) => (proxy.name === target ? { ...proxy, delay } : proxy)),
+            lastUpdatedAt: new Date().toISOString()
+          }));
         } catch (error) {
-          set({ error: `Delay test failed for ${name}: ${formatProxyError(error)}` });
+          const target = resolveNowProxyName(name, proxyMapFrom(get().proxies));
+          set((current) => ({
+            proxies: current.proxies.map((proxy) => (proxy.name === target ? { ...proxy, delay: null } : proxy)),
+            error: `Delay test failed for ${name}: ${formatProxyError(error)}`
+          }));
         } finally {
           set((current) => ({
             testingProxies: current.testingProxies.filter((item) => item !== name)
@@ -422,6 +430,18 @@ function nativeGroupDelayFromResponse(response: unknown, group: string, proxies:
 
   const numericValues = Object.values(values).filter((value): value is number => typeof value === 'number');
   return numericValues.length > 0 ? Math.min(...numericValues) : null;
+}
+
+function delayFromResponse(response: unknown): number | null {
+  if (typeof response === 'number') {
+    return response;
+  }
+  if (!response || typeof response !== 'object') {
+    return null;
+  }
+
+  const values = response as Record<string, unknown>;
+  return typeof values.delay === 'number' ? values.delay : null;
 }
 
 function formatProxyError(error: unknown): string {

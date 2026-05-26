@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useControllerStore } from '../state/controllerStore';
+import { useConnectionStore } from '../state/connectionStore';
 import { useHelperStore } from '../state/helperStore';
 import { useProxyStore } from '../state/proxyStore';
 import { App } from './App';
@@ -193,6 +194,10 @@ function setScoreTimes(times: { hk?: string | null; jp?: string | null }) {
   }));
 }
 
+function expandStrategyWall() {
+  fireEvent.click(screen.getByRole('button', { name: /Expand all strategy groups/i }));
+}
+
 describe('App proxy workspace', () => {
   beforeEach(() => {
     setupProxyWorkspace();
@@ -205,6 +210,7 @@ describe('App proxy workspace', () => {
 
   it('shows node delay without active or standby status labels', () => {
     const { container } = render(<App />);
+    expandStrategyWall();
 
     const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card'));
 
@@ -213,6 +219,66 @@ describe('App proxy workspace', () => {
     expect(nodeCards.some((node) => within(node as HTMLElement).queryByText('212ms'))).toBe(true);
     expect(nodeCards.some((node) => within(node as HTMLElement).queryByText('active'))).toBe(false);
     expect(nodeCards.some((node) => within(node as HTMLElement).queryByText('standby'))).toBe(false);
+  });
+
+  it('starts with strategy groups collapsed and supports expanding or collapsing all groups', () => {
+    const { container } = render(<App />);
+
+    expect(container.querySelectorAll('.strategy-node-card')).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole('button', { name: /Expand all strategy groups/i }));
+    expect(container.querySelectorAll('.strategy-node-card')).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: /Collapse all strategy groups/i }));
+    expect(container.querySelectorAll('.strategy-node-card')).toHaveLength(0);
+  });
+
+  it('updates the inspector mode immediately while helper config save is pending', () => {
+    useHelperStore.setState({
+      saveGroupConfig: vi.fn(() => new Promise<void>(() => {}))
+    });
+
+    render(<App />);
+
+    const delayModeButton = screen.getByRole('button', { name: 'Delay' });
+    fireEvent.click(delayModeButton);
+
+    expect(delayModeButton).toHaveClass('active');
+  });
+
+  it('saves the current inspector draft when the save settings button is clicked', async () => {
+    const saveGroupConfig = vi.fn(async () => {});
+    useHelperStore.setState({ saveGroupConfig });
+
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText('Test URL'), {
+      target: { value: 'https://api.example.test/generate_204' }
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }));
+
+    await waitFor(() =>
+      expect(saveGroupConfig).toHaveBeenCalledWith(
+        'select',
+        expect.objectContaining({
+          testUrl: 'https://api.example.test/generate_204',
+          probeIntervalSec: 600
+        })
+      )
+    );
+  });
+
+  it('opens the config QR dialog immediately while helper refresh is pending', () => {
+    useHelperStore.setState({
+      saveConfigPath: vi.fn(() => new Promise<void>(() => {})),
+      checkHealth: vi.fn(async () => {})
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Config QR' }));
+
+    expect(screen.getByRole('dialog', { name: 'Config QR code' })).toBeInTheDocument();
+    expect(screen.getAllByText('Preparing URL').length).toBeGreaterThan(0);
   });
 
   it('shows helper checking before the first helper health result', () => {
@@ -237,6 +303,7 @@ describe('App proxy workspace', () => {
 
     expect(screen.getAllByText('Helper checking').length).toBeGreaterThan(0);
     expect(screen.queryByText('Helper offline')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Checking helper service/i)).not.toBeInTheDocument();
   });
 
   it('loads helper groups and scores after a refresh starts with unknown helper health', async () => {
@@ -349,6 +416,7 @@ describe('App proxy workspace', () => {
     useHelperStore.setState({ scoresByGroup: {} });
 
     const { container } = render(<App />);
+    expandStrategyWall();
     const scoreMarks = Array.from(container.querySelectorAll('.score-mark'));
     const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card')) as HTMLElement[];
     const hkNode = nodeCards.find((node) => within(node).queryByText('hk-1')) as HTMLElement;
@@ -478,6 +546,7 @@ describe('App proxy workspace', () => {
     }));
 
     const { container } = render(<App />);
+    expandStrategyWall();
     const groupMeta = container.querySelector('.strategy-card-meta') as HTMLElement;
     const groupDelayPills = Array.from(groupMeta.querySelectorAll('.delay-pill:not(.score-pill)'));
     const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card')) as HTMLElement[];
@@ -510,6 +579,7 @@ describe('App proxy workspace', () => {
     useHelperStore.setState({ probingGroups: ['select'] });
 
     const { container } = render(<App />);
+    expandStrategyWall();
     const scorePill = container.querySelector('.strategy-card-meta .score-pill') as HTMLElement;
     const scoreMarks = Array.from(container.querySelectorAll('.score-mark'));
 
@@ -523,6 +593,7 @@ describe('App proxy workspace', () => {
     useHelperStore.setState({ activeProbeGroups: ['select'] });
 
     const { container } = render(<App />);
+    expandStrategyWall();
     const groupCard = container.querySelector('.strategy-group-card') as HTMLElement;
     const groupHead = container.querySelector('.strategy-card-head') as HTMLElement;
     const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card'));
@@ -542,6 +613,7 @@ describe('App proxy workspace', () => {
     });
 
     const { container } = render(<App />);
+    expandStrategyWall();
     const groupCard = container.querySelector('.strategy-group-card') as HTMLElement;
     const groupHead = container.querySelector('.strategy-card-head') as HTMLElement;
     const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card')) as HTMLElement[];
@@ -787,6 +859,45 @@ describe('App proxy workspace', () => {
     expect(container.querySelector('.overview-scroll-buffer')).not.toBeNull();
   });
 
+  it('opens a right side connection detail drawer over the connections list', () => {
+    window.location.hash = '#/connections';
+    useConnectionStore.setState({
+      connections: [
+        {
+          id: 'conn-1',
+          source: '127.0.0.1',
+          target: 'example.com:443',
+          network: 'tcp',
+          upload: '1 KiB',
+          download: '2 KiB',
+          rule: 'DOMAIN example.com',
+          outbound: 'proxy-a',
+          chains: ['proxy-a', 'direct'],
+          startedAt: '2026-05-25T09:00:00Z'
+        }
+      ],
+      logs: [],
+      droppedLogCount: 0,
+      query: '',
+      logQuery: '',
+      logLevel: 'all',
+      loading: false,
+      error: null,
+      logStreaming: false,
+      logAbortController: null
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByText('example.com:443'));
+
+    const drawer = screen.getByLabelText('Connection details');
+    expect(drawer).toHaveClass('connection-detail-drawer');
+    expect(within(drawer).getByText('conn-1')).toBeInTheDocument();
+    expect(within(drawer).getByText('proxy-a -> direct')).toBeInTheDocument();
+    expect(screen.getByText('Live sessions')).toBeInTheDocument();
+  });
+
   it('exposes the network usage capture toggle in settings', () => {
     window.location.hash = '#/controller';
     const saveNetworkUsageSettings = vi.fn(async (settings) => {
@@ -859,6 +970,17 @@ describe('App proxy workspace', () => {
 
     resolveSave();
     await waitFor(() => expect(useControllerStore.getState().config.delayTestTimeoutMs).toBe(2000));
+  });
+
+  it('allows numeric settings inputs to be cleared while editing', () => {
+    window.location.hash = '#/controller';
+
+    render(<App />);
+
+    const timeoutInput = screen.getByLabelText('Timeout ms') as HTMLInputElement;
+    fireEvent.change(timeoutInput, { target: { value: '' } });
+
+    expect(timeoutInput.value).toBe('');
   });
 
   it('shows local behavior save status on the save button without inserting a status block', async () => {
