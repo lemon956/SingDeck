@@ -12,7 +12,11 @@ describe('connections', () => {
             destinationIP: '93.184.216.34',
             destinationPort: '443',
             sourceIP: '10.0.0.55',
-            network: 'tcp'
+            sourcePort: '50123',
+            network: 'tcp',
+            type: 'tun/tun',
+            dnsMode: 'normal',
+            processPath: '/usr/bin/browser'
           },
           chains: ['hk-1', 'Proxy'],
           rule: 'DOMAIN-SUFFIX',
@@ -26,10 +30,23 @@ describe('connections', () => {
     expect(connections).toEqual([
       expect.objectContaining({
         id: 'a',
-        source: '10.0.0.55',
+        source: '10.0.0.55:50123',
+        sourceIP: '10.0.0.55',
+        sourcePort: '50123',
         target: 'example.com:443',
+        destinationHost: 'example.com',
+        destinationIP: '93.184.216.34',
+        destinationPort: '443',
         outbound: 'hk-1',
-        rule: 'DOMAIN-SUFFIX example.com'
+        inboundType: 'tun/tun',
+        dnsMode: 'normal',
+        processPath: '/usr/bin/browser',
+        rule: 'DOMAIN-SUFFIX example.com',
+        ruleType: 'DOMAIN-SUFFIX',
+        rulePayload: 'example.com',
+        uploadBytes: 1024,
+        downloadBytes: 2048,
+        totalBytes: 3072
       })
     ]);
   });

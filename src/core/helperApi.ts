@@ -46,6 +46,7 @@ export type HelperTrafficSettings = {
 export type HelperNetworkUsageSettings = {
   enabled: boolean;
   retentionDays: number;
+  sampleIntervalSec?: number;
 };
 
 export type HelperGroup = {

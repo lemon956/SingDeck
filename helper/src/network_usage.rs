@@ -9,16 +9,23 @@ const MINUTE_MS: i64 = 60 * 1000;
 const HOUR_MS: i64 = 60 * MINUTE_MS;
 const SETTINGS_KEY: &str = "network_usage_settings";
 const LAST_SAMPLE_AT_KEY: &str = "network_usage_last_sample_at";
+const LAST_CLEANUP_AT_KEY: &str = "network_usage_last_cleanup_at";
 const DEFAULT_RETENTION_DAYS: i64 = 7;
 const MIN_RETENTION_DAYS: i64 = 1;
 pub const MAX_RETENTION_DAYS: i64 = 90;
+pub const DEFAULT_SAMPLE_INTERVAL_SEC: i64 = 5;
+const MIN_SAMPLE_INTERVAL_SEC: i64 = 2;
+pub const MAX_SAMPLE_INTERVAL_SEC: i64 = 3600;
 const MAX_QUERY_LIMIT: i64 = 200;
+const CLEANUP_INTERVAL_MS: i64 = HOUR_MS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkUsageSettings {
     pub enabled: bool,
     pub retention_days: i64,
+    #[serde(default = "default_sample_interval_sec")]
+    pub sample_interval_sec: i64,
 }
 
 impl Default for NetworkUsageSettings {
@@ -26,8 +33,13 @@ impl Default for NetworkUsageSettings {
         Self {
             enabled: false,
             retention_days: DEFAULT_RETENTION_DAYS,
+            sample_interval_sec: DEFAULT_SAMPLE_INTERVAL_SEC,
         }
     }
+}
+
+fn default_sample_interval_sec() -> i64 {
+    DEFAULT_SAMPLE_INTERVAL_SEC
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,6 +272,9 @@ pub fn normalize_settings(settings: NetworkUsageSettings) -> NetworkUsageSetting
         retention_days: settings
             .retention_days
             .clamp(MIN_RETENTION_DAYS, MAX_RETENTION_DAYS),
+        sample_interval_sec: settings
+            .sample_interval_sec
+            .clamp(MIN_SAMPLE_INTERVAL_SEC, MAX_SAMPLE_INTERVAL_SEC),
     }
 }
 
@@ -268,11 +283,13 @@ pub fn apply_connections_snapshot(
     snapshot: &Value,
     sampled_at_ms: i64,
 ) -> Result<()> {
-    let previous_sampled_at_ms = load_last_sample_at(conn)?;
+    let tx = conn.unchecked_transaction()?;
+    let previous_sampled_at_ms = load_last_sample_at(&tx)?;
     for sample in parse_connection_samples(snapshot) {
-        record_connection_sample(conn, &sample, sampled_at_ms, previous_sampled_at_ms)?;
+        record_connection_sample(&tx, &sample, sampled_at_ms, previous_sampled_at_ms)?;
     }
-    save_last_sample_at(conn, sampled_at_ms)?;
+    save_last_sample_at(&tx, sampled_at_ms)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -395,24 +412,32 @@ fn record_connection_sample(
 }
 
 fn load_last_sample_at(conn: &Connection) -> Result<Option<i64>> {
+    load_i64_kv(conn, LAST_SAMPLE_AT_KEY)
+}
+
+fn save_last_sample_at(conn: &Connection, sampled_at_ms: i64) -> Result<()> {
+    save_i64_kv(conn, LAST_SAMPLE_AT_KEY, sampled_at_ms)
+}
+
+fn load_i64_kv(conn: &Connection, key: &str) -> Result<Option<i64>> {
     Ok(conn
         .query_row(
             "SELECT value FROM kv WHERE key = ?1",
-            [LAST_SAMPLE_AT_KEY],
+            [key],
             |row| row.get::<_, String>(0),
         )
         .optional()?
         .and_then(|value| value.parse::<i64>().ok()))
 }
 
-fn save_last_sample_at(conn: &Connection, sampled_at_ms: i64) -> Result<()> {
+fn save_i64_kv(conn: &Connection, key: &str, value: i64) -> Result<()> {
     conn.execute(
         r#"
         INSERT INTO kv(key, value)
         VALUES(?1, ?2)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
         "#,
-        params![LAST_SAMPLE_AT_KEY, sampled_at_ms.to_string()],
+        params![key, value.to_string()],
     )?;
     Ok(())
 }
@@ -434,6 +459,7 @@ pub fn cleanup_old_usage(conn: &Connection, now_ms: i64, retention_days: i64) ->
     let cutoff = now_ms - normalize_settings(NetworkUsageSettings {
         enabled: true,
         retention_days,
+        sample_interval_sec: DEFAULT_SAMPLE_INTERVAL_SEC,
     })
     .retention_days
         * DAY_MS;
@@ -450,6 +476,24 @@ pub fn cleanup_old_usage(conn: &Connection, now_ms: i64, retention_days: i64) ->
         [cutoff],
     )?;
     Ok(())
+}
+
+pub fn cleanup_old_usage_if_due(
+    conn: &Connection,
+    now_ms: i64,
+    retention_days: i64,
+) -> Result<bool> {
+    let last_cleanup_at = load_i64_kv(conn, LAST_CLEANUP_AT_KEY)?;
+    if last_cleanup_at
+        .map(|timestamp| now_ms.saturating_sub(timestamp) < CLEANUP_INTERVAL_MS)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+
+    cleanup_old_usage(conn, now_ms, retention_days)?;
+    save_i64_kv(conn, LAST_CLEANUP_AT_KEY, now_ms)?;
+    Ok(true)
 }
 
 pub fn query_summary(
@@ -956,6 +1000,57 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_write_rolls_back_all_rows_when_one_sample_fails() {
+        let conn = test_db();
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER fail_bad_connection_last_seen
+            BEFORE INSERT ON network_usage_last_seen
+            WHEN NEW.connection_id = 'bad'
+            BEGIN
+              SELECT RAISE(ABORT, 'bad sample');
+            END;
+            "#,
+        )
+        .unwrap();
+
+        let result = apply_connections_snapshot(
+            &conn,
+            &json!({
+                "connections": [
+                    {
+                        "id": "good",
+                        "metadata": { "host": "good.test", "network": "tcp" },
+                        "chains": ["proxy-a"],
+                        "upload": 10,
+                        "download": 20
+                    },
+                    {
+                        "id": "bad",
+                        "metadata": { "host": "bad.test", "network": "tcp" },
+                        "chains": ["proxy-a"],
+                        "upload": 30,
+                        "download": 40
+                    }
+                ]
+            }),
+            60_000,
+        );
+
+        assert!(result.is_err());
+        let connection_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM network_usage_connections", [], |row| row.get(0))
+            .unwrap();
+        let last_seen_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM network_usage_last_seen", [], |row| row.get(0))
+            .unwrap();
+        let last_sample_at = load_last_sample_at(&conn).unwrap();
+        assert_eq!(connection_count, 0);
+        assert_eq!(last_seen_count, 0);
+        assert_eq!(last_sample_at, None);
+    }
+
+    #[test]
     fn cleanup_removes_data_older_than_retention_window() {
         let conn = test_db();
         apply_connections_snapshot(
@@ -988,11 +1083,23 @@ mod tests {
             &NetworkUsageSettings {
                 enabled: true,
                 retention_days: 120,
+                sample_interval_sec: 1,
             },
         )
         .unwrap();
 
         assert_eq!(saved.retention_days, MAX_RETENTION_DAYS);
+        assert_eq!(saved.sample_interval_sec, MIN_SAMPLE_INTERVAL_SEC);
         assert_eq!(load_settings(&conn).unwrap(), saved);
+
+        let legacy_settings = serde_json::from_value::<NetworkUsageSettings>(json!({
+            "enabled": true,
+            "retentionDays": 3
+        }))
+        .unwrap();
+        assert_eq!(
+            normalize_settings(legacy_settings).sample_interval_sec,
+            DEFAULT_SAMPLE_INTERVAL_SEC
+        );
     }
 }

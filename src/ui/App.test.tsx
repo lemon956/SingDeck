@@ -268,6 +268,28 @@ describe('App proxy workspace', () => {
     );
   });
 
+  it('saves the inspector draft only once when an edited field blurs before save is clicked', async () => {
+    const saveGroupConfig = vi.fn(async () => {});
+    useHelperStore.setState({ saveGroupConfig });
+
+    render(<App />);
+
+    const testUrlInput = screen.getByLabelText('Test URL');
+    fireEvent.change(testUrlInput, {
+      target: { value: 'https://single-save.example.test/generate_204' }
+    });
+    fireEvent.blur(testUrlInput);
+    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }));
+
+    await waitFor(() => expect(saveGroupConfig).toHaveBeenCalledTimes(1));
+    expect(saveGroupConfig).toHaveBeenCalledWith(
+      'select',
+      expect.objectContaining({
+        testUrl: 'https://single-save.example.test/generate_204'
+      })
+    );
+  });
+
   it('opens the config QR dialog immediately while helper refresh is pending', () => {
     useHelperStore.setState({
       saveConfigPath: vi.fn(() => new Promise<void>(() => {})),
@@ -865,12 +887,27 @@ describe('App proxy workspace', () => {
       connections: [
         {
           id: 'conn-1',
-          source: '127.0.0.1',
+          source: '127.0.0.1:51111',
+          sourceIP: '127.0.0.1',
+          sourcePort: '51111',
+          sourceEndpoint: '127.0.0.1:51111',
           target: 'example.com:443',
+          destinationHost: 'example.com',
+          destinationIP: '93.184.216.34',
+          destinationPort: '443',
+          destinationEndpoint: 'example.com:443',
           network: 'tcp',
+          inboundType: 'mixed',
+          dnsMode: 'normal',
+          processPath: '/usr/bin/browser',
           upload: '1 KiB',
+          uploadBytes: 1024,
           download: '2 KiB',
+          downloadBytes: 2048,
+          totalBytes: 3072,
           rule: 'DOMAIN example.com',
+          ruleType: 'DOMAIN',
+          rulePayload: 'example.com',
           outbound: 'proxy-a',
           chains: ['proxy-a', 'direct'],
           startedAt: '2026-05-25T09:00:00Z'
@@ -893,8 +930,16 @@ describe('App proxy workspace', () => {
 
     const drawer = screen.getByLabelText('Connection details');
     expect(drawer).toHaveClass('connection-detail-drawer');
+    expect(within(drawer).getByText('Endpoint')).toBeInTheDocument();
+    expect(within(drawer).getByText('Route')).toBeInTheDocument();
+    expect(within(drawer).getByText('Process')).toBeInTheDocument();
+    expect(within(drawer).getByText('Traffic')).toBeInTheDocument();
     expect(within(drawer).getByText('conn-1')).toBeInTheDocument();
+    expect(within(drawer).getByText('127.0.0.1:51111')).toBeInTheDocument();
+    expect(within(drawer).getByText('93.184.216.34')).toBeInTheDocument();
     expect(within(drawer).getByText('proxy-a -> direct')).toBeInTheDocument();
+    expect(within(drawer).getByText('/usr/bin/browser')).toBeInTheDocument();
+    expect(within(drawer).getByText('normal')).toBeInTheDocument();
     expect(screen.getByText('Live sessions')).toBeInTheDocument();
   });
 
@@ -914,7 +959,32 @@ describe('App proxy workspace', () => {
     const checkbox = within(label).getByRole('checkbox');
     fireEvent.click(checkbox);
 
-    expect(saveNetworkUsageSettings).toHaveBeenCalledWith({ enabled: true, retentionDays: 7 });
+    expect(saveNetworkUsageSettings).toHaveBeenCalledWith({ enabled: true, retentionDays: 7, sampleIntervalSec: 5 });
+  });
+
+  it('saves the network usage sample interval from settings', async () => {
+    window.location.hash = '#/controller';
+    const saveNetworkUsageSettings = vi.fn(async (settings) => {
+      useHelperStore.setState({ networkUsageSettings: settings });
+    });
+    useHelperStore.setState({
+      networkUsageSettings: { enabled: true, retentionDays: 7, sampleIntervalSec: 5 },
+      saveNetworkUsageSettings
+    });
+
+    render(<App />);
+
+    const intervalInput = screen.getByLabelText(/Usage sample interval sec/i) as HTMLInputElement;
+    fireEvent.change(intervalInput, { target: { value: '30' } });
+    fireEvent.blur(intervalInput);
+
+    await waitFor(() =>
+      expect(saveNetworkUsageSettings).toHaveBeenCalledWith({
+        enabled: true,
+        retentionDays: 7,
+        sampleIntervalSec: 30
+      })
+    );
   });
 
   it('keeps edited timeout visible while helper timeout save is pending', async () => {

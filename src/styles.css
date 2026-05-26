@@ -1356,8 +1356,8 @@ h1 {
   right: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: 14px;
-  width: min(420px, calc(100vw - 32px));
+  gap: 16px;
+  width: min(540px, calc(100vw - 32px));
   height: 100vh;
   padding: 18px;
   border-left: 1px solid var(--line-strong);
@@ -1390,18 +1390,104 @@ h1 {
   font-size: 17px;
 }
 
+.connection-detail-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.connection-detail-chips span,
+.connection-chain-path span {
+  max-width: 100%;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: rgba(15, 25, 24, 0.72);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.connection-detail-scroll {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.connection-detail-section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 13px;
+  border-top: 1px solid var(--line);
+}
+
+.connection-detail-section:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.connection-detail-section h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+}
+
 .connection-detail-grid {
   display: grid;
-  grid-template-columns: 84px minmax(0, 1fr);
+  grid-template-columns: 112px minmax(0, 1fr);
   align-content: start;
-  gap: 9px 12px;
-  overflow: auto;
+  gap: 8px 12px;
 }
 
 .connection-detail-grid strong {
   min-width: 0;
   overflow-wrap: anywhere;
   font-size: 12px;
+}
+
+.connection-chain-path {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.connection-chain-path span + span::before {
+  content: '-> ';
+  color: var(--muted);
+}
+
+.connection-traffic-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.connection-traffic-stats div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(12, 19, 18, 0.76);
+}
+
+.connection-traffic-stats span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.connection-traffic-stats strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
 }
 
 .log-controls {

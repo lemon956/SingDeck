@@ -66,6 +66,9 @@ const TRAFFIC_SPARKLINE_WIDTH = 188;
 const TRAFFIC_SPARKLINE_HEIGHT = 44;
 const DEFAULT_DELAY_TEST_TIMEOUT_MS = 5000;
 const DEFAULT_MIN_PROBE_INTERVAL_SEC = 60;
+const DEFAULT_NETWORK_USAGE_SAMPLE_INTERVAL_SEC = 5;
+const MIN_NETWORK_USAGE_SAMPLE_INTERVAL_SEC = 2;
+const MAX_NETWORK_USAGE_SAMPLE_INTERVAL_SEC = 3600;
 const STRATEGY_GROUP_ORDER_STORAGE_KEY = 'singdeck-strategy-group-order';
 const NETWORK_USAGE_WINDOWS = [
   { id: '1h', label: '1h', durationMs: 60 * 60 * 1000, bucket: 'minute' as const },
@@ -179,7 +182,7 @@ function buildConnectionTopology(connections: ConnectionRecord[]): ConnectionTop
   };
 
   connections.slice(0, 160).forEach((connection) => {
-    const sourceId = addNode(0, connection.source);
+    const sourceId = addNode(0, connection.sourceIP || connection.source);
     const ruleId = addNode(1, topologyRuleLabel(connection.rule));
     const groupId = addNode(2, topologyGroupLabel(connection));
     const outboundId = addNode(3, connection.outbound);
@@ -665,6 +668,9 @@ export function App() {
   const [minProbeIntervalDraft, setMinProbeIntervalDraft] = useState('1');
   const [activeProbeIntervalDraft, setActiveProbeIntervalDraft] = useState('');
   const [trafficProfileDraft, setTrafficProfileDraft] = useState('');
+  const [networkUsageSampleIntervalDraft, setNetworkUsageSampleIntervalDraft] = useState(
+    String(DEFAULT_NETWORK_USAGE_SAMPLE_INTERVAL_SEC)
+  );
   const [networkUsageWindow, setNetworkUsageWindow] = useState<NetworkUsageWindowId>('24h');
   const [nodeScoreSearch, setNodeScoreSearch] = useState('');
   const [selectedNodeScoreGroup, setSelectedNodeScoreGroup] = useState('');
@@ -1019,6 +1025,8 @@ export function App() {
   const trafficModuleEnabled = Boolean(helper.trafficSettings?.enabled);
   const networkUsageModuleEnabled = Boolean(helper.networkUsageSettings?.enabled);
   const networkUsageRetentionDays = helper.networkUsageSettings?.retentionDays ?? 7;
+  const networkUsageSampleIntervalSec =
+    helper.networkUsageSettings?.sampleIntervalSec ?? DEFAULT_NETWORK_USAGE_SAMPLE_INTERVAL_SEC;
   const helperDefaultTestUrl = helper.testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
   const helperDelayTestTimeoutMs =
     helper.testingSettings?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? DEFAULT_DELAY_TEST_TIMEOUT_MS;
@@ -1034,6 +1042,9 @@ export function App() {
   useEffect(() => {
     setMinProbeIntervalDraft(String(helperMinProbeIntervalMinutes));
   }, [helperMinProbeIntervalMinutes]);
+  useEffect(() => {
+    setNetworkUsageSampleIntervalDraft(String(networkUsageSampleIntervalSec));
+  }, [networkUsageSampleIntervalSec]);
   const localBehaviorButtonLabel = detecting
     ? 'Saving...'
     : localBehaviorStatus?.tone === 'ok'
@@ -1479,11 +1490,15 @@ export function App() {
       return { tone: 'ok', text: 'Traffic profile saved and synced.' };
     });
 
-  const saveNetworkUsageWithFeedback = (enabled: boolean) =>
+  const saveNetworkUsageWithFeedback = (
+    enabled: boolean,
+    sampleIntervalSec = networkUsageSampleIntervalSec
+  ) =>
     runHelperAction('network-usage', enabled ? 'Enabling usage capture...' : 'Disabling usage capture...', async () => {
       await useHelperStore.getState().saveNetworkUsageSettings({
         enabled,
-        retentionDays: networkUsageRetentionDays
+        retentionDays: networkUsageRetentionDays,
+        sampleIntervalSec
       });
       const state = useHelperStore.getState();
       if (state.error) {
@@ -1493,6 +1508,17 @@ export function App() {
         ? { tone: 'ok', text: `Network usage capture enabled for ${networkUsageRetentionDays} days.` }
         : { tone: 'ok', text: 'Network usage capture disabled.' };
     });
+
+  const commitNetworkUsageSampleInterval = () => {
+    const sampleIntervalSec = parseIntegerDraft(
+      networkUsageSampleIntervalDraft,
+      networkUsageSampleIntervalSec,
+      MIN_NETWORK_USAGE_SAMPLE_INTERVAL_SEC,
+      MAX_NETWORK_USAGE_SAMPLE_INTERVAL_SEC
+    );
+    setNetworkUsageSampleIntervalDraft(String(sampleIntervalSec));
+    void saveNetworkUsageWithFeedback(networkUsageModuleEnabled, sampleIntervalSec);
+  };
 
   const saveLocalBehavior = async () => {
     setLocalBehaviorStatus({ tone: 'neutral', text: 'Saving controller and test defaults...' });
@@ -1542,7 +1568,7 @@ export function App() {
     await helper.saveMinProbeInterval(minutes * 60);
   };
 
-  const commitActiveProbeInterval = () => {
+  const draftActiveProbeInterval = () => {
     if (!activeStrategyGroup) {
       return;
     }
@@ -1553,7 +1579,7 @@ export function App() {
       1440
     );
     setActiveProbeIntervalDraft(String(minutes));
-    saveGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+    draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
       probeIntervalSec: minutes * 60
     });
   };
@@ -2507,6 +2533,19 @@ export function App() {
                     </span>
                   </label>
                   <label>
+                    <span>Usage sample interval sec</span>
+                    <input
+                      disabled={!helperServiceAvailable}
+                      max={MAX_NETWORK_USAGE_SAMPLE_INTERVAL_SEC}
+                      min={MIN_NETWORK_USAGE_SAMPLE_INTERVAL_SEC}
+                      type="number"
+                      value={networkUsageSampleIntervalDraft}
+                      onBlur={commitNetworkUsageSampleInterval}
+                      onChange={(event) => setNetworkUsageSampleIntervalDraft(event.target.value)}
+                    />
+                    <small>Higher values reduce helper database writes while keeping Overview usage data current.</small>
+                  </label>
+                  <label>
                     <span>Chrome profile</span>
                     <input
                       placeholder="/home/user/.config/google-chrome/Default"
@@ -2563,7 +2602,9 @@ export function App() {
                   )}
                   {healthRow(
                     'Usage capture',
-                    networkUsageModuleEnabled ? `${networkUsageRetentionDays} days` : 'off',
+                    networkUsageModuleEnabled
+                      ? `${networkUsageRetentionDays} days / ${networkUsageSampleIntervalSec}s`
+                      : 'off',
                     networkUsageModuleEnabled ? 'blue' : 'neutral'
                   )}
                 </div>
@@ -3150,7 +3191,7 @@ export function App() {
                         <button
                           className={activeGroupConfig.mode === 'score' ? 'active' : ''}
                           disabled={!helperServiceAvailable}
-                          onClick={() => saveGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { mode: 'score' })}
+                          onClick={() => draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { mode: 'score' })}
                           type="button"
                         >
                           Score
@@ -3158,7 +3199,7 @@ export function App() {
                         <button
                           className={activeGroupConfig.mode === 'delay' ? 'active' : ''}
                           disabled={!helperServiceAvailable}
-                          onClick={() => saveGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { mode: 'delay' })}
+                          onClick={() => draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { mode: 'delay' })}
                           type="button"
                         >
                           Delay
@@ -3172,7 +3213,7 @@ export function App() {
                         disabled={!activeInspectorModel.canEditScheme}
                         value={activeGroupConfig.scheme}
                         onChange={(event) =>
-                          saveGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+                          draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
                             scheme: event.target.value as ScoreScheme
                           })
                         }
@@ -3190,11 +3231,6 @@ export function App() {
                           activeProbeExecution?.mode === 'native-urltest'
                             ? 'sing-box urltest.url'
                             : activeGroupConfig.testUrl
-                        }
-                        onBlur={(event) =>
-                          saveGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
-                            testUrl: event.currentTarget.value
-                          })
                         }
                         onChange={(event) =>
                           draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
@@ -3222,7 +3258,7 @@ export function App() {
                               disabled={!activeInspectorModel.canAutoSwitch}
                               type="checkbox"
                               onChange={(event) =>
-                                saveGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+                                draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
                                   autoSwitch: event.target.checked
                                 })
                               }
@@ -3240,7 +3276,7 @@ export function App() {
                             disabled={!activeInspectorModel.canSchedule}
                             type="checkbox"
                             onChange={(event) =>
-                              saveGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+                              draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
                                 autoProbe: event.target.checked
                               })
                             }
@@ -3262,7 +3298,7 @@ export function App() {
                         min={helperMinProbeIntervalMinutes}
                         type="number"
                         value={activeProbeIntervalDraft}
-                        onBlur={commitActiveProbeInterval}
+                        onBlur={draftActiveProbeInterval}
                         onChange={(event) => setActiveProbeIntervalDraft(event.target.value)}
                       />
                     </label>
@@ -3398,6 +3434,11 @@ export function App() {
                 <div>
                   <span>Connection</span>
                   <strong>{selectedConnection.target}</strong>
+                  <div className="connection-detail-chips">
+                    <span>{selectedConnection.network}</span>
+                    <span>{selectedConnection.inboundType || '--'}</span>
+                    <span>{selectedConnection.outbound}</span>
+                  </div>
                 </div>
                 <button
                   aria-label="Close connection details"
@@ -3408,25 +3449,88 @@ export function App() {
                   <X size={15} />
                 </button>
               </div>
-              <div className="connection-detail-grid">
-                <span>ID</span>
-                <strong>{selectedConnection.id}</strong>
-                <span>Source</span>
-                <strong>{selectedConnection.source}</strong>
-                <span>Target</span>
-                <strong>{selectedConnection.target}</strong>
-                <span>Network</span>
-                <strong>{selectedConnection.network}</strong>
-                <span>Rule</span>
-                <strong>{selectedConnection.rule}</strong>
-                <span>Outbound</span>
-                <strong>{selectedConnection.outbound}</strong>
-                <span>Chains</span>
-                <strong>{selectedConnection.chains.length > 0 ? selectedConnection.chains.join(' -> ') : '--'}</strong>
-                <span>Traffic</span>
-                <strong>{selectedConnection.download} / {selectedConnection.upload}</strong>
-                <span>Started</span>
-                <strong>{selectedConnection.startedAt || '--'}</strong>
+              <div className="connection-detail-scroll">
+                <section className="connection-detail-section">
+                  <h3>Endpoint</h3>
+                  <div className="connection-detail-grid">
+                    <span>ID</span>
+                    <strong>{selectedConnection.id}</strong>
+                    <span>Source</span>
+                    <strong>{selectedConnection.sourceEndpoint}</strong>
+                    <span>Source IP</span>
+                    <strong>{selectedConnection.sourceIP || '--'}</strong>
+                    <span>Source port</span>
+                    <strong>{selectedConnection.sourcePort || '--'}</strong>
+                    <span>Target</span>
+                    <strong>{selectedConnection.destinationEndpoint}</strong>
+                    <span>Host</span>
+                    <strong>{selectedConnection.destinationHost || '--'}</strong>
+                    <span>Destination IP</span>
+                    <strong>{selectedConnection.destinationIP || '--'}</strong>
+                    <span>Destination port</span>
+                    <strong>{selectedConnection.destinationPort || '--'}</strong>
+                  </div>
+                </section>
+                <section className="connection-detail-section">
+                  <h3>Route</h3>
+                  <div className="connection-detail-grid">
+                    <span>Rule</span>
+                    <strong>{selectedConnection.rule}</strong>
+                    <span>Rule type</span>
+                    <strong>{selectedConnection.ruleType}</strong>
+                    <span>Payload</span>
+                    <strong>{selectedConnection.rulePayload || '--'}</strong>
+                    <span>Outbound</span>
+                    <strong>{selectedConnection.outbound}</strong>
+                    <span>Chains</span>
+                    <strong>{selectedConnection.chains.length > 0 ? selectedConnection.chains.join(' -> ') : '--'}</strong>
+                  </div>
+                  {selectedConnection.chains.length > 0 ? (
+                    <div className="connection-chain-path" aria-label="Connection chain">
+                      {selectedConnection.chains.map((chain) => (
+                        <span key={chain}>{chain}</span>
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+                <section className="connection-detail-section">
+                  <h3>Process</h3>
+                  <div className="connection-detail-grid">
+                    <span>Network</span>
+                    <strong>{selectedConnection.network}</strong>
+                    <span>Inbound</span>
+                    <strong>{selectedConnection.inboundType || '--'}</strong>
+                    <span>DNS mode</span>
+                    <strong>{selectedConnection.dnsMode || '--'}</strong>
+                    <span>Process path</span>
+                    <strong>{selectedConnection.processPath || '--'}</strong>
+                  </div>
+                </section>
+                <section className="connection-detail-section">
+                  <h3>Traffic</h3>
+                  <div className="connection-traffic-stats">
+                    <div>
+                      <span>Down</span>
+                      <strong>{selectedConnection.download}</strong>
+                    </div>
+                    <div>
+                      <span>Up</span>
+                      <strong>{selectedConnection.upload}</strong>
+                    </div>
+                    <div>
+                      <span>Total</span>
+                      <strong>{formatBytes(selectedConnection.totalBytes)}</strong>
+                    </div>
+                  </div>
+                  <div className="connection-detail-grid">
+                    <span>Download bytes</span>
+                    <strong>{selectedConnection.downloadBytes}</strong>
+                    <span>Upload bytes</span>
+                    <strong>{selectedConnection.uploadBytes}</strong>
+                    <span>Started</span>
+                    <strong>{selectedConnection.startedAt || '--'}</strong>
+                  </div>
+                </section>
               </div>
               <button
                 className="ghost-action danger"

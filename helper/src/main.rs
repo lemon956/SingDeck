@@ -46,7 +46,6 @@ const MIN_PROBE_CONCURRENCY: usize = 1;
 const MAX_PROBE_CONCURRENCY: usize = 12;
 const FAILURE_PROBE_COOLDOWN_MS: i64 = 30 * 1000;
 const REALTIME_EVENT_INTERVAL_MS: u64 = 1000;
-const NETWORK_USAGE_SAMPLE_INTERVAL_MS: u64 = 1000;
 const MIN_SCORE_SAMPLE_WINDOW_MS: i64 = 30 * 60 * 1000;
 const SCORE_SAMPLE_WINDOW_INTERVAL_MULTIPLIER: i64 = 6;
 const MAX_SCORE_SAMPLE_COUNT: i64 = 10;
@@ -636,6 +635,7 @@ async fn main() -> Result<()> {
     let db_path =
         env::var("SINGDECK_HELPER_DB").unwrap_or_else(|_| "singdeck-helper.db".to_string());
     let conn = Connection::open(db_path)?;
+    configure_db_connection(&conn)?;
     init_db(&conn)?;
 
     let state = AppState {
@@ -762,6 +762,13 @@ fn init_db(conn: &Connection) -> Result<()> {
         "probe_interval_sec",
         "ALTER TABLE group_configs ADD COLUMN probe_interval_sec INTEGER NOT NULL DEFAULT 900",
     )?;
+    Ok(())
+}
+
+fn configure_db_connection(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(Duration::from_secs(10))?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
     Ok(())
 }
 
@@ -2059,18 +2066,20 @@ fn spawn_realtime_event_publisher(state: AppState) {
 
 fn spawn_network_usage_sampler(state: AppState) {
     tokio::spawn(async move {
-        let mut ticker =
-            tokio::time::interval(Duration::from_millis(NETWORK_USAGE_SAMPLE_INTERVAL_MS));
         loop {
-            ticker.tick().await;
-            if let Err(error) = sample_network_usage(&state).await {
-                eprintln!("network usage sample failed: {error}");
-            }
+            let interval_sec = match sample_network_usage(&state).await {
+                Ok(settings) => settings.sample_interval_sec,
+                Err(error) => {
+                    eprintln!("network usage sample failed: {error}");
+                    network_usage::DEFAULT_SAMPLE_INTERVAL_SEC
+                }
+            };
+            tokio::time::sleep(Duration::from_secs(interval_sec.max(1) as u64)).await;
         }
     });
 }
 
-async fn sample_network_usage(state: &AppState) -> Result<()> {
+async fn sample_network_usage(state: &AppState) -> Result<network_usage::NetworkUsageSettings> {
     let settings = {
         let db = state
             .db
@@ -2079,12 +2088,12 @@ async fn sample_network_usage(state: &AppState) -> Result<()> {
         network_usage::load_settings(&db)?
     };
     if !settings.enabled {
-        return Ok(());
+        return Ok(settings);
     }
 
     let controller = load_controller(state)?;
     if controller.controller_url.is_empty() {
-        return Ok(());
+        return Ok(settings);
     }
 
     let snapshot = controller_get::<serde_json::Value>(state, &controller, "/connections").await?;
@@ -2094,8 +2103,8 @@ async fn sample_network_usage(state: &AppState) -> Result<()> {
         .lock()
         .map_err(|_| anyhow!("database lock poisoned"))?;
     network_usage::apply_connections_snapshot(&db, &snapshot, sampled_at_ms)?;
-    network_usage::cleanup_old_usage(&db, sampled_at_ms, settings.retention_days)?;
-    Ok(())
+    network_usage::cleanup_old_usage_if_due(&db, sampled_at_ms, settings.retention_days)?;
+    Ok(settings)
 }
 
 async fn publish_realtime_snapshot_events(state: &AppState) -> Result<()> {
@@ -5099,6 +5108,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn configured_file_database_uses_wal_and_busy_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("helper.db");
+        let conn = Connection::open(db_path).unwrap();
+
+        configure_db_connection(&conn).unwrap();
+
+        let journal_mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        let busy_timeout_ms: i64 = conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert!(busy_timeout_ms >= 5000);
     }
 
     #[test]

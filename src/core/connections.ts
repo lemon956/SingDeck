@@ -9,6 +9,9 @@ type RawConnection = {
     sourceIP?: string;
     sourcePort?: string;
     network?: string;
+    type?: string;
+    dnsMode?: string;
+    processPath?: string;
   };
   chains?: string[];
   rule?: string;
@@ -25,11 +28,26 @@ export type ConnectionsResponse = {
 export type ConnectionRecord = {
   id: string;
   source: string;
+  sourceIP: string;
+  sourcePort: string;
+  sourceEndpoint: string;
   target: string;
+  destinationHost: string;
+  destinationIP: string;
+  destinationPort: string;
+  destinationEndpoint: string;
   network: string;
+  inboundType: string;
+  dnsMode: string;
+  processPath: string;
   upload: string;
+  uploadBytes: number;
   download: string;
+  downloadBytes: number;
+  totalBytes: number;
   rule: string;
+  ruleType: string;
+  rulePayload: string;
   outbound: string;
   chains: string[];
   startedAt: string;
@@ -43,24 +61,53 @@ export type LogRecord = {
 export function normalizeConnectionsResponse(response: ConnectionsResponse): ConnectionRecord[] {
   return (response.connections ?? []).map((connection, index) => {
     const metadata = connection.metadata ?? {};
-    const host = metadata.host || metadata.destinationIP || 'unknown';
-    const port = metadata.destinationPort ? `:${metadata.destinationPort}` : '';
+    const sourceIP = metadata.sourceIP || 'local';
+    const sourcePort = metadata.sourcePort || '';
+    const sourceEndpoint = formatEndpoint(sourceIP, sourcePort);
+    const destinationHost = metadata.host || '';
+    const destinationIP = metadata.destinationIP || '';
+    const destinationPort = metadata.destinationPort || '';
+    const destinationBase = destinationHost || destinationIP || 'unknown';
+    const destinationEndpoint = formatEndpoint(destinationBase, destinationPort);
     const chains = connection.chains ?? [];
-    const rule = [connection.rule, connection.rulePayload].filter(Boolean).join(' ') || 'MATCH';
+    const ruleType = connection.rule || 'MATCH';
+    const rulePayload = connection.rulePayload || '';
+    const rule = [ruleType, rulePayload].filter(Boolean).join(' ') || 'MATCH';
+    const uploadBytes = connection.upload ?? 0;
+    const downloadBytes = connection.download ?? 0;
 
     return {
       id: connection.id || `connection-${index}`,
-      source: metadata.sourceIP || 'local',
-      target: `${host}${port}`,
+      source: sourceEndpoint,
+      sourceIP,
+      sourcePort,
+      sourceEndpoint,
+      target: destinationEndpoint,
+      destinationHost,
+      destinationIP,
+      destinationPort,
+      destinationEndpoint,
       network: metadata.network || 'unknown',
-      upload: formatBytes(connection.upload ?? 0),
-      download: formatBytes(connection.download ?? 0),
+      inboundType: metadata.type || 'unknown',
+      dnsMode: metadata.dnsMode || 'unknown',
+      processPath: metadata.processPath || '',
+      upload: formatBytes(uploadBytes),
+      uploadBytes,
+      download: formatBytes(downloadBytes),
+      downloadBytes,
+      totalBytes: uploadBytes + downloadBytes,
       rule,
+      ruleType,
+      rulePayload,
       outbound: chains[0] ?? 'unknown',
       chains,
       startedAt: connection.start ?? ''
     };
   });
+}
+
+function formatEndpoint(host: string, port: string): string {
+  return port ? `${host}:${port}` : host;
 }
 
 export function parseLogChunk(chunk: string): unknown[] {
