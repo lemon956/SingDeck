@@ -1,10 +1,13 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     env, fs,
     net::{IpAddr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -30,6 +33,7 @@ use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
 mod network_usage;
+mod http_tool;
 mod traffic;
 
 const DEFAULT_BIND: &str = "0.0.0.0:9531";
@@ -255,6 +259,37 @@ struct ErrorBody {
 struct ControllerConfig {
     controller_url: String,
     secret: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ToolConnectionsResponse {
+    #[serde(default)]
+    connections: Vec<ToolConnectionRecord>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ToolConnectionRecord {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    metadata: ToolConnectionMetadata,
+    #[serde(default)]
+    chains: Vec<String>,
+    #[serde(default)]
+    rule: String,
+    #[serde(default, rename = "rulePayload")]
+    rule_payload: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ToolConnectionMetadata {
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    destination_ip: String,
+    #[serde(default)]
+    destination_port: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -675,6 +710,10 @@ async fn main() -> Result<()> {
             "/api/v1/settings/network-usage",
             get(network_usage_settings).put(save_network_usage_settings),
         )
+        .route(
+            "/api/v1/settings/tools",
+            get(tools_settings).put(save_tools_settings),
+        )
         .route("/api/v1/groups", get(groups))
         .route("/api/v1/node-sources", get(node_sources))
         .route("/api/v1/events", get(helper_events))
@@ -694,6 +733,7 @@ async fn main() -> Result<()> {
             "/api/v1/network-usage/connections",
             get(network_usage_connections),
         )
+        .route("/api/v1/tools/http-execute", post(execute_http_tool))
         .layer(cors)
         .with_state(state);
 
@@ -919,6 +959,60 @@ async fn save_network_usage_settings(
         .lock()
         .map_err(|_| AppError::internal("database lock poisoned"))?;
     Ok(Json(network_usage::save_settings(&db, &input)?))
+}
+
+async fn tools_settings(
+    State(state): State<AppState>,
+) -> Result<Json<http_tool::ToolsSettings>, AppError> {
+    Ok(Json(load_tools_settings(&state)?))
+}
+
+async fn save_tools_settings(
+    State(state): State<AppState>,
+    Json(input): Json<http_tool::ToolsSettings>,
+) -> Result<Json<http_tool::ToolsSettings>, AppError> {
+    let settings = http_tool::normalize_tools_settings(input);
+    save_tools_settings_row(&state, &settings)?;
+    Ok(Json(settings))
+}
+
+async fn execute_http_tool(
+    State(state): State<AppState>,
+    Json(mut input): Json<http_tool::HttpExecuteRequest>,
+) -> Result<Json<http_tool::HttpExecuteResponse>, AppError> {
+    let settings = load_tools_settings(&state)?;
+    if input.proxy_url.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        input.proxy_url = Some(settings.proxy_url);
+    }
+    if input.timeout_ms.is_none() {
+        input.timeout_ms = Some(settings.timeout_ms);
+    }
+
+    let target_host = http_tool::parse_http_tool_input(&input.input)
+        .ok()
+        .and_then(|parsed| reqwest::Url::parse(&parsed.url).ok())
+        .and_then(|url| url.host_str().map(str::to_string));
+    let stop_observing = Arc::new(AtomicBool::new(false));
+    let observer = target_host.map(|host| {
+        tokio::spawn(observe_http_tool_connections(
+            state.clone(),
+            host,
+            stop_observing.clone(),
+        ))
+    });
+
+    let result = http_tool::execute_http_tool_request(input).await;
+    stop_observing.store(true, Ordering::SeqCst);
+
+    match result {
+        Ok(mut response) => {
+            if let Some(observer) = observer {
+                response.observed_connections = observer.await.unwrap_or_default();
+            }
+            Ok(Json(response))
+        }
+        Err(error) => Err(AppError::bad_request(error)),
+    }
 }
 
 async fn network_usage_summary(
@@ -2674,6 +2768,99 @@ async fn controller_get<T: for<'de> Deserialize<'de>>(
     Ok(response.json::<T>().await?)
 }
 
+async fn observe_http_tool_connections(
+    state: AppState,
+    target_host: String,
+    stop: Arc<AtomicBool>,
+) -> Vec<http_tool::ObservedConnection> {
+    let Ok(controller) = load_controller(&state) else {
+        return Vec::new();
+    };
+    if controller.controller_url.is_empty() {
+        return Vec::new();
+    }
+
+    let baseline = fetch_tool_connections(&state, &controller)
+        .await
+        .unwrap_or_default();
+    let baseline_ids = baseline
+        .connections
+        .iter()
+        .map(|connection| connection.id.clone())
+        .collect::<HashSet<_>>();
+    let mut observed = HashMap::new();
+    collect_observed_tool_connections(&mut observed, &baseline.connections, &baseline_ids, &target_host);
+
+    let started = Instant::now();
+    loop {
+        if let Ok(snapshot) = fetch_tool_connections(&state, &controller).await {
+            collect_observed_tool_connections(&mut observed, &snapshot.connections, &baseline_ids, &target_host);
+        }
+        if stop.load(Ordering::SeqCst) || started.elapsed() >= Duration::from_secs(3) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+
+    observed.into_values().collect()
+}
+
+async fn fetch_tool_connections(
+    state: &AppState,
+    controller: &ControllerConfig,
+) -> Result<ToolConnectionsResponse> {
+    controller_get(state, controller, "/connections").await
+}
+
+fn collect_observed_tool_connections(
+    observed: &mut HashMap<String, http_tool::ObservedConnection>,
+    connections: &[ToolConnectionRecord],
+    baseline_ids: &HashSet<String>,
+    target_host: &str,
+) {
+    connections.iter().for_each(|connection| {
+        let host_matches = connection.metadata.host == target_host
+            || connection.metadata.destination_ip == target_host;
+        if baseline_ids.contains(&connection.id) && !host_matches {
+            return;
+        }
+
+        let id = if connection.id.is_empty() {
+            connection_target(connection)
+        } else {
+            connection.id.clone()
+        };
+        observed.entry(id.clone()).or_insert_with(|| http_tool::ObservedConnection {
+            id,
+            target: connection_target(connection),
+            rule: [connection.rule.as_str(), connection.rule_payload.as_str()]
+                .into_iter()
+                .filter(|value| !value.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+            outbound: connection
+                .chains
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string()),
+            chains: connection.chains.clone(),
+        });
+    });
+}
+
+fn connection_target(connection: &ToolConnectionRecord) -> String {
+    let host = if connection.metadata.host.is_empty() {
+        connection.metadata.destination_ip.as_str()
+    } else {
+        connection.metadata.host.as_str()
+    };
+    if connection.metadata.destination_port.is_empty() {
+        host.to_string()
+    } else {
+        format!("{}:{}", host, connection.metadata.destination_port)
+    }
+}
+
 async fn controller_put<T: Serialize + ?Sized>(
     state: &AppState,
     controller: &ControllerConfig,
@@ -2766,6 +2953,22 @@ fn save_traffic_settings_row(state: &AppState, settings: &TrafficSettings) -> Re
         state,
         "traffic_settings",
         &normalize_traffic_settings(settings.clone()),
+    )
+}
+
+fn load_tools_settings(state: &AppState) -> Result<http_tool::ToolsSettings> {
+    load_json_kv(state, "tools_settings").map(|settings| {
+        settings
+            .map(http_tool::normalize_tools_settings)
+            .unwrap_or_default()
+    })
+}
+
+fn save_tools_settings_row(state: &AppState, settings: &http_tool::ToolsSettings) -> Result<()> {
+    save_json_kv(
+        state,
+        "tools_settings",
+        &http_tool::normalize_tools_settings(settings.clone()),
     )
 }
 
@@ -4418,6 +4621,113 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn tools_settings_endpoint_persists_proxy_url() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+
+        let saved = save_tools_settings(
+            State(state.clone()),
+            Json(http_tool::ToolsSettings {
+                proxy_url: " http://127.0.0.1:7890/ ".to_string(),
+                timeout_ms: 60_000,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let loaded = tools_settings(State(state)).await.unwrap().0;
+
+        assert_eq!(saved.proxy_url, "http://127.0.0.1:7890");
+        assert_eq!(loaded, saved);
+    }
+
+    #[tokio::test]
+    async fn http_tool_endpoint_executes_direct_request() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        let server_url = spawn_one_delay_response_server(42).await;
+
+        let result = execute_http_tool(
+            State(state),
+            Json(http_tool::HttpExecuteRequest {
+                input: format!("{server_url}/tool"),
+                route_mode: http_tool::RouteMode::Direct,
+                proxy_url: None,
+                timeout_ms: Some(5_000),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(result.parsed.url, format!("{server_url}/tool"));
+        assert_eq!(result.response.unwrap().status, 200);
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn http_tool_endpoint_reports_matching_controller_connections() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        let server_url = spawn_one_delay_response_server(42).await;
+        let host = reqwest::Url::parse(&server_url)
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_string();
+        let controller_url = spawn_connections_controller(host).await;
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+
+        let result = execute_http_tool(
+            State(state),
+            Json(http_tool::HttpExecuteRequest {
+                input: format!("{server_url}/tool"),
+                route_mode: http_tool::RouteMode::Direct,
+                proxy_url: None,
+                timeout_ms: Some(5_000),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(result.observed_connections.len(), 1);
+        assert_eq!(result.observed_connections[0].outbound, "proxy-a");
+    }
+
     #[test]
     fn active_probe_tracking_skips_duplicate_group_runs() {
         let conn = Connection::open_in_memory().unwrap();
@@ -4778,6 +5088,33 @@ mod tests {
                 body
             );
             stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn spawn_connections_controller(host: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let host = host.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 2048];
+                    let _ = stream.read(&mut buffer).await.unwrap_or(0);
+                    let body = format!(
+                        r#"{{"connections":[{{"id":"conn-1","metadata":{{"host":"{host}","destinationPort":"443"}},"chains":["proxy-a"],"rule":"DOMAIN","rulePayload":"{host}","upload":12,"download":34}}]}}"#
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
         });
         format!("http://{addr}")
     }

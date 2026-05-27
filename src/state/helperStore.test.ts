@@ -17,6 +17,7 @@ describe('helper store', () => {
       health: null,
       testingSettings: null,
       trafficSettings: null,
+      toolsSettings: null,
       networkUsageSettings: null,
       groups: [],
       nodeSources: [],
@@ -373,6 +374,9 @@ describe('helper store', () => {
         if (url.endsWith('/api/v1/settings/network-usage')) {
           return jsonResponse({ enabled: false, retentionDays: 7 });
         }
+        if (url.endsWith('/api/v1/settings/tools')) {
+          return jsonResponse({ proxyUrl: '', timeoutMs: 30000 });
+        }
         return new Response('not found', { status: 404 });
       })
     );
@@ -435,6 +439,9 @@ describe('helper store', () => {
         if (url.endsWith('/api/v1/settings/network-usage')) {
           return jsonResponse({ enabled: false, retentionDays: 7 });
         }
+        if (url.endsWith('/api/v1/settings/tools')) {
+          return jsonResponse({ proxyUrl: '', timeoutMs: 30000 });
+        }
         return new Response('not found', { status: 404 });
       })
     );
@@ -489,13 +496,17 @@ describe('helper store', () => {
           requests.push('network-usage');
           return jsonResponse({ enabled: false, retentionDays: 7 });
         }
+        if (url.endsWith('/api/v1/settings/tools')) {
+          requests.push('tools');
+          return jsonResponse({ proxyUrl: '', timeoutMs: 30000 });
+        }
         return new Response('not found', { status: 404 });
       })
     );
 
     await useHelperStore.getState().syncController();
 
-    expect(requests).toEqual(['health', 'testing', 'traffic', 'network-usage']);
+    expect(requests).toEqual(['health', 'testing', 'traffic', 'network-usage', 'tools']);
     expect(useHelperStore.getState().health?.ok).toBe(true);
   });
 

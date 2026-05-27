@@ -4,6 +4,7 @@ import { useControllerStore } from '../state/controllerStore';
 import { useConnectionStore } from '../state/connectionStore';
 import { useHelperStore } from '../state/helperStore';
 import { useProxyStore } from '../state/proxyStore';
+import { useToolsStore } from '../state/toolsStore';
 import { App } from './App';
 
 const groupConfig = {
@@ -68,6 +69,7 @@ function setupProxyWorkspace() {
     health: { ok: true, version: '0.1.0', sqlite: true, controllerConfigured: true, controllerReachable: true, mobileConfigUrl: null, error: null },
     testingSettings: null,
     trafficSettings: null,
+    toolsSettings: null,
     groups: [
       {
         name: 'select',
@@ -173,6 +175,15 @@ function setupProxyWorkspace() {
     error: null,
     lastCheckedAt: null,
     lastSyncedControllerKey: null
+  });
+  useToolsStore.setState({
+    activeToolId: 'http-runner',
+    httpInput: '',
+    routeMode: 'direct',
+    phase: 'idle',
+    currentResult: null,
+    error: null,
+    history: []
   });
 }
 
@@ -334,6 +345,7 @@ describe('App proxy workspace', () => {
       health: null,
       testingSettings: null,
       trafficSettings: null,
+      toolsSettings: null,
       networkUsageSettings: null,
       groups: [],
       scoresByGroup: {},
@@ -943,6 +955,74 @@ describe('App proxy workspace', () => {
     expect(screen.getByText('Live sessions')).toBeInTheDocument();
   });
 
+  it('renders an extensible tools workspace with the HTTP runner selected', () => {
+    window.location.hash = '#/tools';
+
+    render(<App />);
+
+    expect(screen.getByRole('navigation', { name: 'Tools' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /HTTP Runner/i })).toHaveClass('active');
+    expect(screen.getByRole('heading', { name: 'HTTP Runner' })).toBeInTheDocument();
+  });
+
+  it('runs an HTTP request from Tools and renders diagnostics with session history', async () => {
+    window.location.hash = '#/tools';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/tools/http-execute')) {
+          return new Response(
+            JSON.stringify({
+              parsed: {
+                inputKind: 'curl',
+                method: 'POST',
+                url: 'https://api.example.test/items',
+                headers: [{ name: 'content-type', value: 'application/json' }],
+                bodyBytes: 15
+              },
+              warnings: ['Unsupported curl option ignored: --compressed'],
+              durationMs: 31,
+              response: {
+                status: 201,
+                statusText: 'Created',
+                headers: [{ name: 'content-type', value: 'application/json' }],
+                bodyPreview: '{"ok":true}',
+                bodyBytes: 11,
+                truncated: false
+              },
+              error: null,
+              observedConnections: [
+                {
+                  id: 'conn-1',
+                  target: 'api.example.test:443',
+                  rule: 'DOMAIN api.example.test',
+                  outbound: 'proxy-a',
+                  chains: ['proxy-a']
+                }
+              ]
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      })
+    );
+
+    render(<App />);
+    fireEvent.change(screen.getByLabelText('HTTP request input'), {
+      target: { value: "curl --compressed -X POST https://api.example.test/items -d '{\"ok\":true}'" }
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Execute request' }));
+
+    await waitFor(() => expect(screen.getByText('201 Created')).toBeInTheDocument());
+    expect(screen.getByText('31 ms')).toBeInTheDocument();
+    expect(screen.getByText('{"ok":true}')).toBeInTheDocument();
+    expect(screen.getByText('Unsupported curl option ignored: --compressed')).toBeInTheDocument();
+    expect(screen.getByText('proxy-a')).toBeInTheDocument();
+    expect(screen.getByText('POST')).toBeInTheDocument();
+  });
+
   it('exposes the network usage capture toggle in settings', () => {
     window.location.hash = '#/controller';
     const saveNetworkUsageSettings = vi.fn(async (settings) => {
@@ -960,6 +1040,29 @@ describe('App proxy workspace', () => {
     fireEvent.click(checkbox);
 
     expect(saveNetworkUsageSettings).toHaveBeenCalledWith({ enabled: true, retentionDays: 7, sampleIntervalSec: 5 });
+  });
+
+  it('saves Tools proxy settings from Settings', async () => {
+    window.location.hash = '#/controller';
+    const saveToolsSettings = vi.fn(async (settings) => {
+      useHelperStore.setState({ toolsSettings: settings });
+    });
+    useHelperStore.setState({
+      toolsSettings: { proxyUrl: '', timeoutMs: 30000 },
+      saveToolsSettings
+    });
+
+    render(<App />);
+
+    const proxyInput = screen.getByLabelText(/Tools proxy URL/i);
+    fireEvent.change(proxyInput, {
+      target: { value: 'http://127.0.0.1:7890' }
+    });
+    fireEvent.blur(proxyInput);
+
+    await waitFor(() =>
+      expect(saveToolsSettings).toHaveBeenCalledWith({ proxyUrl: 'http://127.0.0.1:7890', timeoutMs: 30000 })
+    );
   });
 
   it('saves the network usage sample interval from settings', async () => {

@@ -244,6 +244,59 @@ export type HelperNetworkUsageWindowRequest = {
   q?: string;
 };
 
+export type HelperToolsSettings = {
+  proxyUrl: string;
+  timeoutMs: number;
+};
+
+export type HelperHttpRouteMode = 'direct' | 'proxy';
+
+export type HelperHttpHeader = {
+  name: string;
+  value: string;
+};
+
+export type HelperHttpExecuteRequest = {
+  input: string;
+  routeMode: HelperHttpRouteMode;
+  proxyUrl?: string | null;
+  timeoutMs?: number | null;
+};
+
+export type HelperParsedHttpRequest = {
+  inputKind: 'url' | 'rawHttp' | 'curl';
+  method: string;
+  url: string;
+  headers: HelperHttpHeader[];
+  bodyBytes: number;
+};
+
+export type HelperHttpResponse = {
+  status: number;
+  statusText: string;
+  headers: HelperHttpHeader[];
+  bodyPreview: string;
+  bodyBytes: number;
+  truncated: boolean;
+};
+
+export type HelperObservedConnection = {
+  id: string;
+  target: string;
+  rule: string;
+  outbound: string;
+  chains: string[];
+};
+
+export type HelperHttpExecuteResponse = {
+  parsed: HelperParsedHttpRequest;
+  warnings: string[];
+  durationMs: number;
+  response: HelperHttpResponse | null;
+  error: string | null;
+  observedConnections: HelperObservedConnection[];
+};
+
 type HelperApiClientOptions = {
   baseUrl?: string;
   fetcher?: Fetcher;

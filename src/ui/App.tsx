@@ -14,6 +14,7 @@ import {
   Settings as SettingsIcon,
   ScrollText,
   Wifi,
+  Wrench,
   X
 } from 'lucide-react';
 import QRCode from 'qrcode';
@@ -53,6 +54,7 @@ import { useConfigStore } from '../state/configStore';
 import { useHelperStore } from '../state/helperStore';
 import { useProxyStore } from '../state/proxyStore';
 import { useRuntimeStore } from '../state/runtimeStore';
+import { ToolsPage } from './ToolsPage';
 import type { ConnectionRecord } from '../core/connections';
 import { SankeyChart } from 'echarts/charts';
 import { TooltipComponent } from 'echarts/components';
@@ -66,6 +68,9 @@ const TRAFFIC_SPARKLINE_WIDTH = 188;
 const TRAFFIC_SPARKLINE_HEIGHT = 44;
 const DEFAULT_DELAY_TEST_TIMEOUT_MS = 5000;
 const DEFAULT_MIN_PROBE_INTERVAL_SEC = 60;
+const DEFAULT_HTTP_TOOL_TIMEOUT_MS = 30000;
+const MIN_HTTP_TOOL_TIMEOUT_MS = 1000;
+const MAX_HTTP_TOOL_TIMEOUT_MS = 120000;
 const DEFAULT_NETWORK_USAGE_SAMPLE_INTERVAL_SEC = 5;
 const MIN_NETWORK_USAGE_SAMPLE_INTERVAL_SEC = 2;
 const MAX_NETWORK_USAGE_SAMPLE_INTERVAL_SEC = 3600;
@@ -89,6 +94,7 @@ const sections = [
   { id: 'proxies', label: 'Proxies', icon: GitBranch, navKey: 'P' },
   { id: 'connections', label: 'Connections', icon: Cable, navKey: 'C' },
   { id: 'logs', label: 'Logs', icon: ScrollText, navKey: 'L' },
+  { id: 'tools', label: 'Tools', icon: Wrench, navKey: 'T' },
   { id: 'config', label: 'Config', icon: FileJson, navKey: 'J' },
   { id: 'controller', label: 'Settings', icon: SettingsIcon, navKey: 'S' }
 ];
@@ -98,6 +104,7 @@ const sectionSubtitles: Record<AppRoute, string> = {
   proxies: 'strategy groups and node latency',
   connections: 'live sessions and route decisions',
   logs: 'runtime feed with local retention',
+  tools: 'request diagnostics and local tools',
   config: 'running config snapshot',
   controller: 'controller and local behavior'
 };
@@ -668,6 +675,8 @@ export function App() {
   const [minProbeIntervalDraft, setMinProbeIntervalDraft] = useState('1');
   const [activeProbeIntervalDraft, setActiveProbeIntervalDraft] = useState('');
   const [trafficProfileDraft, setTrafficProfileDraft] = useState('');
+  const [toolsProxyUrlDraft, setToolsProxyUrlDraft] = useState('');
+  const [toolsTimeoutDraft, setToolsTimeoutDraft] = useState(String(DEFAULT_HTTP_TOOL_TIMEOUT_MS));
   const [networkUsageSampleIntervalDraft, setNetworkUsageSampleIntervalDraft] = useState(
     String(DEFAULT_NETWORK_USAGE_SAMPLE_INTERVAL_SEC)
   );
@@ -1023,6 +1032,8 @@ export function App() {
 
   const helperActionBusy = Boolean(helperPendingAction) || helper.loading;
   const trafficModuleEnabled = Boolean(helper.trafficSettings?.enabled);
+  const helperToolsProxyUrl = helper.toolsSettings?.proxyUrl ?? '';
+  const helperToolsTimeoutMs = helper.toolsSettings?.timeoutMs ?? DEFAULT_HTTP_TOOL_TIMEOUT_MS;
   const networkUsageModuleEnabled = Boolean(helper.networkUsageSettings?.enabled);
   const networkUsageRetentionDays = helper.networkUsageSettings?.retentionDays ?? 7;
   const networkUsageSampleIntervalSec =
@@ -1045,6 +1056,12 @@ export function App() {
   useEffect(() => {
     setNetworkUsageSampleIntervalDraft(String(networkUsageSampleIntervalSec));
   }, [networkUsageSampleIntervalSec]);
+  useEffect(() => {
+    setToolsProxyUrlDraft(helperToolsProxyUrl);
+  }, [helperToolsProxyUrl]);
+  useEffect(() => {
+    setToolsTimeoutDraft(String(helperToolsTimeoutMs));
+  }, [helperToolsTimeoutMs]);
   const localBehaviorButtonLabel = detecting
     ? 'Saving...'
     : localBehaviorStatus?.tone === 'ok'
@@ -1308,6 +1325,7 @@ export function App() {
     proxies: String(allProxyNodes.length || allStrategyGroups.length),
     connections: String(connections.connections.length),
     logs: String(connections.logs.length),
+    tools: '',
     config: configWorkspace.snapshots.length ? String(configWorkspace.snapshots.length) : '',
     controller: ''
   };
@@ -1518,6 +1536,30 @@ export function App() {
     );
     setNetworkUsageSampleIntervalDraft(String(sampleIntervalSec));
     void saveNetworkUsageWithFeedback(networkUsageModuleEnabled, sampleIntervalSec);
+  };
+
+  const commitToolsProxyUrl = async () => {
+    const proxyUrl = toolsProxyUrlDraft.trim();
+    await helper.saveToolsSettings({
+      proxyUrl,
+      timeoutMs: helperToolsTimeoutMs
+    });
+    setToolsProxyUrlDraft(useHelperStore.getState().toolsSettings?.proxyUrl ?? proxyUrl);
+  };
+
+  const commitToolsTimeout = async () => {
+    const timeoutMs = parseIntegerDraft(
+      toolsTimeoutDraft,
+      helperToolsTimeoutMs,
+      MIN_HTTP_TOOL_TIMEOUT_MS,
+      MAX_HTTP_TOOL_TIMEOUT_MS
+    );
+    setToolsTimeoutDraft(String(timeoutMs));
+    await helper.saveToolsSettings({
+      proxyUrl: helperToolsProxyUrl,
+      timeoutMs
+    });
+    setToolsTimeoutDraft(String(useHelperStore.getState().toolsSettings?.timeoutMs ?? timeoutMs));
   };
 
   const saveLocalBehavior = async () => {
@@ -1754,6 +1796,7 @@ export function App() {
         configPath: helper.configPath,
         testingSettings: helper.testingSettings,
         trafficSettings: helper.trafficSettings,
+        toolSettings: helper.toolsSettings,
         groupConfigs: helper.groups.map((group) => ({ name: group.name, config: group.config }))
       },
       proxies: {
@@ -1808,6 +1851,11 @@ export function App() {
       if (backup.helper.trafficSettings) {
         setTrafficProfileDraft(backup.helper.trafficSettings.browserProfile);
         await helper.saveTrafficSettings(backup.helper.trafficSettings);
+      }
+      if (backup.helper.toolSettings) {
+        setToolsProxyUrlDraft(backup.helper.toolSettings.proxyUrl);
+        setToolsTimeoutDraft(String(backup.helper.toolSettings.timeoutMs));
+        await helper.saveToolsSettings(backup.helper.toolSettings);
       }
       for (const [group, url] of Object.entries(backup.proxies.groupTestUrls)) {
         proxies.setGroupTestUrl(group, url);
@@ -2504,6 +2552,30 @@ export function App() {
                       value={helper.configPath}
                       onBlur={() => void saveConfigPathWithFeedback()}
                       onChange={(event) => helper.updateSettings({ configPath: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span>Tools proxy URL</span>
+                    <input
+                      disabled={!helperServiceAvailable}
+                      placeholder="http://127.0.0.1:7890"
+                      value={toolsProxyUrlDraft}
+                      onBlur={() => void commitToolsProxyUrl()}
+                      onChange={(event) => setToolsProxyUrlDraft(event.target.value)}
+                    />
+                    <small>Used by Tools when HTTP Runner is set to via sing-box.</small>
+                  </label>
+                  <label>
+                    <span>Tools timeout ms</span>
+                    <input
+                      disabled={!helperServiceAvailable}
+                      max={MAX_HTTP_TOOL_TIMEOUT_MS}
+                      min={MIN_HTTP_TOOL_TIMEOUT_MS}
+                      step={1000}
+                      type="number"
+                      value={toolsTimeoutDraft}
+                      onBlur={() => void commitToolsTimeout()}
+                      onChange={(event) => setToolsTimeoutDraft(event.target.value)}
                     />
                   </label>
                   <label className={`automation-option settings-toggle ${trafficModuleEnabled ? 'on' : ''}`}>
@@ -3594,6 +3666,8 @@ export function App() {
           </article>
         </section>
         ) : null}
+
+        {activeRoute === 'tools' ? <ToolsPage /> : null}
 
         {activeRoute === 'config' ? (
         <section className="config-panel" id="config" aria-labelledby="config-title">

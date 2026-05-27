@@ -21,7 +21,8 @@ import {
   type HelperScoresResponse,
   type HelperTestingSettings,
   type HelperTrafficSettings,
-  type HelperTrafficResponse
+  type HelperTrafficResponse,
+  type HelperToolsSettings
 } from '../core/helperApi';
 import { useControllerStore } from './controllerStore';
 
@@ -35,6 +36,7 @@ type HelperState = {
   health: HelperHealth | null;
   testingSettings: HelperTestingSettings | null;
   trafficSettings: HelperTrafficSettings | null;
+  toolsSettings: HelperToolsSettings | null;
   networkUsageSettings: HelperNetworkUsageSettings | null;
   groups: HelperGroup[];
   nodeSources: HelperNodeSource[];
@@ -62,12 +64,14 @@ type HelperState = {
   syncController: (options?: { force?: boolean }) => Promise<void>;
   loadTestingSettings: () => Promise<void>;
   loadTrafficSettings: () => Promise<void>;
+  loadToolsSettings: () => Promise<void>;
   loadNetworkUsageSettings: () => Promise<void>;
   saveDefaultTestUrl: (defaultTestUrl: string) => Promise<void>;
   saveDelayTestTimeout: (delayTestTimeoutMs: number) => Promise<void>;
   saveMinProbeInterval: (minProbeIntervalSec: number) => Promise<void>;
   saveConfigPath: () => Promise<void>;
   saveTrafficSettings: (settings: HelperTrafficSettings) => Promise<void>;
+  saveToolsSettings: (settings: HelperToolsSettings) => Promise<void>;
   saveNetworkUsageSettings: (settings: HelperNetworkUsageSettings) => Promise<void>;
   loadGroups: () => Promise<void>;
   loadNodeSources: () => Promise<void>;
@@ -90,6 +94,7 @@ export const useHelperStore = create<HelperState>()(
       health: null,
       testingSettings: null,
       trafficSettings: null,
+      toolsSettings: null,
       networkUsageSettings: null,
       groups: [],
       nodeSources: [],
@@ -138,15 +143,17 @@ export const useHelperStore = create<HelperState>()(
             lastCheckedAt: new Date().toISOString(),
             error: health.error
           });
-          const [testingSettings, trafficSettings, networkUsageSettings] = await Promise.all([
+          const [testingSettings, trafficSettings, networkUsageSettings, toolsSettings] = await Promise.all([
             client().getJson<HelperTestingSettings>('/api/v1/settings/testing'),
             client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic'),
-            client().getJson<HelperNetworkUsageSettings>('/api/v1/settings/network-usage')
+            client().getJson<HelperNetworkUsageSettings>('/api/v1/settings/network-usage'),
+            client().getJson<HelperToolsSettings>('/api/v1/settings/tools')
           ]);
           set({
             testingSettings,
             trafficSettings,
             networkUsageSettings,
+            toolsSettings,
             error: health.error
           });
         } catch (error) {
@@ -181,15 +188,17 @@ export const useHelperStore = create<HelperState>()(
             lastSyncedControllerKey: syncKey,
             error: health.error
           });
-          const [testingSettings, trafficSettings, networkUsageSettings] = await Promise.all([
+          const [testingSettings, trafficSettings, networkUsageSettings, toolsSettings] = await Promise.all([
             client().getJson<HelperTestingSettings>('/api/v1/settings/testing'),
             client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic'),
-            client().getJson<HelperNetworkUsageSettings>('/api/v1/settings/network-usage')
+            client().getJson<HelperNetworkUsageSettings>('/api/v1/settings/network-usage'),
+            client().getJson<HelperToolsSettings>('/api/v1/settings/tools')
           ]);
           set({
             testingSettings,
             trafficSettings,
             networkUsageSettings,
+            toolsSettings,
             error: health.error
           });
         } catch (error) {
@@ -208,6 +217,14 @@ export const useHelperStore = create<HelperState>()(
         try {
           const trafficSettings = await client().getJson<HelperTrafficSettings>('/api/v1/settings/traffic');
           set({ trafficSettings, error: null });
+        } catch (error) {
+          set({ error: formatHelperError(error) });
+        }
+      },
+      loadToolsSettings: async () => {
+        try {
+          const toolsSettings = await client().getJson<HelperToolsSettings>('/api/v1/settings/tools');
+          set({ toolsSettings, error: null });
         } catch (error) {
           set({ error: formatHelperError(error) });
         }
@@ -297,6 +314,14 @@ export const useHelperStore = create<HelperState>()(
           if (trafficSettings.enabled) {
             await get().loadTraffic();
           }
+        } catch (error) {
+          set({ error: formatHelperError(error) });
+        }
+      },
+      saveToolsSettings: async (settings) => {
+        try {
+          const toolsSettings = await client().putJson<HelperToolsSettings>('/api/v1/settings/tools', settings);
+          set({ toolsSettings, error: null });
         } catch (error) {
           set({ error: formatHelperError(error) });
         }
@@ -524,6 +549,7 @@ export const useHelperStore = create<HelperState>()(
         helperUrl: state.helperUrl,
         configPath: state.configPath,
         trafficSettings: state.trafficSettings,
+        toolsSettings: state.toolsSettings,
         networkUsageSettings: state.networkUsageSettings
       })
     }

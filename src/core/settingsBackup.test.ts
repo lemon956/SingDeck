@@ -28,6 +28,10 @@ describe('settings backup', () => {
           enabled: true,
           browserProfile: '/home/alice/.config/google-chrome/Default'
         },
+        toolSettings: {
+          proxyUrl: 'http://127.0.0.1:7890',
+          timeoutMs: 30000
+        },
         groupConfigs: [
           {
             name: 'openai-us',
@@ -60,6 +64,7 @@ describe('settings backup', () => {
     expect(backup.schema).toBe('singdeck.settings.v1');
     expect(backup.helper.groupConfigs[0].config.autoSwitch).toBe(true);
     expect(backup.helper.trafficSettings?.browserProfile).toBe('/home/alice/.config/google-chrome/Default');
+    expect(backup.helper.toolSettings?.proxyUrl).toBe('http://127.0.0.1:7890');
     expect(backup.proxies.groupTestUrls['openai-us']).toBe('https://api.openai.com');
     expect(backup.ui.strategyGroupOrder).toEqual(['openai-us']);
   });

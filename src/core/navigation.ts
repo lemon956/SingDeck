@@ -4,6 +4,7 @@ export const ROUTES = [
   'proxies',
   'connections',
   'logs',
+  'tools',
   'config'
 ] as const;
 
@@ -17,10 +18,6 @@ export function routeFromHash(hash: string): AppRoute {
   if (normalized === 'rules') {
     return 'controller';
   }
-  if (normalized === 'tools') {
-    return 'overview';
-  }
-
   return isRoute(normalized) ? normalized : 'overview';
 }
 

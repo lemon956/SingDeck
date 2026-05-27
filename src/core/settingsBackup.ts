@@ -1,6 +1,6 @@
 import type { ControllerConfig, ValidationIssue } from './controller';
 import type { ConfigSnapshot } from './configWorkspace';
-import type { HelperGroupConfig, HelperTestingSettings, HelperTrafficSettings } from './helperApi';
+import type { HelperGroupConfig, HelperTestingSettings, HelperToolsSettings, HelperTrafficSettings } from './helperApi';
 
 export const SETTINGS_BACKUP_SCHEMA = 'singdeck.settings.v1';
 
@@ -16,6 +16,7 @@ export type SettingsBackup = {
     configPath: string;
     testingSettings: HelperTestingSettings | null;
     trafficSettings?: HelperTrafficSettings | null;
+    toolSettings?: HelperToolsSettings | null;
     groupConfigs: Array<{ name: string; config: HelperGroupConfig }>;
   };
   proxies: {
@@ -81,6 +82,9 @@ function assertSettingsBackup(value: unknown): asserts value is SettingsBackup {
   if (helper.trafficSettings !== undefined && helper.trafficSettings !== null) {
     validateTrafficSettings(helper.trafficSettings, 'helper.trafficSettings');
   }
+  if (helper.toolSettings !== undefined && helper.toolSettings !== null) {
+    validateToolSettings(helper.toolSettings, 'helper.toolSettings');
+  }
   const groupConfigs = requireArray(helper.groupConfigs, 'helper.groupConfigs');
   groupConfigs.forEach((item, index) => {
     const group = requireRecord(item, `helper.groupConfigs[${index}]`);
@@ -131,6 +135,12 @@ function validateTrafficSettings(value: unknown, path: string): void {
   const settings = requireRecord(value, path);
   requireBoolean(settings.enabled, `${path}.enabled`);
   requireString(settings.browserProfile, `${path}.browserProfile`);
+}
+
+function validateToolSettings(value: unknown, path: string): void {
+  const settings = requireRecord(value, path);
+  requireString(settings.proxyUrl, `${path}.proxyUrl`);
+  requireNumber(settings.timeoutMs, `${path}.timeoutMs`);
 }
 
 function validateGroupConfig(value: unknown, path: string): void {

@@ -18,6 +18,9 @@ describe('navigation routing', () => {
 
   it('folds removed pages into active pages', () => {
     expect(routeFromHash('#/rules')).toBe('controller');
-    expect(routeFromHash('#/tools')).toBe('overview');
+  });
+
+  it('routes tools to the tools workspace', () => {
+    expect(routeFromHash('#/tools')).toBe('tools');
   });
 });
