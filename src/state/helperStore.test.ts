@@ -23,6 +23,11 @@ describe('helper store', () => {
       scoresByGroup: {},
       activeProbeGroups: [],
       activeProbeNodesByGroup: {},
+      networkUsageSourceTrend: null,
+      networkUsageSourceTrendLoading: false,
+      networkUsageSourceTrendError: null,
+      networkUsageSourceTrendRefreshing: false,
+      networkUsageSourceTrendRefreshError: null,
       eventStreamConnected: false,
       loading: false,
       lastSyncedControllerKey: null,
@@ -734,9 +739,9 @@ describe('helper store', () => {
           return jsonResponse({
             providers: [
               {
-                id: 'haita',
-                name: 'Haita',
-                homepage: 'https://haita.io/dashboard',
+                id: 'wd-gold',
+                name: 'WD Gold',
+                homepage: 'https://wd-gold.net/clientarea.php?action=productdetails&id=217101',
                 planName: null,
                 usedUploadBytes: null,
                 usedDownloadBytes: null,
@@ -746,6 +751,9 @@ describe('helper store', () => {
                 usedRatio: null,
                 expireAt: null,
                 resetDay: null,
+                resetAt: null,
+                stale: false,
+                lastSuccessfulAt: null,
                 fetchedAt: '2026-05-09T15:30:00+08:00',
                 error: 'cookie missing'
               }
@@ -764,7 +772,7 @@ describe('helper store', () => {
     });
 
     expect(requests.some((url) => url.endsWith('/api/v1/traffic'))).toBe(true);
-    expect(useHelperStore.getState().traffic?.providers[0]?.name).toBe('Haita');
+    expect(useHelperStore.getState().traffic?.providers[0]?.name).toBe('WD Gold');
   });
 
   it('saves network usage settings through the helper API', async () => {
@@ -811,6 +819,7 @@ describe('helper store', () => {
       },
       networkUsageTopHosts: { groupBy: 'host', items: [] },
       networkUsageTopOutbounds: { groupBy: 'outbound', items: [] },
+      networkUsageTopStrategies: { groupBy: 'strategy', items: [] },
       networkUsageConnections: { connections: [] }
     });
     let resolveWindow!: () => void;
@@ -858,6 +867,18 @@ describe('helper store', () => {
                 }
               ]
             },
+            topStrategies: {
+              groupBy: 'strategy',
+              items: [
+                {
+                  label: 'select',
+                  uploadBytes: 256,
+                  downloadBytes: 1280,
+                  totalBytes: 1536,
+                  connectionCount: 2
+                }
+              ]
+            },
             connections: {
               connections: [
                 {
@@ -899,7 +920,106 @@ describe('helper store', () => {
     expect(useHelperStore.getState().networkUsageSummary?.totalBytes).toBe(2560);
     expect(useHelperStore.getState().networkUsageTopHosts?.items[0]?.label).toBe('example.com');
     expect(useHelperStore.getState().networkUsageTopOutbounds?.items[0]?.label).toBe('proxy-a');
+    expect(useHelperStore.getState().networkUsageTopStrategies?.items[0]?.label).toBe('select');
     expect(useHelperStore.getState().networkUsageConnections?.connections[0]?.host).toBe('example.com');
+  });
+
+  it('loads source trend usage with the selected bucket and timezone offset', async () => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        requests.push(url);
+        const parsed = new URL(url);
+        if (parsed.pathname.endsWith('/api/v1/network-usage/source-trend')) {
+          return jsonResponse({
+            fromMs: 0,
+            toMs: 604800000,
+            bucket: parsed.searchParams.get('bucket'),
+            sources: [
+              {
+                name: 'wd',
+                uploadBytes: 128,
+                downloadBytes: 1024,
+                totalBytes: 1152,
+                buckets: []
+              }
+            ],
+            unknownNodes: [
+              {
+                name: 'manual-node',
+                uploadBytes: 64,
+                downloadBytes: 256,
+                totalBytes: 320
+              }
+            ]
+          });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().loadNetworkUsageSourceTrend({
+      days: 7,
+      bucket: 'hour',
+      tzOffsetMinutes: -480
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toContain('/api/v1/network-usage/source-trend');
+    expect(requests[0]).toContain('days=7');
+    expect(requests[0]).toContain('bucket=hour');
+    expect(requests[0]).toContain('tzOffsetMinutes=-480');
+    expect(useHelperStore.getState().networkUsageSourceTrend?.sources[0]?.name).toBe('wd');
+    expect(useHelperStore.getState().networkUsageSourceTrend?.unknownNodes[0]?.name).toBe('manual-node');
+  });
+
+  it('refreshes source trend usage through the immediate sampling endpoint', async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        requests.push({ url, method: init?.method ?? 'GET' });
+        const parsed = new URL(url);
+        if (parsed.pathname.endsWith('/api/v1/network-usage/source-trend/refresh')) {
+          return jsonResponse({
+            fromMs: 0,
+            toMs: 604800000,
+            bucket: parsed.searchParams.get('bucket'),
+            sources: [
+              {
+                name: 'xnyun',
+                uploadBytes: 256,
+                downloadBytes: 2048,
+                totalBytes: 2304,
+                buckets: []
+              }
+            ],
+            unknownNodes: []
+          });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().refreshNetworkUsageSourceTrend({
+      days: 7,
+      bucket: 'day',
+      tzOffsetMinutes: -480
+    });
+
+    expect(requests).toEqual([
+      expect.objectContaining({
+        method: 'POST'
+      })
+    ]);
+    expect(requests[0].url).toContain('/api/v1/network-usage/source-trend/refresh');
+    expect(requests[0].url).toContain('bucket=day');
+    expect(useHelperStore.getState().networkUsageSourceTrend?.sources[0]?.name).toBe('xnyun');
+    expect(useHelperStore.getState().networkUsageSourceTrendRefreshing).toBe(false);
+    expect(useHelperStore.getState().networkUsageSourceTrendRefreshError).toBeNull();
   });
 
   it('saves config path through the helper API', async () => {

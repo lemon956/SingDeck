@@ -629,6 +629,14 @@ struct NetworkUsageWindowQuery {
     q: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkUsageSourceTrendQuery {
+    days: Option<i64>,
+    bucket: Option<String>,
+    tz_offset_minutes: Option<i64>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let bind = env::var("SINGDECK_HELPER_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
@@ -689,6 +697,14 @@ async fn main() -> Result<()> {
         .route("/api/v1/traffic", get(read_traffic))
         .route("/api/v1/network-usage/summary", get(network_usage_summary))
         .route("/api/v1/network-usage/window", get(network_usage_window))
+        .route(
+            "/api/v1/network-usage/source-trend",
+            get(network_usage_source_trend),
+        )
+        .route(
+            "/api/v1/network-usage/source-trend/refresh",
+            post(network_usage_source_trend_refresh),
+        )
         .route("/api/v1/network-usage/top", get(network_usage_top))
         .route(
             "/api/v1/network-usage/connections",
@@ -991,6 +1007,71 @@ async fn network_usage_window(
         query.limit.unwrap_or(10),
         query.q.as_deref(),
     )?))
+}
+
+async fn network_usage_source_trend(
+    State(state): State<AppState>,
+    Query(query): Query<NetworkUsageSourceTrendQuery>,
+) -> Result<Json<network_usage::UsageSourceTrendResponse>, AppError> {
+    Ok(Json(read_network_usage_source_trend(&state, &query).await?))
+}
+
+async fn network_usage_source_trend_refresh(
+    State(state): State<AppState>,
+    Query(query): Query<NetworkUsageSourceTrendQuery>,
+) -> Result<Json<network_usage::UsageSourceTrendResponse>, AppError> {
+    Ok(Json(
+        refresh_network_usage_source_trend(&state, query).await?,
+    ))
+}
+
+async fn read_network_usage_source_trend(
+    state: &AppState,
+    query: &NetworkUsageSourceTrendQuery,
+) -> Result<network_usage::UsageSourceTrendResponse> {
+    let current_nodes = current_proxy_node_filter(state).await;
+    read_network_usage_source_trend_with_nodes(state, query, &current_nodes)
+}
+
+fn read_network_usage_source_trend_with_nodes(
+    state: &AppState,
+    query: &NetworkUsageSourceTrendQuery,
+    current_nodes: &BTreeSet<String>,
+) -> Result<network_usage::UsageSourceTrendResponse> {
+    let bucket = network_usage::SourceTrendBucket::parse(query.bucket.as_deref());
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| anyhow!("database lock poisoned"))?;
+    network_usage::query_source_trend(
+        &db,
+        now_ms(),
+        query.days.unwrap_or(7),
+        bucket,
+        query.tz_offset_minutes.unwrap_or(0),
+        Some(current_nodes),
+    )
+}
+
+async fn refresh_network_usage_source_trend(
+    state: &AppState,
+    query: NetworkUsageSourceTrendQuery,
+) -> Result<network_usage::UsageSourceTrendResponse> {
+    let _ = sample_network_usage(state).await;
+    read_network_usage_source_trend(state, &query).await
+}
+
+async fn current_proxy_node_filter(state: &AppState) -> BTreeSet<String> {
+    let Ok(controller) = load_controller(state) else {
+        return BTreeSet::new();
+    };
+    if controller.controller_url.trim().is_empty() {
+        return BTreeSet::new();
+    }
+    fetch_proxies(state, &controller)
+        .await
+        .map(|proxies| proxy_node_names(&proxies).into_iter().collect())
+        .unwrap_or_default()
 }
 
 async fn groups(State(state): State<AppState>) -> Result<Json<GroupsResponse>, AppError> {
@@ -4814,6 +4895,44 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_usage_controller(connections_body: String, proxies_body: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let connections_body = connections_body.clone();
+                let proxies_body = proxies_body.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 1024];
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..read]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let response_body = if path == "/connections" {
+                        connections_body
+                    } else if path == "/proxies" {
+                        proxies_body
+                    } else {
+                        r#"{"error":"not found"}"#.to_string()
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        response_body.len(),
+                        response_body
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
     async fn spawn_dynamic_queue_probe_controller(
         next_started: Arc<AtomicBool>,
         release_slow: Arc<tokio::sync::Notify>,
@@ -5108,6 +5227,220 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_source_trend_samples_connections_before_querying_trend() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        let baseline_ms = now_ms().saturating_sub(1_000);
+        let connection_start = format_time(baseline_ms.saturating_add(100));
+        {
+            let db = state.db.lock().unwrap();
+            network_usage::save_settings(
+                &db,
+                &network_usage::NetworkUsageSettings {
+                    enabled: true,
+                    retention_days: 7,
+                    sample_interval_sec: network_usage::DEFAULT_SAMPLE_INTERVAL_SEC,
+                },
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO node_source_nodes (source_name, node_name) VALUES (?1, ?2)",
+                params!["wd", "wd-node"],
+            )
+            .unwrap();
+            network_usage::apply_connections_snapshot(
+                &db,
+                &serde_json::json!({ "connections": [] }),
+                baseline_ms,
+            )
+            .unwrap();
+        }
+        let controller_url = spawn_usage_controller(
+            format!(
+                r#"{{
+                    "connections": [{{
+                        "id": "wd-conn",
+                        "start": "{connection_start}",
+                        "metadata": {{ "host": "wd.test", "network": "tcp" }},
+                        "chains": ["wd-node"],
+                        "upload": 128,
+                        "download": 1024
+                    }}]
+                }}"#
+            ),
+            r#"{"proxies":{"select":{"name":"select","type":"Selector","now":"wd-node","all":["wd-node"]},"wd-node":{"name":"wd-node","type":"Trojan","now":"","all":[]}}}"#
+                .to_string(),
+        )
+        .await;
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+
+        let trend = refresh_network_usage_source_trend(
+            &state,
+            NetworkUsageSourceTrendQuery {
+                days: Some(7),
+                bucket: Some("hour".to_string()),
+                tz_offset_minutes: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+
+        let wd = trend
+            .sources
+            .iter()
+            .find(|source| source.name == "wd")
+            .unwrap();
+        assert_eq!(wd.total_bytes, 1152);
+    }
+
+    #[tokio::test]
+    async fn refresh_source_trend_filters_history_to_current_proxy_nodes() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        let baseline_ms = now_ms().saturating_sub(60_000);
+        let connection_start = format_time(baseline_ms.saturating_add(100));
+        {
+            let db = state.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO node_source_nodes (source_name, node_name) VALUES (?1, ?2)",
+                params!["wd", "wd-node"],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO node_source_nodes (source_name, node_name) VALUES (?1, ?2)",
+                params!["xnyun", "removed-xnyun-node"],
+            )
+            .unwrap();
+            network_usage::apply_connections_snapshot(
+                &db,
+                &serde_json::json!({ "connections": [] }),
+                baseline_ms,
+            )
+            .unwrap();
+            network_usage::apply_connections_snapshot(
+                &db,
+                &serde_json::json!({
+                    "connections": [
+                        {
+                            "id": "wd-conn",
+                            "start": connection_start,
+                            "metadata": { "host": "wd.test", "network": "tcp" },
+                            "chains": ["wd-node"],
+                            "upload": 100,
+                            "download": 400
+                        },
+                        {
+                            "id": "removed-source-conn",
+                            "start": connection_start,
+                            "metadata": { "host": "removed-source.test", "network": "tcp" },
+                            "chains": ["removed-xnyun-node"],
+                            "upload": 900,
+                            "download": 100
+                        },
+                        {
+                            "id": "removed-unknown-conn",
+                            "start": connection_start,
+                            "metadata": { "host": "removed-unknown.test", "network": "tcp" },
+                            "chains": ["removed-manual-node"],
+                            "upload": 200,
+                            "download": 300
+                        },
+                        {
+                            "id": "current-unknown-conn",
+                            "start": connection_start,
+                            "metadata": { "host": "current-unknown.test", "network": "tcp" },
+                            "chains": ["current-manual-node"],
+                            "upload": 25,
+                            "download": 75
+                        }
+                    ]
+                }),
+                baseline_ms.saturating_add(1_000),
+            )
+            .unwrap();
+        }
+        let controller_url = spawn_usage_controller(
+            r#"{"connections":[]}"#.to_string(),
+            r#"{"proxies":{"select":{"name":"select","type":"Selector","now":"wd-node","all":["wd-node","current-manual-node"]},"wd-node":{"name":"wd-node","type":"Trojan","now":"","all":[]},"current-manual-node":{"name":"current-manual-node","type":"Trojan","now":"","all":[]}}}"#.to_string(),
+        )
+        .await;
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+
+        let trend = refresh_network_usage_source_trend(
+            &state,
+            NetworkUsageSourceTrendQuery {
+                days: Some(7),
+                bucket: Some("day".to_string()),
+                tz_offset_minutes: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+
+        let wd = trend
+            .sources
+            .iter()
+            .find(|source| source.name == "wd")
+            .unwrap();
+        assert_eq!(wd.total_bytes, 500);
+
+        let xnyun = trend
+            .sources
+            .iter()
+            .find(|source| source.name == "xnyun")
+            .unwrap();
+        assert_eq!(xnyun.total_bytes, 0);
+
+        let unknown = trend
+            .sources
+            .iter()
+            .find(|source| source.name == "unknown")
+            .unwrap();
+        assert_eq!(unknown.total_bytes, 100);
+        assert_eq!(
+            trend.unknown_nodes,
+            vec![network_usage::UsageUnknownNode {
+                name: "current-manual-node".to_string(),
+                upload_bytes: 25,
+                download_bytes: 75,
+                total_bytes: 100,
+            }]
+        );
     }
 
     #[test]

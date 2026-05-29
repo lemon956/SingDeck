@@ -34,6 +34,9 @@ import {
 import {
   buildSingBoxRemoteProfileUri,
   type HelperGroupConfig,
+  type HelperNetworkUsageConnection,
+  type HelperNetworkUsageSourceTrendBucketMode,
+  type HelperNetworkUsageSourceTrendSource,
   type HelperNodeScore,
   type ScoreScheme
 } from '../core/helperApi';
@@ -54,16 +57,18 @@ import { useHelperStore } from '../state/helperStore';
 import { useProxyStore } from '../state/proxyStore';
 import { useRuntimeStore } from '../state/runtimeStore';
 import type { ConnectionRecord } from '../core/connections';
-import { SankeyChart } from 'echarts/charts';
-import { TooltipComponent } from 'echarts/components';
+import { LineChart, SankeyChart } from 'echarts/charts';
+import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components';
 import * as echarts from 'echarts/core';
-import { CanvasRenderer } from 'echarts/renderers';
+import { CanvasRenderer, SVGRenderer } from 'echarts/renderers';
 
-echarts.use([SankeyChart, TooltipComponent, CanvasRenderer]);
+echarts.use([LineChart, SankeyChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer, SVGRenderer]);
 
 const TRAFFIC_SPARKLINE_WINDOW_MS = 2 * 60 * 1000;
 const TRAFFIC_SPARKLINE_WIDTH = 188;
 const TRAFFIC_SPARKLINE_HEIGHT = 44;
+const SOURCE_TREND_DAYS = 7;
+const SOURCE_TREND_COLORS = ['#72f2b4', '#e7d66b', '#7cc7ff', '#f3be6a', '#c3a3ff', '#ff8a7a'];
 const DEFAULT_DELAY_TEST_TIMEOUT_MS = 5000;
 const DEFAULT_MIN_PROBE_INTERVAL_SEC = 60;
 const DEFAULT_NETWORK_USAGE_SAMPLE_INTERVAL_SEC = 5;
@@ -76,8 +81,14 @@ const NETWORK_USAGE_WINDOWS = [
   { id: '24h', label: '24h', durationMs: 24 * 60 * 60 * 1000, bucket: 'hour' as const },
   { id: '7d', label: '7d', durationMs: 7 * 24 * 60 * 60 * 1000, bucket: 'hour' as const }
 ] as const;
+const NETWORK_USAGE_VIEWS = [
+  { id: 'domains', label: 'Domains' },
+  { id: 'strategies', label: '策略组' },
+  { id: 'recent', label: '最近链接' }
+] as const;
 
 type NetworkUsageWindowId = (typeof NETWORK_USAGE_WINDOWS)[number]['id'];
+type NetworkUsageViewId = (typeof NETWORK_USAGE_VIEWS)[number]['id'];
 
 type InlineStatus = {
   tone: 'ok' | 'warn' | 'neutral';
@@ -274,6 +285,14 @@ function buildNetworkUsageRequest(windowId: NetworkUsageWindowId) {
   };
 }
 
+function buildSourceTrendRequest(bucket: HelperNetworkUsageSourceTrendBucketMode) {
+  return {
+    days: SOURCE_TREND_DAYS,
+    bucket,
+    tzOffsetMinutes: new Date().getTimezoneOffset()
+  };
+}
+
 function parseIntegerDraft(value: string, fallback: number, min: number, max: number): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) {
@@ -284,6 +303,11 @@ function parseIntegerDraft(value: string, fallback: number, min: number, max: nu
 
 function formatLastSeen(timestampMs: number): string {
   return timestampMs > 0 ? new Date(timestampMs).toLocaleTimeString() : '--';
+}
+
+function usageConnectionStrategyLabel(connection: HelperNetworkUsageConnection): string {
+  const route = connection.rule.match(/route\(([^)]+)\)/i)?.[1]?.trim();
+  return route || connection.chains.at(-1) || connection.outbound || 'unknown';
 }
 
 function delayTone(delay: number | null | undefined): DelayTone {
@@ -593,6 +617,156 @@ function buildSparklinePath(
   }, '');
 }
 
+function sourceTrendBucketStarts(sources: HelperNetworkUsageSourceTrendSource[]): number[] {
+  const starts = new Set<number>();
+  sources.forEach((source) => {
+    source.buckets.forEach((bucket) => starts.add(bucket.bucketStartMs));
+  });
+  return Array.from(starts).sort((left, right) => left - right);
+}
+
+function sourceTrendBucketValue(source: HelperNetworkUsageSourceTrendSource, bucketStartMs: number): number {
+  return source.buckets.find((bucket) => bucket.bucketStartMs === bucketStartMs)?.totalBytes ?? 0;
+}
+
+function formatSourceTrendTimestamp(value: number, bucket: HelperNetworkUsageSourceTrendBucketMode): string {
+  const date = new Date(value);
+  const datePart = `${date.getMonth() + 1}月${date.getDate()}日`;
+  if (bucket === 'day') {
+    return datePart;
+  }
+  const hour = String(date.getHours()).padStart(2, '0');
+  return `${datePart} ${hour}:00`;
+}
+
+function TrafficSourceTrendChart({
+  sources,
+  bucket,
+  selectedSource
+}: {
+  sources: HelperNetworkUsageSourceTrendSource[];
+  bucket: HelperNetworkUsageSourceTrendBucketMode;
+  selectedSource: string | null;
+}) {
+  const chartRef = useRef<HTMLDivElement | null>(null);
+  const chartInstanceRef = useRef<echarts.EChartsType | null>(null);
+  const bucketStarts = useMemo(() => sourceTrendBucketStarts(sources), [sources]);
+  const visibleSources = useMemo(
+    () => (selectedSource ? sources.filter((source) => source.name === selectedSource) : sources),
+    [selectedSource, sources]
+  );
+  const colorBySource = useMemo(() => {
+    const colors = new Map<string, string>();
+    sources.forEach((source, index) => {
+      colors.set(source.name, SOURCE_TREND_COLORS[index % SOURCE_TREND_COLORS.length]);
+    });
+    return colors;
+  }, [sources]);
+
+  useEffect(() => {
+    if (!chartRef.current) {
+      return;
+    }
+    const chart = echarts.init(chartRef.current, undefined, { renderer: 'svg' });
+    chartInstanceRef.current = chart;
+    const resizeObserver = new ResizeObserver(() => chart.resize());
+    resizeObserver.observe(chartRef.current);
+    return () => {
+      resizeObserver.disconnect();
+      chart.dispose();
+      chartInstanceRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const chart = chartInstanceRef.current;
+    if (!chart) {
+      return;
+    }
+
+    chart.setOption(
+      {
+        animation: true,
+        color: visibleSources.map((source) => colorBySource.get(source.name) ?? SOURCE_TREND_COLORS[0]),
+        grid: { left: 42, right: 8, top: 10, bottom: 20 },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: {
+            type: 'line',
+            lineStyle: { color: 'rgba(219,237,241,0.28)', width: 1 }
+          },
+          borderColor: 'rgba(219,237,241,0.16)',
+          backgroundColor: 'rgba(7,10,11,0.94)',
+          textStyle: {
+            color: '#e8f2ef',
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            fontSize: 11
+          },
+          formatter: (items: unknown) => {
+            const params = Array.isArray(items) ? items : [items];
+            const first = params[0] as { axisValue?: string | number } | undefined;
+            const timestamp = Number(first?.axisValue ?? 0);
+            const rows = params
+              .map((item) => {
+                const point = item as { marker?: string; seriesName?: string; value?: number };
+                return `${point.marker ?? ''}${point.seriesName ?? ''}: ${formatBytes(Number(point.value ?? 0))}`;
+              })
+              .join('<br/>');
+            return `${formatSourceTrendTimestamp(timestamp, bucket)}<br/>${rows}`;
+          }
+        },
+        xAxis: {
+          type: 'category',
+          boundaryGap: false,
+          data: bucketStarts,
+          axisLine: { lineStyle: { color: 'rgba(219,237,241,0.13)' } },
+          axisTick: { show: false },
+          axisLabel: {
+            color: '#8a999b',
+            fontSize: 10,
+            formatter: (value: number) => formatSourceTrendTimestamp(Number(value), bucket)
+          }
+        },
+        yAxis: {
+          type: 'value',
+          axisLabel: {
+            color: '#8a999b',
+            fontSize: 10,
+            formatter: (value: number) => formatBytes(Number(value))
+          },
+          splitLine: { lineStyle: { color: 'rgba(219,237,241,0.065)' } }
+        },
+        series: visibleSources.map((source) => ({
+          name: source.name,
+          type: 'line',
+          smooth: false,
+          showSymbol: false,
+          symbolSize: 5,
+          emphasis: { focus: 'series' },
+          lineStyle: {
+            width: 2,
+            color: colorBySource.get(source.name) ?? SOURCE_TREND_COLORS[0]
+          },
+          itemStyle: {
+            color: colorBySource.get(source.name) ?? SOURCE_TREND_COLORS[0]
+          },
+          data: bucketStarts.map((bucketStartMs) => sourceTrendBucketValue(source, bucketStartMs))
+        }))
+      },
+      true
+    );
+  }, [bucket, bucketStarts, colorBySource, visibleSources]);
+
+  return (
+    <div
+      aria-label="Provider source usage trend over seven days"
+      className="traffic-trend-echart"
+      ref={chartRef}
+      role="img"
+    />
+  );
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -672,6 +846,10 @@ export function App() {
     String(DEFAULT_NETWORK_USAGE_SAMPLE_INTERVAL_SEC)
   );
   const [networkUsageWindow, setNetworkUsageWindow] = useState<NetworkUsageWindowId>('24h');
+  const [networkUsageView, setNetworkUsageView] = useState<NetworkUsageViewId>('domains');
+  const [trafficTrendBucket, setTrafficTrendBucket] =
+    useState<HelperNetworkUsageSourceTrendBucketMode>('hour');
+  const [trafficTrendSourceFilter, setTrafficTrendSourceFilter] = useState<string | null>(null);
   const [nodeScoreSearch, setNodeScoreSearch] = useState('');
   const [selectedNodeScoreGroup, setSelectedNodeScoreGroup] = useState('');
   const [nodeScoreDropdownOpen, setNodeScoreDropdownOpen] = useState(false);
@@ -1295,9 +1473,11 @@ export function App() {
         railTrendMax,
         sparklineNow,
         TRAFFIC_SPARKLINE_WINDOW_MS
-      ),
+    ),
     [railTrendMax, runtime.history, sparklineNow]
   );
+  const sourceTrendSources = helper.networkUsageSourceTrend?.sources ?? [];
+  const sourceTrendHasSamples = sourceTrendSources.some((source) => source.totalBytes > 0);
   const highlightedConfig = useMemo(() => highlightJsonc(configWorkspace.content), [configWorkspace.content]);
   const activeSection = sections.find((section) => section.id === activeRoute) ?? sections[0];
   const activeSubtitle = sectionSubtitles[activeRoute];
@@ -1324,6 +1504,26 @@ export function App() {
 
     return () => window.clearInterval(timer);
   }, [activeRoute, helperServiceAvailable, trafficModuleEnabled]);
+
+  useEffect(() => {
+    if (trafficTrendSourceFilter && !sourceTrendSources.some((source) => source.name === trafficTrendSourceFilter)) {
+      setTrafficTrendSourceFilter(null);
+    }
+  }, [sourceTrendSources, trafficTrendSourceFilter]);
+
+  useEffect(() => {
+    if (activeRoute !== 'overview' || !helperServiceAvailable || !networkUsageModuleEnabled) {
+      return;
+    }
+
+    const loadSourceTrend = () => {
+      void useHelperStore.getState().loadNetworkUsageSourceTrend(buildSourceTrendRequest(trafficTrendBucket));
+    };
+    loadSourceTrend();
+    const timer = window.setInterval(loadSourceTrend, 5 * 60 * 1000);
+
+    return () => window.clearInterval(timer);
+  }, [activeRoute, helperServiceAvailable, networkUsageModuleEnabled, trafficTrendBucket]);
 
   useEffect(() => {
     if (activeRoute !== 'overview' || !helperServiceAvailable || !networkUsageModuleEnabled) {
@@ -2134,28 +2334,139 @@ export function App() {
                   : 'Helper offline. Browser-backed provider traffic is unavailable.'}
               </div>
             ) : helper.traffic?.providers.length ? (
-              <div className="traffic-provider-list">
-                {helper.traffic.providers.map((provider) => {
-                  const summary = summarizeTrafficProvider(provider);
-                  const ratio = Math.min(100, Math.max(0, provider.usedRatio ?? 0));
-                  return (
-                    <div className={`traffic-provider-row ${provider.error ? 'error' : ''}`} key={provider.id}>
-                      <div className="traffic-provider-title">
-                        <strong>{provider.name}</strong>
-                        <span>{provider.error ?? provider.planName ?? 'plan pending'}</span>
+              <>
+                <div className="traffic-provider-list">
+                  {helper.traffic.providers.map((provider) => {
+                    const summary = summarizeTrafficProvider(provider);
+                    const ratio = Math.min(100, Math.max(0, provider.usedRatio ?? 0));
+                    const rowState = provider.error && !summary.stale ? 'error' : summary.stale ? 'stale' : '';
+                    return (
+                      <div className={`traffic-provider-row ${rowState}`} key={provider.id}>
+                        <div className="traffic-provider-title">
+                          <strong>{provider.name}</strong>
+                          <span>{provider.error ?? provider.planName ?? 'plan pending'}</span>
+                        </div>
+                        <div className="traffic-provider-meter" aria-label={`${provider.name} traffic usage`}>
+                          <span style={{ width: `${ratio}%` }} />
+                        </div>
+                        <div className="traffic-provider-meta traffic-provider-fields">
+                          <span>
+                            <small>总流量</small>
+                            <strong>{summary.total}</strong>
+                          </span>
+                          <span>
+                            <small>已使用流量</small>
+                            <strong>{summary.used}</strong>
+                          </span>
+                          <span>
+                            <small>重置日期</small>
+                            <strong>{summary.reset}</strong>
+                          </span>
+                          <span>
+                            <small>付费时间</small>
+                            <strong>{summary.payment}</strong>
+                          </span>
+                        </div>
                       </div>
-                      <div className="traffic-provider-meter" aria-label={`${provider.name} traffic usage`}>
-                        <span style={{ width: `${ratio}%` }} />
-                      </div>
-                      <div className="traffic-provider-meta">
-                        <span>{summary.used} / {summary.total}</span>
-                        <span>{summary.remaining} left</span>
-                        <span>{summary.expires}</span>
+                    );
+                  })}
+                </div>
+                <div className="traffic-source-trend">
+                  <div className="traffic-trend-head">
+                    <div>
+                      <span>最近 7 天使用量</span>
+                      <small>按节点来源统计</small>
+                    </div>
+                    <div className="traffic-trend-actions">
+                      <button
+                        aria-label="Refresh source trend"
+                        className="ghost-action compact-icon-action"
+                        disabled={helper.networkUsageSourceTrendRefreshing}
+                        onClick={() =>
+                          void useHelperStore
+                            .getState()
+                            .refreshNetworkUsageSourceTrend(buildSourceTrendRequest(trafficTrendBucket))
+                        }
+                        type="button"
+                      >
+                        <RefreshCw size={13} />
+                        {helper.networkUsageSourceTrendRefreshing ? 'Refreshing' : 'Refresh'}
+                      </button>
+                      <div className="traffic-trend-tabs" aria-label="Provider traffic trend bucket">
+                        {(['hour', 'day'] as const).map((bucket) => (
+                          <button
+                            className={trafficTrendBucket === bucket ? 'active' : ''}
+                            key={bucket}
+                            onClick={() => {
+                              setTrafficTrendBucket(bucket);
+                              void useHelperStore.getState().loadNetworkUsageSourceTrend(buildSourceTrendRequest(bucket));
+                            }}
+                            type="button"
+                          >
+                            {bucket === 'hour' ? 'Hour' : 'Day'}
+                          </button>
+                        ))}
                       </div>
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
+                  {helper.networkUsageSourceTrendRefreshError ? (
+                    <div className="traffic-trend-inline-error">{helper.networkUsageSourceTrendRefreshError}</div>
+                  ) : null}
+                  {!networkUsageModuleEnabled ? (
+                    <div className="traffic-provider-empty compact">Enable Network usage to build source trends.</div>
+                  ) : helper.networkUsageSourceTrendError && !helper.networkUsageSourceTrend ? (
+                    <div className="traffic-provider-empty compact">{helper.networkUsageSourceTrendError}</div>
+                  ) : helper.networkUsageSourceTrendLoading && !helper.networkUsageSourceTrend ? (
+                    <div className="traffic-provider-empty compact">Loading source trend...</div>
+                  ) : !sourceTrendHasSamples ? (
+                    <div className="traffic-provider-empty compact">No source usage samples in the last 7 days.</div>
+                  ) : (
+                    <>
+                      <div className="traffic-trend-legend">
+                        {sourceTrendSources.map((source, index) => (
+                          <button
+                            aria-label={`Filter source ${source.name}`}
+                            aria-pressed={trafficTrendSourceFilter === source.name}
+                            className={trafficTrendSourceFilter === source.name ? 'active' : ''}
+                            key={source.name}
+                            onClick={() =>
+                              setTrafficTrendSourceFilter((current) => (current === source.name ? null : source.name))
+                            }
+                            type="button"
+                          >
+                            <i style={{ background: SOURCE_TREND_COLORS[index % SOURCE_TREND_COLORS.length] }} />
+                            <strong>{source.name}</strong>
+                            <em>{formatBytes(source.totalBytes)}</em>
+                          </button>
+                        ))}
+                      </div>
+                      <TrafficSourceTrendChart
+                        bucket={trafficTrendBucket}
+                        selectedSource={trafficTrendSourceFilter}
+                        sources={sourceTrendSources}
+                      />
+                      <div className="traffic-trend-axis">
+                        <span>7d ago</span>
+                        <span>{trafficTrendBucket === 'hour' ? 'hourly' : 'daily'}</span>
+                        <span>now</span>
+                      </div>
+                      {helper.networkUsageSourceTrend?.unknownNodes.length ? (
+                        <div className="traffic-unknown-nodes">
+                          <span>unknown 包含</span>
+                          <div>
+                            {helper.networkUsageSourceTrend.unknownNodes.map((node) => (
+                              <strong key={node.name}>
+                                {node.name}
+                                <em>{formatBytes(node.totalBytes)}</em>
+                              </strong>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              </>
             ) : (
               <div className="traffic-provider-empty">
                 {helper.trafficError ?? 'Provider traffic has not been synced yet.'}
@@ -2186,7 +2497,7 @@ export function App() {
                   : 'Helper offline. Usage capture is unavailable.'}
               </div>
             ) : !networkUsageModuleEnabled ? (
-              <div className="usage-empty">Enable Network usage in Settings to store domain and outbound traffic.</div>
+              <div className="usage-empty">Enable Network usage in Settings to store domain and strategy traffic.</div>
             ) : helper.networkUsageSummary ? (
               <>
                 <div className="usage-total-grid">
@@ -2207,45 +2518,70 @@ export function App() {
                     <strong>{helper.networkUsageSummary.connectionCount} connections</strong>
                   </span>
                 </div>
-                <div className="usage-columns">
-                  <div>
-                    <span className="usage-list-title">Top domains</span>
-                    {(helper.networkUsageTopHosts?.items ?? []).slice(0, 4).map((item) => (
-                      <div className="usage-rank-row" key={item.label}>
-                        <span>{item.label}</span>
-                        <strong>{formatBytes(item.totalBytes)}</strong>
-                      </div>
-                    ))}
-                    {helper.networkUsageTopHosts?.items.length === 0 ? <small>No domain usage yet.</small> : null}
-                  </div>
-                  <div>
-                    <span className="usage-list-title">Top outbounds</span>
-                    {(helper.networkUsageTopOutbounds?.items ?? []).slice(0, 4).map((item) => (
-                      <div className="usage-rank-row" key={item.label}>
-                        <span>{item.label}</span>
-                        <strong>{formatBytes(item.totalBytes)}</strong>
-                      </div>
-                    ))}
-                    {helper.networkUsageTopOutbounds?.items.length === 0 ? <small>No outbound usage yet.</small> : null}
-                  </div>
+                <div className="usage-view-tabs" aria-label="Network usage content">
+                  {NETWORK_USAGE_VIEWS.map((item) => (
+                    <button
+                      aria-pressed={networkUsageView === item.id}
+                      className={networkUsageView === item.id ? 'active' : ''}
+                      key={item.id}
+                      onClick={() => setNetworkUsageView(item.id)}
+                      type="button"
+                    >
+                      {item.label}
+                    </button>
+                  ))}
                 </div>
-                <div className="usage-connection-window">
-                  <div className="usage-connection-list">
-                    {(helper.networkUsageConnections?.connections ?? []).slice(0, 10).map((connection) => (
-                      <div className="usage-connection-row" key={connection.id}>
-                        <div>
-                          <strong>{connection.host}</strong>
-                          <span>{connection.rule}</span>
+                <div className="usage-view-panel">
+                  {networkUsageView === 'domains' ? (
+                    <div className="usage-rank-list">
+                      <span className="usage-list-title">Top domains</span>
+                      {(helper.networkUsageTopHosts?.items ?? []).slice(0, 10).map((item) => (
+                        <div className="usage-rank-row" key={item.label}>
+                          <span>{item.label}</span>
+                          <em>{item.connectionCount} conns</em>
+                          <strong>{formatBytes(item.totalBytes)}</strong>
                         </div>
-                        <span>{connection.outbound}</span>
-                        <span>{formatBytes(connection.totalBytes)}</span>
-                        <span>{formatLastSeen(connection.lastSeenMs)}</span>
+                      ))}
+                      {helper.networkUsageTopHosts?.items.length === 0 ? (
+                        <div className="usage-empty compact">No domain usage in this window.</div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {networkUsageView === 'strategies' ? (
+                    <div className="usage-rank-list">
+                      <span className="usage-list-title">策略组排行</span>
+                      {(helper.networkUsageTopStrategies?.items ?? []).slice(0, 10).map((item) => (
+                        <div className="usage-rank-row" key={item.label}>
+                          <span>{item.label}</span>
+                          <em>{item.connectionCount} conns</em>
+                          <strong>{formatBytes(item.totalBytes)}</strong>
+                        </div>
+                      ))}
+                      {helper.networkUsageTopStrategies?.items.length === 0 ? (
+                        <div className="usage-empty compact">No strategy group usage in this window.</div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {networkUsageView === 'recent' ? (
+                    <div className="usage-connection-window">
+                      <div className="usage-connection-list">
+                        {(helper.networkUsageConnections?.connections ?? []).slice(0, 10).map((connection) => (
+                          <div className="usage-connection-row" key={connection.id}>
+                            <div>
+                              <strong>{connection.host}</strong>
+                              <span>{connection.rule}</span>
+                            </div>
+                            <span>{usageConnectionStrategyLabel(connection)}</span>
+                            <span>{formatBytes(connection.totalBytes)}</span>
+                            <span>{formatLastSeen(connection.lastSeenMs)}</span>
+                          </div>
+                        ))}
+                        {helper.networkUsageConnections?.connections.length === 0 ? (
+                          <div className="usage-empty compact">No sampled connection traffic in this window.</div>
+                        ) : null}
                       </div>
-                    ))}
-                    {helper.networkUsageConnections?.connections.length === 0 ? (
-                      <div className="usage-empty compact">No sampled connection traffic in this window.</div>
-                    ) : null}
-                  </div>
+                    </div>
+                  ) : null}
                 </div>
               </>
             ) : (
@@ -2529,7 +2865,7 @@ export function App() {
                     <span className="automation-switch" aria-hidden="true" />
                     <span>
                       <strong>Network usage</strong>
-                      <small>Store sampled domains and outbounds for the Overview usage window</small>
+                      <small>Store sampled domains and strategy groups for the Overview usage window</small>
                     </span>
                   </label>
                   <label>

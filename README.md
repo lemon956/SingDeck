@@ -187,6 +187,10 @@ Provider Traffic is optional and is disabled by default. Enable it in Settings, 
 
 The helper only uses the Chrome profile path saved in Settings; it does not auto-detect or default to the current user's Chrome profile. It reads Chrome's `Cookies` or `Network/Cookies` SQLite database and `Local Storage/leveldb` under that directory. The directory is created by Chrome, not by SingDeck. For encrypted Chrome cookies, the helper uses `secret-tool`; when the helper runs as root, it also tries the Chrome profile owner's DBus keyring session. Keep the desktop user's keyring unlocked, and install the libsecret tools package if `secret-tool` is unavailable.
 
+Provider Traffic currently syncs WD Gold and XNYun. WD Gold uses the subscription URL saved in the configured Chrome profile session, then reads the `subscription-userinfo` response header for upload, download, total, and expire values. If that URL is unavailable, the helper falls back to the logged-in WD product page. The helper does not store provider passwords or attempt automated login. If a WD Gold sync fails after a previous success, Overview keeps showing the last successful WD Gold snapshot as stale data until the Chrome profile has a usable WD session again.
+
+The Provider Traffic widget also shows a 7-day source usage trend when Network usage is enabled. The trend is calculated from SingDeck's local `network_usage_buckets` samples and the `nodeSources` node associations in the sidecar config. Use the Hour/Day switch to aggregate the same 7-day window by hour or by day. Traffic whose outbound node cannot be matched to a configured source is grouped as `unknown`, and the widget lists the unknown nodes underneath the chart.
+
 ## Verification
 
 Run frontend tests and production build:
@@ -225,4 +229,5 @@ Expected response fields include `ok`, `sqlite`, `controllerConfigured`, and `co
 - Config workspace cannot read the file: set the config path in Settings and make sure the helper process user can read it.
 - Scores do not appear: sync the controller to the helper, then load groups or manually probe a group.
 - Provider Traffic is hidden: enable it in Settings.
-- Traffic workspace shows provider errors: check the Chrome profile path in Settings and make sure the relevant provider sessions exist in that Chrome profile.
+- Traffic workspace shows provider errors: check the Chrome profile path in Settings and make sure WD Gold and XNYun sessions exist in that Chrome profile.
+- WD Gold shows stale data: the WD login session or Cloudflare verification is usually expired. Open WD Gold with the same Chrome profile, log in or pass verification again, then click Sync in Overview.

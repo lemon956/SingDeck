@@ -3,6 +3,7 @@ use chrono::DateTime;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const MINUTE_MS: i64 = 60 * 1000;
@@ -60,6 +61,42 @@ impl UsageBucket {
         match self {
             Self::Minute => MINUTE_MS,
             Self::Hour => HOUR_MS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceTrendBucket {
+    Hour,
+    Day,
+}
+
+impl SourceTrendBucket {
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+            "day" => Self::Day,
+            _ => Self::Hour,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Hour => "hour",
+            Self::Day => "day",
+        }
+    }
+
+    fn size_ms(self) -> i64 {
+        match self {
+            Self::Hour => HOUR_MS,
+            Self::Day => DAY_MS,
+        }
+    }
+
+    fn point_count(self, days: i64) -> usize {
+        match self {
+            Self::Hour => (days * 24) as usize,
+            Self::Day => days as usize,
         }
     }
 }
@@ -148,7 +185,46 @@ pub struct UsageWindowResponse {
     pub summary: UsageSummaryResponse,
     pub top_hosts: UsageTopResponse,
     pub top_outbounds: UsageTopResponse,
+    pub top_strategies: UsageTopResponse,
     pub connections: UsageConnectionsResponse,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSourceTrendResponse {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub bucket: String,
+    pub sources: Vec<UsageSourceTrendSource>,
+    pub unknown_nodes: Vec<UsageUnknownNode>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSourceTrendSource {
+    pub name: String,
+    pub upload_bytes: i64,
+    pub download_bytes: i64,
+    pub total_bytes: i64,
+    pub buckets: Vec<UsageSourceTrendPoint>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSourceTrendPoint {
+    pub bucket_start_ms: i64,
+    pub upload_bytes: i64,
+    pub download_bytes: i64,
+    pub total_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageUnknownNode {
+    pub name: String,
+    pub upload_bytes: i64,
+    pub download_bytes: i64,
+    pub total_bytes: i64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -178,6 +254,20 @@ struct ConnectionSample {
     started_at_ms: Option<i64>,
     upload_counter: i64,
     download_counter: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceAggregate {
+    upload_bytes: i64,
+    download_bytes: i64,
+    buckets: BTreeMap<i64, (i64, i64)>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StrategyAggregate {
+    upload_bytes: i64,
+    download_bytes: i64,
+    connection_ids: BTreeSet<String>,
 }
 
 pub fn init_db(conn: &Connection) -> Result<()> {
@@ -604,6 +694,74 @@ pub fn query_top(
     })
 }
 
+pub fn query_top_strategies(
+    conn: &Connection,
+    from_ms: i64,
+    to_ms: i64,
+    limit: i64,
+) -> Result<UsageTopResponse> {
+    let limit = limit.clamp(1, MAX_QUERY_LIMIT) as usize;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+          b.connection_id,
+          c.rule,
+          c.outbound,
+          c.chains_json,
+          COALESCE(SUM(b.upload_bytes), 0),
+          COALESCE(SUM(b.download_bytes), 0)
+        FROM network_usage_buckets b
+        JOIN network_usage_connections c ON c.connection_id = b.connection_id
+        WHERE b.bucket_start_ms >= ?1 AND b.bucket_start_ms < ?2
+        GROUP BY b.connection_id, c.rule, c.outbound, c.chains_json
+        "#,
+    )?;
+    let rows = stmt.query_map(params![from_ms, to_ms], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+        ))
+    })?;
+
+    let mut strategies = BTreeMap::<String, StrategyAggregate>::new();
+    for row in rows {
+        let (connection_id, rule, outbound, chains_json, upload_bytes, download_bytes) = row?;
+        let chains = serde_json::from_str::<Vec<String>>(&chains_json).unwrap_or_default();
+        let label = strategy_group_label(&rule, &outbound, &chains);
+        let aggregate = strategies.entry(label).or_default();
+        aggregate.upload_bytes += upload_bytes;
+        aggregate.download_bytes += download_bytes;
+        aggregate.connection_ids.insert(connection_id);
+    }
+
+    let mut items = strategies
+        .into_iter()
+        .map(|(label, aggregate)| UsageTopItem {
+            label,
+            upload_bytes: aggregate.upload_bytes,
+            download_bytes: aggregate.download_bytes,
+            total_bytes: aggregate.upload_bytes + aggregate.download_bytes,
+            connection_count: aggregate.connection_ids.len() as i64,
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        right
+            .total_bytes
+            .cmp(&left.total_bytes)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    items.truncate(limit);
+
+    Ok(UsageTopResponse {
+        group_by: "strategy".to_string(),
+        items,
+    })
+}
+
 pub fn query_connections(
     conn: &Connection,
     from_ms: i64,
@@ -634,7 +792,9 @@ pub fn query_connections(
               AND b.bucket_start_ms < ?2
               AND (c.host LIKE ?3 OR c.outbound LIKE ?3 OR c.rule LIKE ?3)
             GROUP BY c.connection_id
-            ORDER BY COALESCE(SUM(b.upload_bytes + b.download_bytes), 0) DESC, c.last_seen_ms DESC
+            ORDER BY MAX(b.bucket_start_ms) DESC,
+              COALESCE(SUM(b.upload_bytes + b.download_bytes), 0) DESC,
+              c.connection_id ASC
             LIMIT ?4
             "#,
         )?;
@@ -659,7 +819,9 @@ pub fn query_connections(
             JOIN network_usage_connections c ON c.connection_id = b.connection_id
             WHERE b.bucket_start_ms >= ?1 AND b.bucket_start_ms < ?2
             GROUP BY c.connection_id
-            ORDER BY COALESCE(SUM(b.upload_bytes + b.download_bytes), 0) DESC, c.last_seen_ms DESC
+            ORDER BY MAX(b.bucket_start_ms) DESC,
+              COALESCE(SUM(b.upload_bytes + b.download_bytes), 0) DESC,
+              c.connection_id ASC
             LIMIT ?3
             "#,
         )?;
@@ -683,8 +845,249 @@ pub fn query_window(
         summary: query_summary(conn, from_ms, to_ms, bucket)?,
         top_hosts: query_top(conn, from_ms, to_ms, UsageGroupBy::Host, limit)?,
         top_outbounds: query_top(conn, from_ms, to_ms, UsageGroupBy::Outbound, limit)?,
+        top_strategies: query_top_strategies(conn, from_ms, to_ms, limit)?,
         connections: query_connections(conn, from_ms, to_ms, limit, query)?,
     })
+}
+
+pub fn query_source_trend(
+    conn: &Connection,
+    now_ms: i64,
+    days: i64,
+    bucket: SourceTrendBucket,
+    tz_offset_minutes: i64,
+    current_nodes: Option<&BTreeSet<String>>,
+) -> Result<UsageSourceTrendResponse> {
+    let days = days.clamp(MIN_RETENTION_DAYS, MAX_RETENTION_DAYS);
+    let bucket_size = bucket.size_ms();
+    let point_count = bucket.point_count(days);
+    let offset_ms = tz_offset_minutes.clamp(-24 * 60, 24 * 60) * MINUTE_MS;
+    let current_bucket_start = aligned_bucket_start(now_ms.max(0), bucket_size, offset_ms);
+    let from_ms = current_bucket_start.saturating_sub((point_count as i64 - 1) * bucket_size);
+    let to_ms = current_bucket_start.saturating_add(bucket_size);
+    let bucket_starts = (0..point_count)
+        .map(|index| from_ms + index as i64 * bucket_size)
+        .collect::<Vec<_>>();
+
+    let node_sources = query_node_source_map(conn)?;
+    let source_names = node_sources.values().cloned().collect::<BTreeSet<_>>();
+    let mut sources = source_names
+        .into_iter()
+        .map(|source| (source, SourceAggregate::default()))
+        .collect::<BTreeMap<_, _>>();
+    let mut unknown_nodes = BTreeMap::<String, (i64, i64)>::new();
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+          b.bucket_start_ms,
+          b.outbound,
+          c.chains_json,
+          COALESCE(SUM(b.upload_bytes), 0),
+          COALESCE(SUM(b.download_bytes), 0)
+        FROM network_usage_buckets b
+        LEFT JOIN network_usage_connections c ON c.connection_id = b.connection_id
+        WHERE b.bucket_start_ms >= ?1 AND b.bucket_start_ms < ?2
+        GROUP BY b.bucket_start_ms, b.connection_id, b.outbound, c.chains_json
+        ORDER BY b.bucket_start_ms ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![from_ms, to_ms], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+
+    for row in rows {
+        let (raw_bucket_start, outbound, chains_json, upload_bytes, download_bytes) = row?;
+        if upload_bytes == 0 && download_bytes == 0 {
+            continue;
+        }
+        let chains = chains_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+            .unwrap_or_default();
+        let candidates = source_candidate_nodes(&outbound, &chains);
+        let candidates = if let Some(current_nodes) = current_nodes {
+            let current_candidates = candidates
+                .into_iter()
+                .filter(|node| current_nodes.contains(node.as_str()))
+                .collect::<Vec<_>>();
+            if current_candidates.is_empty() {
+                continue;
+            }
+            current_candidates
+        } else {
+            candidates
+        };
+        let source_name = candidates
+            .iter()
+            .find_map(|node| node_sources.get(node).cloned())
+            .unwrap_or_else(|| "unknown".to_string());
+        let grouped_bucket = aligned_bucket_start(raw_bucket_start, bucket_size, offset_ms);
+        if grouped_bucket < from_ms || grouped_bucket >= to_ms {
+            continue;
+        }
+
+        let aggregate = sources.entry(source_name.clone()).or_default();
+        aggregate.upload_bytes += upload_bytes;
+        aggregate.download_bytes += download_bytes;
+        let bucket_total = aggregate.buckets.entry(grouped_bucket).or_default();
+        bucket_total.0 += upload_bytes;
+        bucket_total.1 += download_bytes;
+
+        if source_name == "unknown" {
+            let node_name = candidates
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            let node_total = unknown_nodes.entry(node_name).or_default();
+            node_total.0 += upload_bytes;
+            node_total.1 += download_bytes;
+        }
+    }
+
+    let mut source_rows = sources
+        .into_iter()
+        .filter_map(|(name, aggregate)| {
+            if name == "unknown" && aggregate.upload_bytes == 0 && aggregate.download_bytes == 0 {
+                return None;
+            }
+            let buckets = bucket_starts
+                .iter()
+                .map(|bucket_start_ms| {
+                    let (upload_bytes, download_bytes) = aggregate
+                        .buckets
+                        .get(bucket_start_ms)
+                        .copied()
+                        .unwrap_or_default();
+                    UsageSourceTrendPoint {
+                        bucket_start_ms: *bucket_start_ms,
+                        upload_bytes,
+                        download_bytes,
+                        total_bytes: upload_bytes + download_bytes,
+                    }
+                })
+                .collect::<Vec<_>>();
+            Some(UsageSourceTrendSource {
+                name,
+                upload_bytes: aggregate.upload_bytes,
+                download_bytes: aggregate.download_bytes,
+                total_bytes: aggregate.upload_bytes + aggregate.download_bytes,
+                buckets,
+            })
+        })
+        .collect::<Vec<_>>();
+    source_rows.sort_by(
+        |left, right| match (left.name.as_str(), right.name.as_str()) {
+            ("unknown", "unknown") => std::cmp::Ordering::Equal,
+            ("unknown", _) => std::cmp::Ordering::Greater,
+            (_, "unknown") => std::cmp::Ordering::Less,
+            _ => left.name.cmp(&right.name),
+        },
+    );
+
+    let mut unknown_rows = unknown_nodes
+        .into_iter()
+        .map(|(name, (upload_bytes, download_bytes))| UsageUnknownNode {
+            name,
+            upload_bytes,
+            download_bytes,
+            total_bytes: upload_bytes + download_bytes,
+        })
+        .collect::<Vec<_>>();
+    unknown_rows.sort_by(|left, right| {
+        right
+            .total_bytes
+            .cmp(&left.total_bytes)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    Ok(UsageSourceTrendResponse {
+        from_ms,
+        to_ms,
+        bucket: bucket.label().to_string(),
+        sources: source_rows,
+        unknown_nodes: unknown_rows,
+    })
+}
+
+fn query_node_source_map(conn: &Connection) -> Result<BTreeMap<String, String>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT node_name, source_name
+        FROM node_source_nodes
+        ORDER BY source_name ASC, node_name ASC
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut node_sources = BTreeMap::new();
+    for row in rows {
+        let (node_name, source_name) = row?;
+        node_sources.entry(node_name).or_insert(source_name);
+    }
+    Ok(node_sources)
+}
+
+fn source_candidate_nodes(outbound: &str, chains: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    std::iter::once(outbound)
+        .chain(chains.iter().map(String::as_str))
+        .filter_map(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            if seen.insert(trimmed.to_string()) {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn aligned_bucket_start(value_ms: i64, bucket_size_ms: i64, offset_ms: i64) -> i64 {
+    (value_ms - offset_ms).div_euclid(bucket_size_ms) * bucket_size_ms + offset_ms
+}
+
+fn strategy_group_label(rule: &str, outbound: &str, chains: &[String]) -> String {
+    route_rule_target(rule)
+        .or_else(|| {
+            chains
+                .iter()
+                .rev()
+                .map(|value| value.trim())
+                .find(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            let trimmed = outbound.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn route_rule_target(rule: &str) -> Option<String> {
+    let lower = rule.to_ascii_lowercase();
+    let start = lower.find("route(")? + "route(".len();
+    let end = rule[start..].find(')')? + start;
+    let target = rule[start..end].trim();
+    if target.is_empty() {
+        None
+    } else {
+        Some(target.to_string())
+    }
 }
 
 fn rows_to_connections<F>(rows: rusqlite::MappedRows<'_, F>) -> Result<Vec<UsageConnectionRow>>
@@ -801,6 +1204,27 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         conn
+    }
+
+    fn init_source_tables(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE node_source_nodes (
+              source_name TEXT NOT NULL,
+              node_name TEXT NOT NULL,
+              PRIMARY KEY (source_name, node_name)
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn link_source_node(conn: &Connection, source_name: &str, node_name: &str) {
+        conn.execute(
+            "INSERT INTO node_source_nodes (source_name, node_name) VALUES (?1, ?2)",
+            params![source_name, node_name],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -969,9 +1393,290 @@ mod tests {
         assert_eq!(window.summary.total_bytes, 220);
         assert_eq!(window.top_hosts.group_by, "host");
         assert_eq!(window.top_hosts.items[0].label, "example.com");
-        assert_eq!(window.top_outbounds.group_by, "outbound");
-        assert_eq!(window.top_outbounds.items[0].label, "proxy-a");
+        assert_eq!(window.top_strategies.group_by, "strategy");
+        assert_eq!(window.top_strategies.items[0].label, "proxy-a");
         assert_eq!(window.connections.connections[0].id, "conn-1");
+    }
+
+    #[test]
+    fn query_window_groups_top_strategies_by_route_or_last_chain() {
+        let conn = test_db();
+        apply_connections_snapshot(&conn, &json!({ "connections": [] }), 0).unwrap();
+        apply_connections_snapshot(
+            &conn,
+            &json!({
+                "connections": [
+                    {
+                        "id": "select-hk",
+                        "start": "1970-01-01T00:00:00.500Z",
+                        "metadata": { "host": "hk.example.com", "network": "tcp" },
+                        "chains": ["hk-node", "select"],
+                        "rule": "DOMAIN",
+                        "rulePayload": "hk.example.com",
+                        "upload": 100,
+                        "download": 900
+                    },
+                    {
+                        "id": "select-jp",
+                        "start": "1970-01-01T00:00:00.500Z",
+                        "metadata": { "host": "jp.example.com", "network": "tcp" },
+                        "chains": ["jp-node", "select"],
+                        "rule": "DOMAIN",
+                        "rulePayload": "jp.example.com",
+                        "upload": 200,
+                        "download": 800
+                    },
+                    {
+                        "id": "route-auto",
+                        "start": "1970-01-01T00:00:00.500Z",
+                        "metadata": { "host": "auto.example.com", "network": "tcp" },
+                        "chains": ["fallback-node", "fallback"],
+                        "rule": "route(auto)",
+                        "upload": 125,
+                        "download": 375
+                    }
+                ]
+            }),
+            60_000,
+        )
+        .unwrap();
+
+        let window = query_window(&conn, 0, 120_000, UsageBucket::Minute, 10, None).unwrap();
+
+        assert_eq!(window.top_strategies.group_by, "strategy");
+        assert_eq!(window.top_strategies.items[0].label, "select");
+        assert_eq!(window.top_strategies.items[0].total_bytes, 2000);
+        assert_eq!(window.top_strategies.items[0].connection_count, 2);
+        assert_eq!(window.top_strategies.items[1].label, "auto");
+        assert_eq!(window.top_strategies.items[1].total_bytes, 500);
+    }
+
+    #[test]
+    fn query_connections_orders_by_recent_activity_before_volume() {
+        let conn = test_db();
+        apply_connections_snapshot(&conn, &json!({ "connections": [] }), 0).unwrap();
+        apply_connections_snapshot(
+            &conn,
+            &json!({
+                "connections": [{
+                    "id": "large-old",
+                    "start": "1970-01-01T00:00:00.500Z",
+                    "metadata": { "host": "large.example.com", "network": "tcp" },
+                    "chains": ["large-node", "select"],
+                    "upload": 5000,
+                    "download": 1000
+                }]
+            }),
+            60_000,
+        )
+        .unwrap();
+        apply_connections_snapshot(
+            &conn,
+            &json!({
+                "connections": [{
+                    "id": "small-new",
+                    "start": "1970-01-01T00:01:00.500Z",
+                    "metadata": { "host": "small.example.com", "network": "tcp" },
+                    "chains": ["small-node", "select"],
+                    "upload": 50,
+                    "download": 50
+                }]
+            }),
+            120_000,
+        )
+        .unwrap();
+
+        let rows = query_connections(&conn, 0, 180_000, 10, None).unwrap();
+
+        assert_eq!(rows.connections[0].id, "small-new");
+        assert_eq!(rows.connections[1].id, "large-old");
+    }
+
+    #[test]
+    fn query_source_trend_groups_usage_by_node_source_and_unknown_nodes() {
+        let conn = test_db();
+        init_source_tables(&conn);
+        link_source_node(&conn, "wd", "wd-node");
+        link_source_node(&conn, "xnyun", "xnyun-node");
+        apply_connections_snapshot(&conn, &json!({ "connections": [] }), 0).unwrap();
+        apply_connections_snapshot(
+            &conn,
+            &json!({
+                "connections": [
+                    {
+                        "id": "wd-conn",
+                        "start": "1970-01-01T00:00:00.500Z",
+                        "metadata": { "host": "wd.test", "network": "tcp" },
+                        "chains": ["wd-node", "select"],
+                        "upload": 100,
+                        "download": 400
+                    },
+                    {
+                        "id": "unknown-conn",
+                        "start": "1970-01-01T00:00:00.500Z",
+                        "metadata": { "host": "unknown.test", "network": "tcp" },
+                        "chains": ["manual-node", "select"],
+                        "upload": 25,
+                        "download": 75
+                    }
+                ]
+            }),
+            60_000,
+        )
+        .unwrap();
+
+        let trend = query_source_trend(&conn, 0, 7, SourceTrendBucket::Day, 0, None).unwrap();
+
+        let wd = trend
+            .sources
+            .iter()
+            .find(|source| source.name == "wd")
+            .unwrap();
+        assert_eq!(wd.total_bytes, 500);
+        assert_eq!(wd.buckets.len(), 7);
+        assert_eq!(wd.buckets[6].bucket_start_ms, 0);
+        assert_eq!(wd.buckets[6].total_bytes, 500);
+
+        let xnyun = trend
+            .sources
+            .iter()
+            .find(|source| source.name == "xnyun")
+            .unwrap();
+        assert_eq!(xnyun.total_bytes, 0);
+        assert_eq!(xnyun.buckets.len(), 7);
+
+        let unknown = trend
+            .sources
+            .iter()
+            .find(|source| source.name == "unknown")
+            .unwrap();
+        assert_eq!(unknown.total_bytes, 100);
+        assert_eq!(
+            trend.unknown_nodes,
+            vec![UsageUnknownNode {
+                name: "manual-node".to_string(),
+                upload_bytes: 25,
+                download_bytes: 75,
+                total_bytes: 100,
+            }]
+        );
+    }
+
+    #[test]
+    fn query_source_trend_can_group_last_seven_days_by_hour() {
+        let conn = test_db();
+        init_source_tables(&conn);
+        link_source_node(&conn, "wd", "wd-node");
+        apply_connections_snapshot(&conn, &json!({ "connections": [] }), 0).unwrap();
+        apply_connections_snapshot(
+            &conn,
+            &json!({
+                "connections": [{
+                    "id": "wd-conn",
+                    "start": "1970-01-01T00:00:00.500Z",
+                    "metadata": { "host": "wd.test", "network": "tcp" },
+                    "chains": ["wd-node"],
+                    "upload": 100,
+                    "download": 200
+                }]
+            }),
+            HOUR_MS,
+        )
+        .unwrap();
+
+        let trend =
+            query_source_trend(&conn, HOUR_MS, 7, SourceTrendBucket::Hour, 0, None).unwrap();
+
+        assert_eq!(trend.bucket, "hour");
+        assert_eq!(trend.sources[0].buckets.len(), 7 * 24);
+        assert_eq!(trend.sources[0].buckets[167].bucket_start_ms, HOUR_MS);
+        assert_eq!(trend.sources[0].buckets[167].total_bytes, 300);
+    }
+
+    #[test]
+    fn query_source_trend_filters_nodes_not_in_current_config() {
+        let conn = test_db();
+        init_source_tables(&conn);
+        link_source_node(&conn, "wd", "wd-node");
+        link_source_node(&conn, "xnyun", "removed-xnyun-node");
+        apply_connections_snapshot(&conn, &json!({ "connections": [] }), 0).unwrap();
+        apply_connections_snapshot(
+            &conn,
+            &json!({
+                "connections": [
+                    {
+                        "id": "wd-conn",
+                        "start": "1970-01-01T00:00:00.500Z",
+                        "metadata": { "host": "wd.test", "network": "tcp" },
+                        "chains": ["wd-node"],
+                        "upload": 100,
+                        "download": 400
+                    },
+                    {
+                        "id": "removed-source-conn",
+                        "start": "1970-01-01T00:00:00.500Z",
+                        "metadata": { "host": "removed-source.test", "network": "tcp" },
+                        "chains": ["removed-xnyun-node"],
+                        "upload": 900,
+                        "download": 100
+                    },
+                    {
+                        "id": "removed-unknown-conn",
+                        "start": "1970-01-01T00:00:00.500Z",
+                        "metadata": { "host": "removed-unknown.test", "network": "tcp" },
+                        "chains": ["removed-manual-node"],
+                        "upload": 200,
+                        "download": 300
+                    },
+                    {
+                        "id": "current-unknown-conn",
+                        "start": "1970-01-01T00:00:00.500Z",
+                        "metadata": { "host": "current-unknown.test", "network": "tcp" },
+                        "chains": ["current-manual-node"],
+                        "upload": 25,
+                        "download": 75
+                    }
+                ]
+            }),
+            60_000,
+        )
+        .unwrap();
+        let current_nodes =
+            BTreeSet::from(["wd-node".to_string(), "current-manual-node".to_string()]);
+
+        let trend =
+            query_source_trend(&conn, 0, 7, SourceTrendBucket::Day, 0, Some(&current_nodes))
+                .unwrap();
+
+        let wd = trend
+            .sources
+            .iter()
+            .find(|source| source.name == "wd")
+            .unwrap();
+        assert_eq!(wd.total_bytes, 500);
+
+        let xnyun = trend
+            .sources
+            .iter()
+            .find(|source| source.name == "xnyun")
+            .unwrap();
+        assert_eq!(xnyun.total_bytes, 0);
+
+        let unknown = trend
+            .sources
+            .iter()
+            .find(|source| source.name == "unknown")
+            .unwrap();
+        assert_eq!(unknown.total_bytes, 100);
+        assert_eq!(
+            trend.unknown_nodes,
+            vec![UsageUnknownNode {
+                name: "current-manual-node".to_string(),
+                upload_bytes: 25,
+                download_bytes: 75,
+                total_bytes: 100,
+            }]
+        );
     }
 
     #[test]

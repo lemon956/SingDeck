@@ -13,6 +13,8 @@ import {
   type HelperNodeSourcesResponse,
   type HelperNetworkUsageConnections,
   type HelperNetworkUsageSettings,
+  type HelperNetworkUsageSourceTrend,
+  type HelperNetworkUsageSourceTrendRequest,
   type HelperNetworkUsageSummary,
   type HelperNetworkUsageTop,
   type HelperNetworkUsageWindow,
@@ -47,7 +49,13 @@ type HelperState = {
   networkUsageSummary: HelperNetworkUsageSummary | null;
   networkUsageTopHosts: HelperNetworkUsageTop | null;
   networkUsageTopOutbounds: HelperNetworkUsageTop | null;
+  networkUsageTopStrategies: HelperNetworkUsageTop | null;
   networkUsageConnections: HelperNetworkUsageConnections | null;
+  networkUsageSourceTrend: HelperNetworkUsageSourceTrend | null;
+  networkUsageSourceTrendLoading: boolean;
+  networkUsageSourceTrendError: string | null;
+  networkUsageSourceTrendRefreshing: boolean;
+  networkUsageSourceTrendRefreshError: string | null;
   networkUsageLoading: boolean;
   networkUsageError: string | null;
   eventStreamConnected: boolean;
@@ -80,6 +88,8 @@ type HelperState = {
   loadHelperConfigContent: () => Promise<HelperConfigResponse>;
   loadTraffic: () => Promise<void>;
   loadNetworkUsageWindow: (request: HelperNetworkUsageWindowRequest) => Promise<void>;
+  loadNetworkUsageSourceTrend: (request: HelperNetworkUsageSourceTrendRequest) => Promise<void>;
+  refreshNetworkUsageSourceTrend: (request: HelperNetworkUsageSourceTrendRequest) => Promise<void>;
 };
 
 export const useHelperStore = create<HelperState>()(
@@ -102,7 +112,13 @@ export const useHelperStore = create<HelperState>()(
       networkUsageSummary: null,
       networkUsageTopHosts: null,
       networkUsageTopOutbounds: null,
+      networkUsageTopStrategies: null,
       networkUsageConnections: null,
+      networkUsageSourceTrend: null,
+      networkUsageSourceTrendLoading: false,
+      networkUsageSourceTrendError: null,
+      networkUsageSourceTrendRefreshing: false,
+      networkUsageSourceTrendRefreshError: null,
       networkUsageLoading: false,
       networkUsageError: null,
       eventStreamConnected: false,
@@ -312,6 +328,7 @@ export const useHelperStore = create<HelperState>()(
             networkUsageSummary: networkUsageSettings.enabled ? get().networkUsageSummary : null,
             networkUsageTopHosts: networkUsageSettings.enabled ? get().networkUsageTopHosts : null,
             networkUsageTopOutbounds: networkUsageSettings.enabled ? get().networkUsageTopOutbounds : null,
+            networkUsageTopStrategies: networkUsageSettings.enabled ? get().networkUsageTopStrategies : null,
             networkUsageConnections: networkUsageSettings.enabled ? get().networkUsageConnections : null,
             networkUsageError: null,
             error: null
@@ -509,12 +526,50 @@ export const useHelperStore = create<HelperState>()(
             networkUsageSummary: window.summary,
             networkUsageTopHosts: window.topHosts,
             networkUsageTopOutbounds: window.topOutbounds,
+            networkUsageTopStrategies: window.topStrategies,
             networkUsageConnections: window.connections,
             networkUsageLoading: false,
             networkUsageError: null
           });
         } catch (error) {
           set({ networkUsageLoading: false, networkUsageError: formatHelperError(error) });
+        }
+      },
+      loadNetworkUsageSourceTrend: async (request) => {
+        set({ networkUsageSourceTrendLoading: true, networkUsageSourceTrendError: null });
+        try {
+          const trend = await client().getJson<HelperNetworkUsageSourceTrend>(
+            `/api/v1/network-usage/source-trend?${networkUsageSourceTrendQuery(request)}`
+          );
+          set({
+            networkUsageSourceTrend: trend,
+            networkUsageSourceTrendLoading: false,
+            networkUsageSourceTrendError: null
+          });
+        } catch (error) {
+          set({
+            networkUsageSourceTrendLoading: false,
+            networkUsageSourceTrendError: formatHelperError(error)
+          });
+        }
+      },
+      refreshNetworkUsageSourceTrend: async (request) => {
+        set({ networkUsageSourceTrendRefreshing: true, networkUsageSourceTrendRefreshError: null });
+        try {
+          const trend = await client().postJson<HelperNetworkUsageSourceTrend>(
+            `/api/v1/network-usage/source-trend/refresh?${networkUsageSourceTrendQuery(request)}`,
+            {}
+          );
+          set({
+            networkUsageSourceTrend: trend,
+            networkUsageSourceTrendRefreshing: false,
+            networkUsageSourceTrendRefreshError: null
+          });
+        } catch (error) {
+          set({
+            networkUsageSourceTrendRefreshing: false,
+            networkUsageSourceTrendRefreshError: formatHelperError(error)
+          });
         }
       }
     }),
@@ -551,6 +606,15 @@ function networkUsageQuery(input: NetworkUsageQueryInput): string {
   if (input.groupBy) {
     params.set('groupBy', input.groupBy);
   }
+  return params.toString();
+}
+
+function networkUsageSourceTrendQuery(input: HelperNetworkUsageSourceTrendRequest): string {
+  const params = new URLSearchParams({
+    days: String(input.days),
+    bucket: input.bucket,
+    tzOffsetMinutes: String(input.tzOffsetMinutes)
+  });
   return params.toString();
 }
 

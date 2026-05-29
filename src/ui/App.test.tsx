@@ -161,7 +161,13 @@ function setupProxyWorkspace() {
     networkUsageSummary: null,
     networkUsageTopHosts: null,
     networkUsageTopOutbounds: null,
+    networkUsageTopStrategies: null,
     networkUsageConnections: null,
+    networkUsageSourceTrend: null,
+    networkUsageSourceTrendLoading: false,
+    networkUsageSourceTrendError: null,
+    networkUsageSourceTrendRefreshing: false,
+    networkUsageSourceTrendRefreshError: null,
     networkUsageLoading: false,
     networkUsageError: null,
     loading: false,
@@ -205,6 +211,7 @@ describe('App proxy workspace', () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -838,8 +845,8 @@ describe('App proxy workspace', () => {
       host: `host-${index + 1}.example.com`,
       network: 'tcp',
       rule: `DOMAIN host-${index + 1}.example.com`,
-      outbound: 'proxy-a',
-      chains: ['proxy-a'],
+      outbound: `proxy-leaf-${index + 1}`,
+      chains: [`proxy-leaf-${index + 1}`, 'select-recent'],
       firstSeenMs: 1000,
       lastSeenMs: 2000 + index,
       uploadBytes: 128,
@@ -859,11 +866,27 @@ describe('App proxy workspace', () => {
       },
       networkUsageTopHosts: {
         groupBy: 'host',
-        items: [{ label: 'example.com', uploadBytes: 128, downloadBytes: 1024, totalBytes: 1152, connectionCount: 1 }]
+        items: Array.from({ length: 12 }, (_, index) => ({
+          label: `domain-${index + 1}.example`,
+          uploadBytes: 128,
+          downloadBytes: 1024,
+          totalBytes: 1152 + index,
+          connectionCount: index + 1
+        }))
       },
       networkUsageTopOutbounds: {
         groupBy: 'outbound',
         items: [{ label: 'proxy-a', uploadBytes: 384, downloadBytes: 1024, totalBytes: 1408, connectionCount: 1 }]
+      },
+      networkUsageTopStrategies: {
+        groupBy: 'strategy',
+        items: Array.from({ length: 12 }, (_, index) => ({
+          label: `select-${index + 1}`,
+          uploadBytes: 384,
+          downloadBytes: 1024,
+          totalBytes: 1408 + index,
+          connectionCount: index + 1
+        }))
       },
       networkUsageConnections: {
         connections: recentConnections
@@ -873,12 +896,141 @@ describe('App proxy workspace', () => {
     const { container } = render(<App />);
 
     expect(screen.getByText('Usage window')).toBeInTheDocument();
-    expect(screen.getAllByText('example.com').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('proxy-a').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Domains' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '策略组' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '最近链接' })).toBeInTheDocument();
     expect(screen.getByText('2 connections')).toBeInTheDocument();
+    expect(screen.getByText('domain-1.example')).toBeInTheDocument();
+    expect(screen.getByText('domain-10.example')).toBeInTheDocument();
+    expect(screen.queryByText('domain-11.example')).not.toBeInTheDocument();
+    expect(screen.queryByText('select-1')).not.toBeInTheDocument();
+    expect(screen.queryByText('proxy-leaf-1')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('.usage-rank-row')).toHaveLength(10);
+
+    fireEvent.click(screen.getByRole('button', { name: '策略组' }));
+    expect(screen.getByText('select-1')).toBeInTheDocument();
+    expect(screen.getByText('select-10')).toBeInTheDocument();
+    expect(screen.queryByText('select-11')).not.toBeInTheDocument();
+    expect(screen.queryByText('domain-1.example')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('.usage-rank-row')).toHaveLength(10);
+
+    fireEvent.click(screen.getByRole('button', { name: '最近链接' }));
     expect(container.querySelector('.usage-connection-window')).not.toBeNull();
     expect(container.querySelectorAll('.usage-connection-row')).toHaveLength(10);
+    expect(screen.getByText('host-1.example.com')).toBeInTheDocument();
+    expect(screen.getByText('host-10.example.com')).toBeInTheDocument();
+    expect(screen.queryByText('host-11.example.com')).not.toBeInTheDocument();
+    expect(screen.getAllByText('select-recent').length).toBeGreaterThan(0);
     expect(container.querySelector('.overview-scroll-buffer')).not.toBeNull();
+  });
+
+  it('shows provider traffic as total, used, reset date, and payment time', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-28T00:00:00Z'));
+    window.location.hash = '#/overview';
+    const loadSourceTrend = vi.fn(async () => undefined);
+    const refreshSourceTrend = vi.fn(async () => undefined);
+    useHelperStore.setState({
+      trafficSettings: {
+        enabled: true,
+        browserProfile: '/home/alice/.config/google-chrome/Default'
+      },
+      networkUsageSettings: {
+        enabled: true,
+        retentionDays: 7
+      },
+      traffic: {
+        providers: [
+          {
+            id: 'wd-gold',
+            name: 'WD Gold',
+            homepage: 'https://wd-gold.net/clientarea.php?action=productdetails&id=217101',
+            planName: null,
+            usedUploadBytes: null,
+            usedDownloadBytes: null,
+            usedTotalBytes: 3072,
+            totalBytes: 8192,
+            remainingBytes: 5120,
+            usedRatio: 37.5,
+            expireAt: 1781971200,
+            resetDay: null,
+            resetAt: 1780272000,
+            stale: true,
+            lastSuccessfulAt: '2026-05-27T18:00:00+08:00',
+            fetchedAt: '2026-05-28T09:00:00+08:00',
+            error: 'WD Gold sync failed; showing last successful traffic snapshot'
+          }
+        ],
+        updatedAt: '2026-05-28T09:00:00+08:00',
+        profile: '/home/alice/.config/google-chrome/Default'
+      },
+      networkUsageSourceTrend: {
+        fromMs: 0,
+        toMs: 604800000,
+        bucket: 'hour',
+        sources: [
+          {
+            name: 'wd',
+            uploadBytes: 1024,
+            downloadBytes: 2048,
+            totalBytes: 3072,
+            buckets: [{ bucketStartMs: 0, uploadBytes: 1024, downloadBytes: 2048, totalBytes: 3072 }]
+          },
+          {
+            name: 'xnyun',
+            uploadBytes: 512,
+            downloadBytes: 1024,
+            totalBytes: 1536,
+            buckets: [{ bucketStartMs: 0, uploadBytes: 512, downloadBytes: 1024, totalBytes: 1536 }]
+          },
+          {
+            name: 'unknown',
+            uploadBytes: 128,
+            downloadBytes: 256,
+            totalBytes: 384,
+            buckets: [{ bucketStartMs: 0, uploadBytes: 128, downloadBytes: 256, totalBytes: 384 }]
+          }
+        ],
+        unknownNodes: [{ name: 'manual-node', uploadBytes: 128, downloadBytes: 256, totalBytes: 384 }]
+      },
+      networkUsageSourceTrendLoading: false,
+      networkUsageSourceTrendError: null,
+      networkUsageSourceTrendRefreshing: false,
+      networkUsageSourceTrendRefreshError: null,
+      loadNetworkUsageSourceTrend: loadSourceTrend,
+      refreshNetworkUsageSourceTrend: refreshSourceTrend
+    });
+
+    const { container } = render(<App />);
+
+    expect(screen.getByText('Provider traffic')).toBeInTheDocument();
+    expect(screen.getByText('WD Gold')).toBeInTheDocument();
+    expect(screen.getByText('总流量')).toBeInTheDocument();
+    expect(screen.getByText('已使用流量')).toBeInTheDocument();
+    expect(screen.getByText('重置日期')).toBeInTheDocument();
+    expect(screen.getByText('付费时间')).toBeInTheDocument();
+    expect(screen.getByText('8.0 KiB')).toBeInTheDocument();
+    expect(screen.getAllByText('3.0 KiB').length).toBeGreaterThan(0);
+    expect(screen.getByText('6月1日（4天后）')).toBeInTheDocument();
+    expect(screen.getByText('6月21日（24天后）')).toBeInTheDocument();
+    expect(screen.getByText('最近 7 天使用量')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Hour' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Day' })).toBeInTheDocument();
+    expect(container.querySelector('.traffic-trend-echart')).not.toBeNull();
+    expect(container.querySelector('.traffic-trend-chart')).toBeNull();
+    expect(screen.getByRole('button', { name: /Filter source wd/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Filter source xnyun/i })).toBeInTheDocument();
+    expect(screen.getByText('manual-node')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Filter source wd/i }));
+    expect(screen.getByRole('button', { name: /Filter source wd/i })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: /Filter source wd/i }));
+    expect(screen.getByRole('button', { name: /Filter source wd/i })).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(screen.getByRole('button', { name: /Refresh source trend/i }));
+    expect(refreshSourceTrend).toHaveBeenCalledWith(expect.objectContaining({ days: 7, bucket: 'hour' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Day' }));
+    expect(loadSourceTrend).toHaveBeenCalledWith(expect.objectContaining({ days: 7, bucket: 'day' }));
+    expect(screen.queryByText(/left/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('2026-05-24')).not.toBeInTheDocument();
   });
 
   it('opens a right side connection detail drawer over the connections list', () => {

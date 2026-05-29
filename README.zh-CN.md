@@ -187,6 +187,10 @@ Provider Traffic 是可选模块，默认关闭。需要使用时，在 Settings
 
 helper 只会使用 Settings 中保存的 Chrome profile 路径，不会自动识别，也不会默认使用当前用户的 Chrome profile。helper 会读取该目录下由 Chrome 创建的 `Cookies` 或 `Network/Cookies` SQLite 数据库，以及 `Local Storage/leveldb`。这个目录是 Chrome 生成的，不是 SingDeck 生成的。对于加密的 Chrome cookie，helper 会使用 `secret-tool`；当 helper 以 root 运行时，也会尝试通过 Chrome profile 所属用户的 DBus keyring 会话读取密钥。请保持桌面用户 keyring 已解锁，并在缺少 `secret-tool` 时安装 libsecret 工具包。
 
+当前 Provider Traffic 会同步 WD Gold 和 XNYun。WD Gold 会优先使用配置的 Chrome profile session 中保存过的订阅地址，然后读取订阅响应头 `subscription-userinfo` 中的 upload、download、total、expire 数据；如果找不到订阅地址，helper 才回退到已登录的 WD 产品页。helper 不会保存 provider 密码或自动登录。若本次同步失败但 helper 进程内已有上一次 WD Gold 成功快照，Overview 会继续显示该快照并标记为旧数据，直到该 Chrome profile 里重新出现可用的 WD session。
+
+Provider Traffic widget 还会在 Network usage 开启时显示最近 7 天的来源用量趋势。趋势数据来自 SingDeck 本地的 `network_usage_buckets` 采样，并通过 sidecar 配置里的 `nodeSources` 节点关联归属到对应来源。Hour/Day 切换只改变聚合粒度，时间窗口始终是最近 7 天。无法匹配到来源的 outbound 节点会归到 `unknown`，并在图表下方列出这些 unknown 节点。
+
 ## 校验
 
 运行前端测试和生产构建：
@@ -225,4 +229,5 @@ curl http://127.0.0.1:9531/api/v1/health
 - 配置工作区无法读取文件：在 Settings 中设置配置路径，并确认 helper 进程用户有读取权限。
 - 没有评分结果：先把 controller 同步到 helper，然后加载策略组或手动探测某个策略组。
 - Provider Traffic 不显示：在 Settings 中打开该模块。
-- 流量工作区显示 provider 错误：检查 Settings 中的 Chrome profile 路径，并确认相关 provider 的登录 session 存在于该 Chrome profile。
+- 流量工作区显示 provider 错误：检查 Settings 中的 Chrome profile 路径，并确认 WD Gold 和 XNYun 的登录 session 存在于该 Chrome profile。
+- WD Gold 显示旧数据：通常是 WD 登录态或 Cloudflare 验证过期。用同一个 Chrome profile 打开 WD Gold 并重新登录/通过验证，然后在 Overview 点击 Sync。

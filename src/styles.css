@@ -2891,6 +2891,36 @@ body {
   outline: none;
 }
 
+.usage-view-tabs {
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(82px, 1fr));
+  justify-self: start;
+  overflow: hidden;
+  border: 1px solid rgba(219, 237, 241, 0.1);
+  border-radius: 7px;
+  background: rgba(7, 10, 11, 0.34);
+}
+
+.usage-view-tabs button {
+  min-height: 28px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.usage-view-tabs button.active,
+.usage-view-tabs button:hover,
+.usage-view-tabs button:focus-visible {
+  background: rgba(114, 242, 180, 0.12);
+  color: var(--green);
+  outline: none;
+}
+
 .usage-empty {
   display: grid;
   place-items: center;
@@ -2957,6 +2987,17 @@ body {
   min-width: 0;
 }
 
+.usage-view-panel {
+  min-height: 356px;
+}
+
+.usage-rank-list {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
 .usage-rank-row,
 .usage-connection-row {
   display: grid;
@@ -2968,7 +3009,7 @@ body {
 }
 
 .usage-rank-row {
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(62px, auto) minmax(64px, auto);
   gap: 8px;
   padding: 6px 7px;
 }
@@ -2990,6 +3031,16 @@ body {
   color: var(--green);
   font-family: var(--font-mono);
   font-size: 11px;
+}
+
+.usage-rank-row em {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .usage-connection-list {
@@ -3321,6 +3372,11 @@ body {
   background: rgba(255, 107, 93, 0.055);
 }
 
+.traffic-provider-row.stale {
+  border-color: rgba(243, 190, 106, 0.24);
+  background: rgba(243, 190, 106, 0.06);
+}
+
 .traffic-provider-title,
 .traffic-provider-meta {
   display: flex;
@@ -3349,6 +3405,44 @@ body {
 
 .traffic-provider-row.error .traffic-provider-title span {
   color: var(--red);
+}
+
+.traffic-provider-row.stale .traffic-provider-title span {
+  color: var(--amber);
+}
+
+.traffic-provider-fields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 8px;
+}
+
+.traffic-provider-fields span {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  min-width: 0;
+  white-space: normal;
+}
+
+.traffic-provider-fields small {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traffic-provider-fields strong {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .traffic-provider-meter {
@@ -3449,6 +3543,194 @@ body {
 .controller-form input,
 .proxy-toolbar input {
   border-radius: 7px;
+}
+
+.traffic-provider-empty.compact {
+  min-height: 56px;
+}
+
+.traffic-source-trend {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 8px;
+  border-top: 1px solid rgba(219, 237, 241, 0.08);
+}
+
+.traffic-trend-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.traffic-trend-head div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.traffic-trend-head span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.traffic-trend-head small {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traffic-trend-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.traffic-trend-tabs {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(46px, 1fr));
+  overflow: hidden;
+  border: 1px solid rgba(219, 237, 241, 0.12);
+  border-radius: 6px;
+  background: rgba(7, 10, 11, 0.38);
+}
+
+.traffic-trend-tabs button {
+  height: 28px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.traffic-trend-tabs button.active {
+  background: rgba(114, 242, 180, 0.14);
+  color: var(--green);
+}
+
+.traffic-trend-inline-error {
+  overflow: hidden;
+  color: var(--red);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traffic-trend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.traffic-trend-legend button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid rgba(219, 237, 241, 0.11);
+  border-radius: 6px;
+  background: rgba(7, 10, 11, 0.26);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.traffic-trend-legend button:hover,
+.traffic-trend-legend button:focus-visible,
+.traffic-trend-legend button.active {
+  border-color: rgba(114, 242, 180, 0.28);
+  background: rgba(114, 242, 180, 0.095);
+  color: var(--green);
+}
+
+.traffic-trend-legend i {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.traffic-trend-legend strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.traffic-trend-legend em {
+  color: var(--muted);
+  font-style: normal;
+}
+
+.traffic-trend-echart {
+  width: 100%;
+  height: 118px;
+  min-width: 0;
+  background:
+    linear-gradient(90deg, rgba(219, 237, 241, 0.035) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(219, 237, 241, 0.035) 1px, transparent 1px);
+  background-size: 56px 38px;
+}
+
+.traffic-trend-axis {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.traffic-unknown-nodes {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding-top: 4px;
+}
+
+.traffic-unknown-nodes > span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.traffic-unknown-nodes div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.traffic-unknown-nodes strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 4px 6px;
+  border: 1px solid rgba(243, 190, 106, 0.18);
+  border-radius: 6px;
+  background: rgba(243, 190, 106, 0.055);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.traffic-unknown-nodes em {
+  color: var(--muted);
+  font-style: normal;
+  font-weight: 500;
 }
 
 @media (max-width: 1120px) {

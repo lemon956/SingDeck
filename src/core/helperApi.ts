@@ -170,6 +170,9 @@ export type HelperTrafficSnapshot = {
   usedRatio: number | null;
   expireAt: number | null;
   resetDay: number | null;
+  resetAt?: number | null;
+  stale?: boolean;
+  lastSuccessfulAt?: string | null;
   fetchedAt: string;
   error: string | null;
 };
@@ -207,7 +210,7 @@ export type HelperNetworkUsageTopItem = {
 };
 
 export type HelperNetworkUsageTop = {
-  groupBy: 'host' | 'outbound' | 'rule';
+  groupBy: 'host' | 'outbound' | 'rule' | 'strategy';
   items: HelperNetworkUsageTopItem[];
 };
 
@@ -233,6 +236,7 @@ export type HelperNetworkUsageWindow = {
   summary: HelperNetworkUsageSummary;
   topHosts: HelperNetworkUsageTop;
   topOutbounds: HelperNetworkUsageTop;
+  topStrategies: HelperNetworkUsageTop;
   connections: HelperNetworkUsageConnections;
 };
 
@@ -242,6 +246,44 @@ export type HelperNetworkUsageWindowRequest = {
   bucket?: 'minute' | 'hour';
   limit?: number;
   q?: string;
+};
+
+export type HelperNetworkUsageSourceTrendBucketMode = 'hour' | 'day';
+
+export type HelperNetworkUsageSourceTrendPoint = {
+  bucketStartMs: number;
+  uploadBytes: number;
+  downloadBytes: number;
+  totalBytes: number;
+};
+
+export type HelperNetworkUsageSourceTrendSource = {
+  name: string;
+  uploadBytes: number;
+  downloadBytes: number;
+  totalBytes: number;
+  buckets: HelperNetworkUsageSourceTrendPoint[];
+};
+
+export type HelperNetworkUsageUnknownNode = {
+  name: string;
+  uploadBytes: number;
+  downloadBytes: number;
+  totalBytes: number;
+};
+
+export type HelperNetworkUsageSourceTrend = {
+  fromMs: number;
+  toMs: number;
+  bucket: HelperNetworkUsageSourceTrendBucketMode;
+  sources: HelperNetworkUsageSourceTrendSource[];
+  unknownNodes: HelperNetworkUsageUnknownNode[];
+};
+
+export type HelperNetworkUsageSourceTrendRequest = {
+  days: number;
+  bucket: HelperNetworkUsageSourceTrendBucketMode;
+  tzOffsetMinutes: number;
 };
 
 type HelperApiClientOptions = {
