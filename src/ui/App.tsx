@@ -131,6 +131,22 @@ function readStrategyGroupOrder(): string[] {
   }
 }
 
+function readPageVisible(): boolean {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden';
+}
+
+function usePageVisible(): boolean {
+  const [pageVisible, setPageVisible] = useState(readPageVisible);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => setPageVisible(readPageVisible());
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, []);
+
+  return pageVisible;
+}
+
 type TopologyNode = {
   id: string;
   label: string;
@@ -565,10 +581,7 @@ function buildSankeyOption(topology: ConnectionTopology) {
             return name.length > 22 ? `${name.slice(0, 19)}...` : name;
           }
         },
-        animation: true,
-        animationDuration: 900,
-        animationEasing: 'cubicOut',
-        animationDelay: (index: number) => index * 45
+        animation: false
       }
     ]
   };
@@ -642,11 +655,13 @@ function formatSourceTrendTimestamp(value: number, bucket: HelperNetworkUsageSou
 function TrafficSourceTrendChart({
   sources,
   bucket,
-  selectedSource
+  selectedSource,
+  active
 }: {
   sources: HelperNetworkUsageSourceTrendSource[];
   bucket: HelperNetworkUsageSourceTrendBucketMode;
   selectedSource: string | null;
+  active: boolean;
 }) {
   const chartRef = useRef<HTMLDivElement | null>(null);
   const chartInstanceRef = useRef<echarts.EChartsType | null>(null);
@@ -680,13 +695,13 @@ function TrafficSourceTrendChart({
 
   useEffect(() => {
     const chart = chartInstanceRef.current;
-    if (!chart) {
+    if (!chart || !active) {
       return;
     }
 
     chart.setOption(
       {
-        animation: true,
+        animation: active,
         color: visibleSources.map((source) => colorBySource.get(source.name) ?? SOURCE_TREND_COLORS[0]),
         grid: { left: 42, right: 8, top: 10, bottom: 20 },
         tooltip: {
@@ -755,7 +770,7 @@ function TrafficSourceTrendChart({
       },
       true
     );
-  }, [bucket, bucketStarts, colorBySource, visibleSources]);
+  }, [active, bucket, bucketStarts, colorBySource, visibleSources]);
 
   return (
     <div
@@ -813,6 +828,7 @@ function highlightJsonc(content: string): string {
 }
 
 export function App() {
+  const pageVisible = usePageVisible();
   const { config, detection, detecting, lastCheckedAt, urlSecretWarning, applyBrowserStartup, updateConfig, detect } =
     useControllerStore();
   const runtime = useRuntimeStore();
@@ -968,15 +984,16 @@ export function App() {
   }, [config.controllerUrl, detect, detection, detecting]);
 
   useEffect(() => {
-    if (helper.health || helper.loading || helper.lastCheckedAt) {
+    if (!pageVisible || helper.health || helper.loading || helper.lastCheckedAt) {
       return;
     }
 
     void useHelperStore.getState().checkHealth();
-  }, [helper.health, helper.helperUrl, helper.lastCheckedAt, helper.loading]);
+  }, [helper.health, helper.helperUrl, helper.lastCheckedAt, helper.loading, pageVisible]);
 
   useEffect(() => {
     if (
+      !pageVisible ||
       helperAvailability !== 'ready' ||
       (activeRoute !== 'overview' && activeRoute !== 'controller' && activeRoute !== 'proxies')
     ) {
@@ -985,10 +1002,10 @@ export function App() {
 
     void useHelperStore.getState().loadGroups();
     void useHelperStore.getState().loadNodeSources();
-  }, [activeRoute, helper.helperUrl, helperAvailability]);
+  }, [activeRoute, helper.helperUrl, helperAvailability, pageVisible]);
 
   useEffect(() => {
-    if (!detection?.ok) {
+    if (!pageVisible || !detection?.ok) {
       return;
     }
 
@@ -1000,10 +1017,10 @@ export function App() {
           void useHelperStore.getState().loadGroups();
         }
       });
-  }, [activeRoute, config.controllerUrl, config.secret, detection?.ok]);
+  }, [activeRoute, config.controllerUrl, config.secret, detection?.ok, pageVisible]);
 
   useEffect(() => {
-    if (!detection?.ok) {
+    if (!pageVisible || !detection?.ok) {
       return;
     }
 
@@ -1025,19 +1042,19 @@ export function App() {
       void configWorkspace.loadRuntimeConfig();
     }
 
-    if (activeRoute === 'logs') {
+    if (activeRoute === 'logs' && pageVisible) {
       void connections.startLogs();
     }
-  }, [activeRoute, detection?.ok]);
+  }, [activeRoute, detection?.ok, pageVisible]);
 
   useEffect(() => {
-    if (activeRoute !== 'logs' && connections.logStreaming) {
+    if ((!pageVisible || activeRoute !== 'logs') && connections.logStreaming) {
       connections.stopLogs();
     }
-  }, [activeRoute, connections.logStreaming, connections.stopLogs]);
+  }, [activeRoute, connections.logStreaming, connections.stopLogs, pageVisible]);
 
   useEffect(() => {
-    if (!helperServiceAvailable) {
+    if (!pageVisible || !helperServiceAvailable) {
       useHelperStore.getState().setEventStreamConnected(false);
       return;
     }
@@ -1050,10 +1067,10 @@ export function App() {
       },
       onClose: () => useHelperStore.getState().setEventStreamConnected(false)
     });
-  }, [helper.helperUrl, helperServiceAvailable]);
+  }, [helper.helperUrl, helperServiceAvailable, pageVisible]);
 
   useEffect(() => {
-    if (!detection?.ok || helper.eventStreamConnected) {
+    if (!pageVisible || !detection?.ok || helper.eventStreamConnected) {
       return;
     }
 
@@ -1069,6 +1086,7 @@ export function App() {
     activeRoute,
     detection?.ok,
     helper.eventStreamConnected,
+    pageVisible,
     topologyPaused,
     runtime.refresh,
     connections.refreshConnections
@@ -1163,6 +1181,7 @@ export function App() {
 
   useEffect(() => {
     if (
+      !pageVisible ||
       !helperServiceAvailable ||
       (activeRoute !== 'proxies' && activeRoute !== 'overview') ||
       helper.eventStreamConnected
@@ -1197,7 +1216,7 @@ export function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeRoute, helper.eventStreamConnected, helperServiceAvailable]);
+  }, [activeRoute, helper.eventStreamConnected, helperServiceAvailable, pageVisible]);
 
   const helperActionBusy = Boolean(helperPendingAction) || helper.loading;
   const trafficModuleEnabled = Boolean(helper.trafficSettings?.enabled);
@@ -1493,7 +1512,7 @@ export function App() {
   };
 
   useEffect(() => {
-    if (activeRoute !== 'overview' || !helperServiceAvailable || !trafficModuleEnabled) {
+    if (!pageVisible || activeRoute !== 'overview' || !helperServiceAvailable || !trafficModuleEnabled) {
       return;
     }
 
@@ -1503,7 +1522,7 @@ export function App() {
     }, 5 * 60 * 1000);
 
     return () => window.clearInterval(timer);
-  }, [activeRoute, helperServiceAvailable, trafficModuleEnabled]);
+  }, [activeRoute, helperServiceAvailable, pageVisible, trafficModuleEnabled]);
 
   useEffect(() => {
     if (trafficTrendSourceFilter && !sourceTrendSources.some((source) => source.name === trafficTrendSourceFilter)) {
@@ -1512,7 +1531,7 @@ export function App() {
   }, [sourceTrendSources, trafficTrendSourceFilter]);
 
   useEffect(() => {
-    if (activeRoute !== 'overview' || !helperServiceAvailable || !networkUsageModuleEnabled) {
+    if (!pageVisible || activeRoute !== 'overview' || !helperServiceAvailable || !networkUsageModuleEnabled) {
       return;
     }
 
@@ -1523,10 +1542,10 @@ export function App() {
     const timer = window.setInterval(loadSourceTrend, 5 * 60 * 1000);
 
     return () => window.clearInterval(timer);
-  }, [activeRoute, helperServiceAvailable, networkUsageModuleEnabled, trafficTrendBucket]);
+  }, [activeRoute, helperServiceAvailable, networkUsageModuleEnabled, pageVisible, trafficTrendBucket]);
 
   useEffect(() => {
-    if (activeRoute !== 'overview' || !helperServiceAvailable || !networkUsageModuleEnabled) {
+    if (!pageVisible || activeRoute !== 'overview' || !helperServiceAvailable || !networkUsageModuleEnabled) {
       return;
     }
 
@@ -1537,15 +1556,15 @@ export function App() {
     const timer = window.setInterval(loadUsage, 60 * 1000);
 
     return () => window.clearInterval(timer);
-  }, [activeRoute, helperServiceAvailable, networkUsageModuleEnabled, networkUsageWindow]);
+  }, [activeRoute, helperServiceAvailable, networkUsageModuleEnabled, networkUsageWindow, pageVisible]);
 
   useEffect(() => {
-    if ((activeRoute !== 'proxies' && activeRoute !== 'overview') || !activeStrategyGroup?.name) {
+    if (!pageVisible || (activeRoute !== 'proxies' && activeRoute !== 'overview') || !activeStrategyGroup?.name) {
       return;
     }
 
     void useHelperStore.getState().loadScores(activeStrategyGroup.name);
-  }, [activeRoute, activeStrategyGroup?.name]);
+  }, [activeRoute, activeStrategyGroup?.name, pageVisible]);
 
   useEffect(() => {
     if (!configQrOpen || !configQrUrl.trim() || isLoopbackUrl(configQrUrl)) {
@@ -1609,7 +1628,7 @@ export function App() {
 
   useEffect(() => {
     const chart = topologyChartInstanceRef.current;
-    if (activeRoute !== 'overview' || !chart) {
+    if (activeRoute !== 'overview' || !pageVisible || !chart) {
       return;
     }
 
@@ -1619,7 +1638,7 @@ export function App() {
     }
 
     chart.setOption(buildSankeyOption(topology), true);
-  }, [activeRoute, topology]);
+  }, [activeRoute, pageVisible, topology]);
 
   const runHelperAction = async (action: string, pendingText: string, work: () => Promise<InlineStatus>) => {
     setHelperPendingAction(action);
@@ -2441,6 +2460,7 @@ export function App() {
                         ))}
                       </div>
                       <TrafficSourceTrendChart
+                        active={pageVisible}
                         bucket={trafficTrendBucket}
                         selectedSource={trafficTrendSourceFilter}
                         sources={sourceTrendSources}

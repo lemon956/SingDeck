@@ -4,6 +4,7 @@ import { useControllerStore } from '../state/controllerStore';
 import { useConnectionStore } from '../state/connectionStore';
 import { useHelperStore } from '../state/helperStore';
 import { useProxyStore } from '../state/proxyStore';
+import { useRuntimeStore } from '../state/runtimeStore';
 import { App } from './App';
 
 const groupConfig = {
@@ -204,8 +205,16 @@ function expandStrategyWall() {
   fireEvent.click(screen.getByRole('button', { name: /Expand all strategy groups/i }));
 }
 
+function setDocumentVisibility(value: DocumentVisibilityState) {
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value
+  });
+}
+
 describe('App proxy workspace', () => {
   beforeEach(() => {
+    setDocumentVisibility('visible');
     setupProxyWorkspace();
   });
 
@@ -1222,5 +1231,82 @@ describe('App proxy workspace', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Saving...' })).toBeInTheDocument());
     expect(container.querySelector('.settings-save-row .settings-inline-status')).toBeNull();
+  });
+
+  it('closes the helper event stream while the page is hidden', async () => {
+    const close = vi.fn();
+    class TestWebSocket {
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      constructor(_url: string) {}
+
+      close() {
+        close();
+        this.onclose?.();
+      }
+    }
+    vi.stubGlobal('WebSocket', TestWebSocket);
+
+    render(<App />);
+    expect(close).not.toHaveBeenCalled();
+
+    setDocumentVisibility('hidden');
+    fireEvent(document, new Event('visibilitychange'));
+
+    await waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+  });
+
+  it('does not run fallback realtime polling while the page is hidden', () => {
+    vi.useFakeTimers();
+    setDocumentVisibility('hidden');
+    const refreshRuntime = vi.fn(async () => undefined);
+    const refreshConnections = vi.fn(async () => undefined);
+    useControllerStore.setState({
+      config: {
+        controllerUrl: 'http://controller.local',
+        secret: '',
+        defaultTestUrl: 'https://cp.cloudflare.com/generate_204',
+        delayTestConcurrency: 4,
+        delayTestTimeoutMs: 5000
+      },
+      detection: { ok: true, version: '1.11.0' },
+      detecting: false,
+      lastCheckedAt: null,
+      urlSecretWarning: false
+    });
+    useHelperStore.setState({
+      eventStreamConnected: false,
+      health: null,
+      error: 'helper offline',
+      lastCheckedAt: '2026-06-01T00:00:00.000Z'
+    });
+    useRuntimeStore.setState({ refresh: refreshRuntime });
+    useConnectionStore.setState({ refreshConnections });
+
+    render(<App />);
+    refreshRuntime.mockClear();
+    refreshConnections.mockClear();
+
+    vi.advanceTimersByTime(3100);
+
+    expect(refreshRuntime).not.toHaveBeenCalled();
+    expect(refreshConnections).not.toHaveBeenCalled();
+  });
+
+  it('stops log streaming while the page is hidden', async () => {
+    window.location.hash = '#/logs';
+    setDocumentVisibility('hidden');
+    const stopLogs = vi.fn();
+    useConnectionStore.setState({
+      logStreaming: true,
+      stopLogs
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(stopLogs).toHaveBeenCalledTimes(1));
   });
 });
