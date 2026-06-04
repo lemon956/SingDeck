@@ -11,9 +11,10 @@ use anyhow::{anyhow, Context, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path as AxumPath, Query, State,
+        Path as AxumPath, Query, Request, State,
     },
     http::{header, Method, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
@@ -33,6 +34,7 @@ mod network_usage;
 mod traffic;
 
 const DEFAULT_BIND: &str = "0.0.0.0:9531";
+const AUTH_TOKEN_KV_KEY: &str = "helper_auth_token";
 const DEFAULT_TEST_URL: &str = "https://cp.cloudflare.com/generate_204";
 const DEFAULT_DELAY_TEST_TIMEOUT_MS: i64 = 5000;
 const MIN_DELAY_TEST_TIMEOUT_MS: i64 = 500;
@@ -99,6 +101,11 @@ impl ProbeLimiter {
     async fn acquire(&self, limit: usize) -> ProbePermit {
         let limit = normalize_probe_concurrency(limit);
         loop {
+            // Register interest BEFORE checking state so a permit released between
+            // the check and the await cannot be missed (Notify lost-wakeup).
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             {
                 let mut state = self.state.lock().expect("probe limiter lock poisoned");
                 if state.active < limit {
@@ -108,7 +115,7 @@ impl ProbeLimiter {
                     };
                 }
             }
-            self.notify.notified().await;
+            notified.await;
         }
     }
 
@@ -646,17 +653,37 @@ async fn main() -> Result<()> {
     configure_db_connection(&conn)?;
     init_db(&conn)?;
 
+    let db = Arc::new(Mutex::new(conn));
+    let auth_token = resolve_auth_token(&db, &bind)?;
+    let base_mobile_url =
+        public_config_url().or_else(|| mobile_config_url_for_bind(&bind, detect_lan_ip()));
+    let mobile_config_url = match (&base_mobile_url, &auth_token) {
+        (Some(url), Some(token)) => Some(append_token_query(url, token)),
+        _ => base_mobile_url,
+    };
+
     let state = AppState {
-        db: Arc::new(Mutex::new(conn)),
+        db,
         http: Client::builder()
             .timeout(std::time::Duration::from_secs(8))
             .build()?,
-        mobile_config_url: public_config_url()
-            .or_else(|| mobile_config_url_for_bind(&bind, detect_lan_ip())),
+        mobile_config_url,
         active_probes: Arc::new(Mutex::new(HashMap::new())),
         probe_limiter: ProbeLimiter::new(),
         events: helper_event_channel(),
     };
+
+    match &auth_token {
+        Some(token) => {
+            eprintln!("singdeck-helper: API auth is ENABLED. Token: {token}");
+            eprintln!(
+                "singdeck-helper: paste this token into the dashboard Settings (Helper token) to authorize requests."
+            );
+        }
+        None => eprintln!(
+            "singdeck-helper: API auth is DISABLED (loopback bind). Set SINGDECK_HELPER_TOKEN to force a token."
+        ),
+    }
 
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
@@ -668,8 +695,7 @@ async fn main() -> Result<()> {
     spawn_realtime_event_publisher(state.clone());
     spawn_network_usage_sampler(state.clone());
 
-    let app = Router::new()
-        .route("/api/v1/health", get(health))
+    let protected = Router::new()
         .route("/api/v1/controller", put(save_controller))
         .route(
             "/api/v1/settings/testing",
@@ -709,7 +735,22 @@ async fn main() -> Result<()> {
         .route(
             "/api/v1/network-usage/connections",
             get(network_usage_connections),
-        )
+        );
+
+    let protected = if let Some(token) = auth_token {
+        protected.route_layer(middleware::from_fn_with_state(
+            AuthState {
+                token: Arc::new(token),
+            },
+            require_auth,
+        ))
+    } else {
+        protected
+    };
+
+    let app = Router::new()
+        .route("/api/v1/health", get(health))
+        .merge(protected)
         .layer(cors)
         .with_state(state);
 
@@ -1965,7 +2006,17 @@ async fn probe_group_nodes(
     );
 
     while let Some(result) = tasks.join_next().await {
-        result.map_err(|error| anyhow!("probe task failed: {error}"))??;
+        // A single node's probe/save failure must not abort the whole group run
+        // and drop the other in-flight probes; log it and keep refilling slots.
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                eprintln!("singdeck-helper: probe node error in group {group}: {error}")
+            }
+            Err(error) => {
+                eprintln!("singdeck-helper: probe task join error in group {group}: {error}")
+            }
+        }
         spawn_probe_workers(
             &mut tasks,
             &mut next_index,
@@ -2276,73 +2327,100 @@ async fn run_scheduled_probes(state: &AppState, force: bool) -> Result<()> {
     };
     let proxy_map = proxy_map(&proxies);
     for group in proxy_groups(&proxies) {
-        let config = load_group_config(state, &group.name)?;
-        if !config.auto_probe {
-            continue;
-        }
-        if uses_native_urltest_delay(&group, &config) {
-            continue;
-        }
-
-        let now = now_ms();
-        let last_key = format!("auto_probe_last:{}", group.name);
-        let last_run = load_string_kv(state, &last_key)?
-            .and_then(|value| value.parse::<i64>().ok())
-            .unwrap_or(0);
-        let due = force
-            || last_run == 0
-            || now - last_run >= normalize_probe_interval(config.probe_interval_sec) * 1000;
-        if !due {
-            continue;
-        }
-
-        let run_status =
-            probe_group_nodes(
-                state,
-                &controller,
-                &group.name,
-                &group,
-                &config,
-                probe_concurrency,
-                &proxy_map,
-            )
-            .await?;
-        if run_status == ProbeRunStatus::Skipped {
-            continue;
-        }
-
-        let scores = compute_scores_after_probe_run(state, &group.name, &group.all, &config)?;
-        if config.auto_switch {
-            if let Some(target) = recommended_node(&scores) {
-                if let Some(error) =
-                    apply_recommended_node(state, &controller, &group, &target).await
-                {
-                    eprintln!("auto switch failed for {}: {error}", group.name);
-                }
-            }
-        }
-        let response = ScoresResponse {
-            group: group.name.clone(),
-            mode: config.mode,
-            scheme: config.scheme,
-            test_url: config.test_url.clone(),
-            recommended: recommended_node(&scores),
-            apply_error: None,
-            nodes: scores,
-        };
-        save_last_probe_snapshot(state, &response)?;
-        publish_helper_event(
+        // Isolate each group: a DB hiccup or probe failure on one group must not
+        // skip the remaining groups or the failed-request log observation below.
+        if let Err(error) = run_scheduled_probe_group(
             state,
-            HelperEvent::ProbeScores {
-                scores: response,
-                partial: false,
-            },
-        );
-        save_string_kv(state, &last_key, &now.to_string())?;
+            &controller,
+            &group,
+            &proxy_map,
+            probe_concurrency,
+            force,
+        )
+        .await
+        {
+            eprintln!(
+                "singdeck-helper: scheduled probe failed for {}: {error}",
+                group.name
+            );
+        }
     }
 
-    observe_failed_request_logs(state, &controller, &proxies).await?;
+    if let Err(error) = observe_failed_request_logs(state, &controller, &proxies).await {
+        eprintln!("singdeck-helper: failed-request log observation error: {error}");
+    }
 
+    Ok(())
+}
+
+async fn run_scheduled_probe_group(
+    state: &AppState,
+    controller: &ControllerConfig,
+    group: &ProxyView,
+    proxy_map: &HashMap<String, ProxyView>,
+    probe_concurrency: usize,
+    force: bool,
+) -> Result<()> {
+    let config = load_group_config(state, &group.name)?;
+    if !config.auto_probe {
+        return Ok(());
+    }
+    if uses_native_urltest_delay(group, &config) {
+        return Ok(());
+    }
+
+    let now = now_ms();
+    let last_key = format!("auto_probe_last:{}", group.name);
+    let last_run = load_string_kv(state, &last_key)?
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let due = force
+        || last_run == 0
+        || now - last_run >= normalize_probe_interval(config.probe_interval_sec) * 1000;
+    if !due {
+        return Ok(());
+    }
+
+    let run_status = probe_group_nodes(
+        state,
+        controller,
+        &group.name,
+        group,
+        &config,
+        probe_concurrency,
+        proxy_map,
+    )
+    .await?;
+    if run_status == ProbeRunStatus::Skipped {
+        return Ok(());
+    }
+
+    let scores = compute_scores_after_probe_run(state, &group.name, &group.all, &config)?;
+    if config.auto_switch {
+        if let Some(target) = recommended_node(&scores) {
+            if let Some(error) = apply_recommended_node(state, controller, group, &target).await {
+                eprintln!("auto switch failed for {}: {error}", group.name);
+            }
+        }
+    }
+    let response = ScoresResponse {
+        group: group.name.clone(),
+        mode: config.mode,
+        scheme: config.scheme,
+        test_url: config.test_url.clone(),
+        recommended: recommended_node(&scores),
+        apply_error: None,
+        nodes: scores,
+    };
+    save_last_probe_snapshot(state, &response)?;
+    publish_helper_event(
+        state,
+        HelperEvent::ProbeScores {
+            scores: response,
+            partial: false,
+        },
+    );
+    save_string_kv(state, &last_key, &now.to_string())?;
     Ok(())
 }
 
@@ -2676,6 +2754,122 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+#[derive(Clone)]
+struct AuthState {
+    token: Arc<String>,
+}
+
+/// Resolve the helper API auth token. An explicit `SINGDECK_HELPER_TOKEN` always
+/// wins. Otherwise a token is generated and persisted only when the helper is
+/// reachable beyond loopback, so local-only setups keep working with no config.
+fn resolve_auth_token(db: &Arc<Mutex<Connection>>, bind: &str) -> Result<Option<String>> {
+    if let Ok(token) = env::var("SINGDECK_HELPER_TOKEN") {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            return Ok(Some(token));
+        }
+    }
+
+    let exposed = bind
+        .parse::<SocketAddr>()
+        .map(|addr| !addr.ip().is_loopback())
+        .unwrap_or(true);
+    if !exposed {
+        return Ok(None);
+    }
+
+    let conn = db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            params![AUTH_TOKEN_KV_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        if !existing.trim().is_empty() {
+            return Ok(Some(existing));
+        }
+    }
+
+    let token: String =
+        conn.query_row("SELECT lower(hex(randomblob(32)))", [], |row| row.get(0))?;
+    conn.execute(
+        "INSERT INTO kv(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![AUTH_TOKEN_KV_KEY, token],
+    )?;
+    Ok(Some(token))
+}
+
+fn append_token_query(url: &str, token: &str) -> String {
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}token={}", encode_token_query(token))
+}
+
+/// Percent-encode any byte that is not safe in a bare query value. Generated
+/// tokens are hex (already safe); this only matters for custom env tokens.
+fn encode_token_query(token: &str) -> String {
+    let mut encoded = String::with_capacity(token.len());
+    for byte in token.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn token_from_request(req: &Request) -> Option<String> {
+    if let Some(value) = req.headers().get(header::AUTHORIZATION) {
+        if let Ok(text) = value.to_str() {
+            let text = text.trim();
+            let bearer = text
+                .strip_prefix("Bearer ")
+                .or_else(|| text.strip_prefix("bearer "))
+                .unwrap_or(text)
+                .trim();
+            if !bearer.is_empty() {
+                return Some(bearer.to_string());
+            }
+        }
+    }
+
+    if let Some(query) = req.uri().query() {
+        for pair in query.split('&') {
+            let mut parts = pair.splitn(2, '=');
+            if parts.next() == Some("token") {
+                if let Some(value) = parts.next() {
+                    return Some(percent_decode(value));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+async fn require_auth(State(auth): State<AuthState>, req: Request, next: Next) -> Response {
+    match token_from_request(&req) {
+        Some(token) if constant_time_eq(token.as_bytes(), auth.token.as_bytes()) => {
+            next.run(req).await
+        }
+        _ => (StatusCode::UNAUTHORIZED, "helper auth token required").into_response(),
+    }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
 }
 
 fn match_subscription_nodes(subscription_names: &[String], current_nodes: &[String]) -> Vec<String> {
@@ -3375,7 +3569,11 @@ fn linear(value: f64, from_value: f64, to_value: f64, from_score: f64, to_score:
 }
 
 fn percentile(values: &[i64], percentile: f64) -> i64 {
-    let index = ((values.len() - 1) as f64 * percentile).round() as usize;
+    if values.is_empty() {
+        return 0;
+    }
+    let last = values.len() - 1;
+    let index = ((last as f64 * percentile.clamp(0.0, 1.0)).round() as usize).min(last);
     values[index]
 }
 
@@ -3738,6 +3936,57 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+
+    #[test]
+    fn token_from_request_reads_header_and_query() {
+        use axum::body::Body;
+        let header_req = Request::builder()
+            .uri("/api/v1/groups")
+            .header(header::AUTHORIZATION, "Bearer abc123")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(token_from_request(&header_req).as_deref(), Some("abc123"));
+
+        let query_req = Request::builder()
+            .uri("/api/v1/config/raw?token=tok%20en")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(token_from_request(&query_req).as_deref(), Some("tok en"));
+
+        let none_req = Request::builder()
+            .uri("/api/v1/groups")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(token_from_request(&none_req), None);
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_identical() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreX"));
+        assert!(!constant_time_eq(b"secret", b"secre"));
+    }
+
+    #[test]
+    fn append_token_query_picks_separator_and_encodes() {
+        assert_eq!(append_token_query("http://h/c", "ab"), "http://h/c?token=ab");
+        assert_eq!(
+            append_token_query("http://h/c?x=1", "a b"),
+            "http://h/c?x=1&token=a%20b"
+        );
+    }
+
+    #[test]
+    fn percentile_handles_empty_and_bounds() {
+        assert_eq!(percentile(&[], 0.5), 0);
+        assert_eq!(percentile(&[42], 0.9), 42);
+        let values = [10, 20, 30, 40, 50];
+        assert_eq!(percentile(&values, 0.0), 10);
+        assert_eq!(percentile(&values, 1.0), 50);
+        // out-of-range percentile is clamped, never panics
+        assert_eq!(percentile(&values, 2.0), 50);
+        assert_eq!(percentile(&values, -1.0), 10);
+    }
 
     #[test]
     fn latency_curve_favors_low_latency() {

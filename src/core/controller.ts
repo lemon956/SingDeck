@@ -56,6 +56,28 @@ export function parseControllerFromHash(hash: string): PartialControllerConfig |
   };
 }
 
+/**
+ * Remove the `secret` parameter from a URL hash so it does not linger in the
+ * address bar, history, or shared links after it has been captured into local
+ * storage. Returns the hash unchanged when there is no secret to strip.
+ */
+export function stripSecretFromHash(hash: string): string {
+  const queryIndex = hash.indexOf('?');
+  if (queryIndex === -1) {
+    return hash;
+  }
+
+  const params = new URLSearchParams(hash.slice(queryIndex + 1));
+  if (!params.has('secret')) {
+    return hash;
+  }
+
+  params.delete('secret');
+  const query = params.toString();
+  const prefix = hash.slice(0, queryIndex);
+  return query ? `${prefix}?${query}` : prefix;
+}
+
 export function inferControllerFromLocation(origin: string, pathname: string): string | null {
   const normalizedPath = pathname.replace(/\/+$/, '');
   if (normalizedPath === '/ui' || normalizedPath.startsWith('/ui/')) {
@@ -156,7 +178,8 @@ export function classifyApiFailure(error: unknown): ApiFailure {
     return {
       kind: 'network',
       title: 'Controller unreachable',
-      detail: 'The browser could not reach the controller. Check URL, CORS, and private network access.'
+      detail:
+        'The browser could not reach the controller. The fetch failed before any HTTP status, which usually means one of: the address/port is wrong or clash_api is not enabled, a TLS certificate is untrusted, CORS is blocking the panel origin, or Private Network Access is restricting a public page from reaching a private API.'
     };
   }
 

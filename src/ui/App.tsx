@@ -49,7 +49,8 @@ import {
   resolveProbeExecution,
   type ProxyRecord
 } from '../core/proxies';
-import { parseSettingsBackup, serializeSettingsBackup } from '../core/settingsBackup';
+import { mergeImportedSecret, parseSettingsBackup, serializeSettingsBackup } from '../core/settingsBackup';
+import { stripSecretFromHash } from '../core/controller';
 import { useControllerStore } from '../state/controllerStore';
 import { useConnectionStore } from '../state/connectionStore';
 import { useConfigStore } from '../state/configStore';
@@ -890,6 +891,14 @@ export function App() {
   const [helperStatusAction, setHelperStatusAction] = useState<string | null>(null);
   const [localBehaviorStatus, setLocalBehaviorStatus] = useState<InlineStatus | null>(null);
   const [settingsTransferMessage, setSettingsTransferMessage] = useState('');
+  const [logScrollPaused, setLogScrollPaused] = useState(false);
+  const [logsCopied, setLogsCopied] = useState(false);
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    title: string;
+    detail: string;
+    confirmLabel: string;
+    onConfirm: () => void;
+  } | null>(null);
   const [collapsedStrategyGroups, setCollapsedStrategyGroups] = useState<Set<string>>(() => new Set());
   const [strategyGroupOrder, setStrategyGroupOrder] = useState<string[]>(readStrategyGroupOrder);
   const [draggingStrategyGroupName, setDraggingStrategyGroupName] = useState<string | null>(null);
@@ -899,9 +908,35 @@ export function App() {
   const settingsImportInputRef = useRef<HTMLInputElement | null>(null);
   const previousHelperActiveProbeGroupsRef = useRef<Set<string>>(new Set());
   const strategyGroupsAutoCollapsedRef = useRef(false);
+  const logListRef = useRef<HTMLDivElement | null>(null);
+
+  const filteredLogs = useMemo(() => {
+    const needle = connections.logQuery.trim().toLowerCase();
+    return connections.logs
+      .filter((log) => connections.logLevel === 'all' || log.level === connections.logLevel)
+      .filter((log) => (needle ? log.message.toLowerCase().includes(needle) : true));
+  }, [connections.logs, connections.logLevel, connections.logQuery]);
+
+  const filteredConnections = useMemo(() => {
+    const needle = connections.query.trim().toLowerCase();
+    if (!needle) {
+      return connections.connections;
+    }
+    return connections.connections.filter((connection) =>
+      `${connection.target} ${connection.rule} ${connection.outbound}`.toLowerCase().includes(needle)
+    );
+  }, [connections.connections, connections.query]);
 
   useEffect(() => {
     applyBrowserStartup(window.location.hash, window.location.origin, window.location.pathname);
+    const strippedHash = stripSecretFromHash(window.location.hash);
+    if (strippedHash !== window.location.hash) {
+      window.history.replaceState(
+        null,
+        '',
+        `${window.location.pathname}${window.location.search}${strippedHash}`
+      );
+    }
   }, [applyBrowserStartup]);
 
   useEffect(() => {
@@ -1054,12 +1089,23 @@ export function App() {
   }, [activeRoute, connections.logStreaming, connections.stopLogs, pageVisible]);
 
   useEffect(() => {
+    if (activeRoute !== 'logs' || logScrollPaused) {
+      return;
+    }
+    const list = logListRef.current;
+    if (list) {
+      list.scrollTop = list.scrollHeight;
+    }
+  }, [activeRoute, logScrollPaused, filteredLogs]);
+
+  useEffect(() => {
     if (!pageVisible || !helperServiceAvailable) {
       useHelperStore.getState().setEventStreamConnected(false);
       return;
     }
 
     return connectHelperEventStream(helper.helperUrl, {
+      token: helper.helperToken,
       onOpen: () => {
         useHelperStore.getState().setEventStreamConnected(true);
         void useHelperStore.getState().loadActiveProbes();
@@ -1067,7 +1113,7 @@ export function App() {
       },
       onClose: () => useHelperStore.getState().setEventStreamConnected(false)
     });
-  }, [helper.helperUrl, helperServiceAvailable, pageVisible]);
+  }, [helper.helperUrl, helper.helperToken, helperServiceAvailable, pageVisible]);
 
   useEffect(() => {
     if (!pageVisible || !detection?.ok || helper.eventStreamConnected) {
@@ -1962,6 +2008,20 @@ export function App() {
     }
   };
 
+  const copyVisibleLogs = async () => {
+    const text = filteredLogs.map((log) => `[${log.level}] ${log.message}`).join('\n');
+    if (!text) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setLogsCopied(true);
+      window.setTimeout(() => setLogsCopied(false), 1400);
+    } catch {
+      setLogsCopied(false);
+    }
+  };
+
   const exportSettings = () => {
     const content = serializeSettingsBackup({
       controller: {
@@ -2005,7 +2065,10 @@ export function App() {
 
     try {
       const backup = parseSettingsBackup(await file.text());
-      updateConfig(backup.controller.config);
+      updateConfig({
+        ...backup.controller.config,
+        secret: mergeImportedSecret(backup.controller.config.secret, config.secret)
+      });
       useControllerStore.setState({ urlSecretWarning: backup.controller.urlSecretWarning });
       helper.updateSettings({
         helperUrl: backup.helper.helperUrl,
@@ -2242,6 +2305,41 @@ export function App() {
             </span>
           </div>
         </header>
+
+        {pendingConfirm ? (
+          <div className="qr-backdrop" onClick={() => setPendingConfirm(null)}>
+            <section
+              className="qr-panel confirm-panel"
+              onClick={(event) => event.stopPropagation()}
+              aria-label={pendingConfirm.title}
+              aria-modal="true"
+              role="alertdialog"
+            >
+              <div className="qr-head">
+                <div className="qr-title">
+                  <strong>{pendingConfirm.title}</strong>
+                  <span>{pendingConfirm.detail}</span>
+                </div>
+              </div>
+              <div className="confirm-actions">
+                <button className="ghost-action" type="button" onClick={() => setPendingConfirm(null)}>
+                  Cancel
+                </button>
+                <button
+                  className="ghost-action danger"
+                  type="button"
+                  onClick={() => {
+                    const action = pendingConfirm.onConfirm;
+                    setPendingConfirm(null);
+                    action();
+                  }}
+                >
+                  {pendingConfirm.confirmLabel}
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : null}
 
         {configQrOpen ? (
           <div className="qr-backdrop" onClick={() => setConfigQrOpen(false)}>
@@ -2852,6 +2950,17 @@ export function App() {
                       value={helper.helperUrl}
                       onChange={(event) => helper.updateSettings({ helperUrl: event.target.value })}
                     />
+                  </label>
+                  <label>
+                    <span>Token</span>
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder="paste helper auth token"
+                      value={helper.helperToken}
+                      onChange={(event) => helper.updateSettings({ helperToken: event.target.value })}
+                    />
+                    <small>Required when the helper binds beyond loopback. Printed in the helper logs on startup.</small>
                   </label>
                   <label>
                     <span>Config path</span>
@@ -3728,7 +3837,33 @@ export function App() {
                 <button className="ghost-action" onClick={connections.refreshConnections}>
                   Refresh
                 </button>
-                <button className="ghost-action danger" onClick={connections.closeAllConnections}>
+                {connections.query.trim() && filteredConnections.length > 0 ? (
+                  <button
+                    className="ghost-action danger"
+                    onClick={() =>
+                      setPendingConfirm({
+                        title: 'Drop filtered connections',
+                        detail: `Disconnect the ${filteredConnections.length} session(s) matching "${connections.query.trim()}". Other sessions stay connected.`,
+                        confirmLabel: 'Drop filtered',
+                        onConfirm: () =>
+                          void connections.closeConnections(filteredConnections.map((item) => item.id))
+                      })
+                    }
+                  >
+                    Drop filtered
+                  </button>
+                ) : null}
+                <button
+                  className="ghost-action danger"
+                  onClick={() =>
+                    setPendingConfirm({
+                      title: 'Close all connections',
+                      detail: `Disconnect all ${connections.connections.length} active session(s). This affects every current connection.`,
+                      confirmLabel: 'Close all',
+                      onConfirm: () => void connections.closeAllConnections()
+                    })
+                  }
+                >
                   Close all
                 </button>
               </div>
@@ -3740,13 +3875,7 @@ export function App() {
               onChange={(event) => connections.setQuery(event.target.value)}
             />
             <div className="connection-list">
-              {connections.connections
-                .filter((connection) =>
-                  `${connection.target} ${connection.rule} ${connection.outbound}`
-                    .toLowerCase()
-                    .includes(connections.query.toLowerCase())
-                )
-                .map((connection) => (
+              {filteredConnections.map((connection) => (
                   <div
                     className={`connection-row ${selectedConnectionId === connection.id ? 'selected' : ''}`}
                     key={connection.id}
@@ -3775,7 +3904,12 @@ export function App() {
                       className="ghost-action danger"
                       onClick={(event) => {
                         event.stopPropagation();
-                        void connections.closeConnection(connection.id);
+                        setPendingConfirm({
+                          title: 'Drop connection',
+                          detail: `Disconnect ${connection.target}.`,
+                          confirmLabel: 'Drop',
+                          onConfirm: () => void connections.closeConnection(connection.id)
+                        });
                       }}
                     >
                       Drop
@@ -3890,7 +4024,14 @@ export function App() {
               </div>
               <button
                 className="ghost-action danger"
-                onClick={() => void connections.closeConnection(selectedConnection.id)}
+                onClick={() =>
+                  setPendingConfirm({
+                    title: 'Drop connection',
+                    detail: `Disconnect ${selectedConnection.target}.`,
+                    confirmLabel: 'Drop',
+                    onConfirm: () => void connections.closeConnection(selectedConnection.id)
+                  })
+                }
                 type="button"
               >
                 Drop connection
@@ -3917,6 +4058,19 @@ export function App() {
                 <button className="ghost-action" disabled={!connections.logStreaming} onClick={connections.stopLogs}>
                   Stop
                 </button>
+                <button
+                  className={`ghost-action ${logScrollPaused ? 'active' : ''}`}
+                  onClick={() => setLogScrollPaused((paused) => !paused)}
+                >
+                  {logScrollPaused ? 'Resume scroll' : 'Pause scroll'}
+                </button>
+                <button
+                  className="ghost-action"
+                  disabled={filteredLogs.length === 0}
+                  onClick={() => void copyVisibleLogs()}
+                >
+                  {logsCopied ? 'Copied' : 'Copy'}
+                </button>
                 <button className="ghost-action danger" onClick={connections.clearLogs}>
                   Clear
                 </button>
@@ -3936,16 +4090,13 @@ export function App() {
                 onChange={(event) => connections.setLogQuery(event.target.value)}
               />
             </div>
-            <div className="log-list">
-              {connections.logs
-                .filter((log) => connections.logLevel === 'all' || log.level === connections.logLevel)
-                .filter((log) => log.message.toLowerCase().includes(connections.logQuery.toLowerCase()))
-                .map((log, index) => (
-                  <div className={`log-row ${log.level}`} key={`${log.message}-${index}`}>
-                    <span>{log.level}</span>
-                    <code>{log.message}</code>
-                  </div>
-                ))}
+            <div className="log-list" ref={logListRef}>
+              {filteredLogs.map((log, index) => (
+                <div className={`log-row ${log.level}`} key={log.seq ?? index}>
+                  <span>{log.level}</span>
+                  <code>{log.message}</code>
+                </div>
+              ))}
             </div>
           </article>
         </section>
@@ -3997,6 +4148,27 @@ export function App() {
                   <span>{configWorkspace.error}</span>
                 </div>
               ) : null}
+              <h3>Validation</h3>
+              {configWorkspace.issues.length === 0 ? (
+                <div className="issue-card ok">
+                  <strong>No blocking issues</strong>
+                  <span>JSON parses and a Clash API controller can be derived.</span>
+                </div>
+              ) : (
+                configWorkspace.issues.map((issue, index) => (
+                  <div
+                    key={`${issue.severity}-${issue.path}-${index}`}
+                    className={`issue-card ${issue.severity === 'error' ? 'error' : 'info'}`}
+                  >
+                    <strong>
+                      {issue.severity === 'error' ? 'Error' : 'Notice'}
+                      {issue.path ? ` · ${issue.path}` : ''}
+                    </strong>
+                    <span>{issue.message}</span>
+                    {issue.suggestion ? <small>{issue.suggestion}</small> : null}
+                  </div>
+                ))
+              )}
               <h3>Snapshots</h3>
               <div className="snapshot-list">
                 {configWorkspace.snapshots.map((snapshot) => (

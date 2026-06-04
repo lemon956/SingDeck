@@ -48,9 +48,24 @@ export class ClashApiClient {
       return '';
     }
 
-    const { value } = await reader.read();
-    await reader.cancel();
-    return new TextDecoder().decode(value);
+    const decoder = new TextDecoder();
+    let text = '';
+    try {
+      // A single TCP chunk may carry only a partial JSON line; accumulate reads
+      // until the first full line arrives (or the stream ends) before parsing.
+      for (let reads = 0; reads < 16; reads += 1) {
+        const { done, value } = await reader.read();
+        if (value) {
+          text += decoder.decode(value, { stream: true });
+        }
+        if (done || text.includes('\n')) {
+          break;
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+    return text;
   }
 
   private resolve(path: string): string {

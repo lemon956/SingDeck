@@ -6,6 +6,7 @@ import { useHelperStore } from './helperStore';
 import { useRuntimeStore } from './runtimeStore';
 
 const EVENT_RECONNECT_DELAY_MS = 1500;
+const EVENT_RECONNECT_MAX_DELAY_MS = 30000;
 const RUNTIME_HISTORY_WINDOW_MS = 5 * 60 * 1000;
 const RUNTIME_HISTORY_MAX_POINTS = 140;
 
@@ -28,6 +29,7 @@ export type HelperEvent =
 type EventStreamOptions = {
   onOpen?: () => void;
   onClose?: () => void;
+  token?: string;
 };
 
 export function connectHelperEventStream(helperUrl: string, options: EventStreamOptions = {}): () => void {
@@ -38,10 +40,29 @@ export function connectHelperEventStream(helperUrl: string, options: EventStream
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let socket: WebSocket | null = null;
+  let attempt = 0;
+
+  const scheduleReconnect = () => {
+    if (closed || reconnectTimer !== null) {
+      return;
+    }
+    // Exponential backoff capped + jittered, so an offline helper does not get
+    // hammered with a fixed-interval reconnect storm.
+    const ceiling = Math.min(EVENT_RECONNECT_MAX_DELAY_MS, EVENT_RECONNECT_DELAY_MS * 2 ** attempt);
+    const delay = ceiling / 2 + Math.random() * (ceiling / 2);
+    attempt += 1;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, delay);
+  };
 
   const connect = () => {
-    socket = new WebSocket(buildHelperEventWebSocketUrl(helperUrl));
-    socket.onopen = () => options.onOpen?.();
+    socket = new WebSocket(buildHelperEventWebSocketUrl(helperUrl, options.token));
+    socket.onopen = () => {
+      attempt = 0;
+      options.onOpen?.();
+    };
     socket.onmessage = (event) => {
       const helperEvent = parseHelperEvent(event.data);
       if (helperEvent) {
@@ -50,9 +71,7 @@ export function connectHelperEventStream(helperUrl: string, options: EventStream
     };
     socket.onclose = () => {
       options.onClose?.();
-      if (!closed) {
-        reconnectTimer = setTimeout(connect, EVENT_RECONNECT_DELAY_MS);
-      }
+      scheduleReconnect();
     };
     socket.onerror = () => {
       socket?.close();
@@ -70,12 +89,15 @@ export function connectHelperEventStream(helperUrl: string, options: EventStream
   };
 }
 
-export function buildHelperEventWebSocketUrl(helperUrl: string): string {
+export function buildHelperEventWebSocketUrl(helperUrl: string, token?: string): string {
   const url = new URL(normalizeHelperUrl(helperUrl));
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.pathname = '/api/v1/events';
   url.search = '';
   url.hash = '';
+  if (token && token.trim()) {
+    url.searchParams.set('token', token.trim());
+  }
   return url.toString();
 }
 
@@ -115,22 +137,27 @@ export function applyHelperEvent(event: HelperEvent): void {
     const sampledAt = new Date(event.sampledAt);
     const now = Number.isFinite(sampledAt.getTime()) ? sampledAt.getTime() : Date.now();
     const time = Number.isFinite(sampledAt.getTime()) ? event.sampledAt : new Date(now).toISOString();
+    const up = finiteNumber(event.up);
+    const down = finiteNumber(event.down);
+    const uploadTotal = finiteNumber(event.uploadTotal);
+    const downloadTotal = finiteNumber(event.downloadTotal);
+    const connectionCount = finiteNumber(event.connectionCount);
     const sample = {
       time,
-      up: event.up,
-      down: event.down,
-      connections: event.connectionCount
+      up,
+      down,
+      connections: connectionCount
     };
 
     useRuntimeStore.setState((state) => ({
       summary: summarizeRuntime({
-        traffic: { up: event.up, down: event.down },
-        totals: { uploadTotal: event.uploadTotal, downloadTotal: event.downloadTotal },
-        connectionCount: event.connectionCount,
+        traffic: { up, down },
+        totals: { uploadTotal, downloadTotal },
+        connectionCount,
         mode: event.mode
       }),
       history: trimRuntimeHistory([...state.history, sample], now),
-      lastTraffic: { up: event.up, down: event.down },
+      lastTraffic: { up, down },
       loading: false,
       error: null,
       lastUpdatedAt: time
@@ -144,6 +171,10 @@ export function applyHelperEvent(event: HelperEvent): void {
       useConnectionStore.setState({ error: event.message });
     }
   }
+}
+
+function finiteNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
 function parseHelperEvent(data: unknown): HelperEvent | null {

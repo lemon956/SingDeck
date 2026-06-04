@@ -56,6 +56,7 @@ export type ConnectionRecord = {
 export type LogRecord = {
   level: 'debug' | 'info' | 'warn' | 'error';
   message: string;
+  seq?: number;
 };
 
 export function normalizeConnectionsResponse(response: ConnectionsResponse): ConnectionRecord[] {

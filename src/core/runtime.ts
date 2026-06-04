@@ -32,7 +32,10 @@ export function formatBytes(value: number): string {
     return '0 B';
   }
 
-  const unitIndex = Math.min(Math.floor(Math.log(normalized) / Math.log(1024)), UNITS.length - 1);
+  const unitIndex = Math.max(
+    0,
+    Math.min(Math.floor(Math.log(normalized) / Math.log(1024)), UNITS.length - 1)
+  );
   const amount = normalized / 1024 ** unitIndex;
   return `${amount.toFixed(unitIndex === 0 ? 0 : 1)} ${UNITS[unitIndex]}`;
 }

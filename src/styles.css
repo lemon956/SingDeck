@@ -1590,9 +1590,20 @@ h1 {
   border-color: rgba(255, 107, 107, 0.42);
 }
 
+.issue-card.ok {
+  border-color: rgba(120, 220, 160, 0.36);
+}
+
 .issue-card strong,
-.issue-card span {
+.issue-card span,
+.issue-card small {
   overflow-wrap: anywhere;
+}
+
+.issue-card small {
+  color: var(--muted);
+  font-size: 11px;
+  opacity: 0.85;
 }
 
 .issue-card strong,
@@ -4183,6 +4194,17 @@ body {
   border-radius: var(--radius);
   background: rgba(12, 17, 19, 0.98);
   box-shadow: var(--shadow);
+}
+
+.confirm-panel {
+  width: min(420px, calc(100vw - 40px));
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
 }
 
 .qr-head {

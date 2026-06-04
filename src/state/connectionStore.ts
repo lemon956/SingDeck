@@ -12,6 +12,11 @@ import { useControllerStore } from './controllerStore';
 
 const MAX_LOG_ROWS = 500;
 
+let logSeq = 0;
+function stampLog(record: LogRecord): LogRecord {
+  return { ...record, seq: (logSeq += 1) };
+}
+
 type ConnectionState = {
   connections: ConnectionRecord[];
   logs: LogRecord[];
@@ -28,6 +33,7 @@ type ConnectionState = {
   setLogLevel: (level: LogRecord['level'] | 'all') => void;
   refreshConnections: () => Promise<void>;
   closeConnection: (id: string) => Promise<void>;
+  closeConnections: (ids: string[]) => Promise<void>;
   closeAllConnections: () => Promise<void>;
   addLogLine: (line: unknown) => void;
   clearLogs: () => void;
@@ -65,18 +71,47 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
   closeConnection: async (id) => {
     const { config } = useControllerStore.getState();
+    if (!config.controllerUrl) {
+      return;
+    }
     const client = new ClashApiClient({ baseUrl: config.controllerUrl, secret: config.secret });
-    await client.request(`/connections/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    await get().refreshConnections();
+    try {
+      await client.request(`/connections/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await get().refreshConnections();
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : 'Failed to close connection' });
+    }
+  },
+  closeConnections: async (ids) => {
+    const { config } = useControllerStore.getState();
+    if (!config.controllerUrl || ids.length === 0) {
+      return;
+    }
+    const client = new ClashApiClient({ baseUrl: config.controllerUrl, secret: config.secret });
+    try {
+      await Promise.all(
+        ids.map((id) => client.request(`/connections/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+      );
+      await get().refreshConnections();
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : 'Failed to close connections' });
+    }
   },
   closeAllConnections: async () => {
     const { config } = useControllerStore.getState();
+    if (!config.controllerUrl) {
+      return;
+    }
     const client = new ClashApiClient({ baseUrl: config.controllerUrl, secret: config.secret });
-    await client.request('/connections', { method: 'DELETE' });
-    await get().refreshConnections();
+    try {
+      await client.request('/connections', { method: 'DELETE' });
+      await get().refreshConnections();
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : 'Failed to close connections' });
+    }
   },
   addLogLine: (line) =>
-    set((state) => trimLogs([...state.logs, normalizeLogLine(line)], state.droppedLogCount)),
+    set((state) => trimLogs([...state.logs, stampLog(normalizeLogLine(line))], state.droppedLogCount)),
   clearLogs: () => set({ logs: [], droppedLogCount: 0 }),
   startLogs: async () => {
     const { config } = useControllerStore.getState();
@@ -108,7 +143,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         const lines = text.split(/\r?\n/);
         carry = lines.pop() ?? '';
         const records = parseLogChunk(lines.join('\n'));
-        set((state) => trimLogs([...state.logs, ...records.map(normalizeLogLine)], state.droppedLogCount));
+        set((state) =>
+          trimLogs([...state.logs, ...records.map((record) => stampLog(normalizeLogLine(record)))], state.droppedLogCount)
+        );
       }
 
       set({ logStreaming: false, logAbortController: null });

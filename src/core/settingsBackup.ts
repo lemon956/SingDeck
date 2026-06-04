@@ -42,6 +42,12 @@ export function createSettingsBackup(input: SettingsBackupInput): SettingsBackup
     schema: SETTINGS_BACKUP_SCHEMA,
     exportedAt: new Date().toISOString(),
     ...input,
+    controller: {
+      ...input.controller,
+      // The Clash API secret is a credential: never write it to an exported
+      // file. Import restores it from the current browser (see mergeImportedSecret).
+      config: { ...input.controller.config, secret: '' }
+    },
     helper: {
       ...input.helper,
       groupConfigs: input.helper.groupConfigs
@@ -49,6 +55,15 @@ export function createSettingsBackup(input: SettingsBackupInput): SettingsBackup
         .sort((left, right) => left.name.localeCompare(right.name))
     }
   };
+}
+
+/**
+ * Resolve the controller secret to apply when importing a backup. Exported
+ * backups carry a blank secret (redacted), so a blank imported value keeps the
+ * secret already stored in this browser; a non-blank value overrides it.
+ */
+export function mergeImportedSecret(importedSecret: string, currentSecret: string): string {
+  return importedSecret.trim() ? importedSecret : currentSecret;
 }
 
 export function serializeSettingsBackup(input: SettingsBackupInput): string {

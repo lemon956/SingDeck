@@ -5,6 +5,7 @@ import { useConnectionStore } from '../state/connectionStore';
 import { useHelperStore } from '../state/helperStore';
 import { useProxyStore } from '../state/proxyStore';
 import { useRuntimeStore } from '../state/runtimeStore';
+import type { ConnectionRecord } from '../core/connections';
 import { App } from './App';
 
 const groupConfig = {
@@ -1308,5 +1309,75 @@ describe('App proxy workspace', () => {
     render(<App />);
 
     await waitFor(() => expect(stopLogs).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe('App connection safeguards', () => {
+  beforeEach(() => {
+    setDocumentVisibility('visible');
+    window.location.hash = '#/connections';
+    localStorage.clear();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })));
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('requires explicit confirmation before closing all connections', () => {
+    const connection: ConnectionRecord = {
+      id: 'c1',
+      source: 'local',
+      sourceIP: 'local',
+      sourcePort: '',
+      sourceEndpoint: 'local',
+      target: 'example.com:443',
+      destinationHost: 'example.com',
+      destinationIP: '',
+      destinationPort: '443',
+      destinationEndpoint: 'example.com:443',
+      network: 'tcp',
+      inboundType: 'mixed',
+      dnsMode: '',
+      processPath: '',
+      upload: '1 B',
+      uploadBytes: 1,
+      download: '1 B',
+      downloadBytes: 1,
+      totalBytes: 2,
+      rule: 'MATCH',
+      ruleType: 'MATCH',
+      rulePayload: '',
+      outbound: 'select',
+      chains: ['select'],
+      startedAt: '2026-06-01T00:00:00.000Z'
+    };
+    const closeAllConnections = vi.fn(async () => {});
+    useConnectionStore.setState({
+      query: '',
+      connections: [connection],
+      closeAllConnections
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close all' }));
+    // Dialog is shown and the destructive action has NOT run yet.
+    expect(closeAllConnections).not.toHaveBeenCalled();
+    const dialog = screen.getByRole('alertdialog');
+    expect(within(dialog).getByText('Close all connections')).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close all' }));
+    expect(closeAllConnections).toHaveBeenCalledTimes(1);
   });
 });

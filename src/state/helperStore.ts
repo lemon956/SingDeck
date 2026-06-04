@@ -31,8 +31,13 @@ const ACTIVE_PROBE_POLL_INTERVAL_MS = 120;
 const DEFAULT_MIN_PROBE_INTERVAL_SEC = 60;
 const DEFAULT_PROBE_CONCURRENCY = 4;
 
+// Monotonic id so a slow in-flight active-probe poll cannot overwrite the state
+// written by a later poll (e.g. the final poll after a probe finishes).
+let activeProbeLoadGeneration = 0;
+
 type HelperState = {
   helperUrl: string;
+  helperToken: string;
   configPath: string;
   health: HelperHealth | null;
   testingSettings: HelperTestingSettings | null;
@@ -65,7 +70,7 @@ type HelperState = {
   error: string | null;
   lastCheckedAt: string | null;
   lastSyncedControllerKey: string | null;
-  updateSettings: (settings: Partial<Pick<HelperState, 'helperUrl' | 'configPath'>>) => void;
+  updateSettings: (settings: Partial<Pick<HelperState, 'helperUrl' | 'helperToken' | 'configPath'>>) => void;
   checkHealth: () => Promise<void>;
   syncController: (options?: { force?: boolean }) => Promise<void>;
   loadTestingSettings: () => Promise<void>;
@@ -96,6 +101,7 @@ export const useHelperStore = create<HelperState>()(
   persist(
     (set, get) => ({
       helperUrl: DEFAULT_HELPER_URL,
+      helperToken: '',
       configPath: '',
       health: null,
       testingSettings: null,
@@ -131,17 +137,21 @@ export const useHelperStore = create<HelperState>()(
       updateSettings: (settings) =>
         set((state) => {
           const helperUrlChanged = settings.helperUrl !== undefined && settings.helperUrl !== state.helperUrl;
+          const helperTokenChanged =
+            settings.helperToken !== undefined && settings.helperToken !== state.helperToken;
+          const connectionChanged = helperUrlChanged || helperTokenChanged;
           return {
             helperUrl: settings.helperUrl === undefined ? state.helperUrl : settings.helperUrl,
+            helperToken: settings.helperToken === undefined ? state.helperToken : settings.helperToken,
             configPath: settings.configPath === undefined ? state.configPath : settings.configPath,
-            health: helperUrlChanged ? null : state.health,
-            eventStreamConnected: helperUrlChanged ? false : state.eventStreamConnected,
-            activeProbeGroups: helperUrlChanged ? [] : state.activeProbeGroups,
-            activeProbeNodesByGroup: helperUrlChanged ? {} : state.activeProbeNodesByGroup,
-            nodeSources: helperUrlChanged ? [] : state.nodeSources,
-            error: helperUrlChanged ? null : state.error,
-            lastCheckedAt: helperUrlChanged ? null : state.lastCheckedAt,
-            lastSyncedControllerKey: helperUrlChanged ? null : state.lastSyncedControllerKey
+            health: connectionChanged ? null : state.health,
+            eventStreamConnected: connectionChanged ? false : state.eventStreamConnected,
+            activeProbeGroups: connectionChanged ? [] : state.activeProbeGroups,
+            activeProbeNodesByGroup: connectionChanged ? {} : state.activeProbeNodesByGroup,
+            nodeSources: connectionChanged ? [] : state.nodeSources,
+            error: connectionChanged ? null : state.error,
+            lastCheckedAt: connectionChanged ? null : state.lastCheckedAt,
+            lastSyncedControllerKey: connectionChanged ? null : state.lastSyncedControllerKey
           };
         }),
       checkHealth: async () => {
@@ -380,8 +390,12 @@ export const useHelperStore = create<HelperState>()(
         }
       },
       loadActiveProbes: async () => {
+        const generation = ++activeProbeLoadGeneration;
         try {
           const response = await client().getJson<HelperProbeStatusResponse>('/api/v1/probes');
+          if (generation !== activeProbeLoadGeneration) {
+            return;
+          }
           const groups = Array.isArray(response.groups) ? response.groups : [];
           set({
             activeProbeGroups: groups.map((group) => group.group),
@@ -394,6 +408,9 @@ export const useHelperStore = create<HelperState>()(
             error: null
           });
         } catch (error) {
+          if (generation !== activeProbeLoadGeneration) {
+            return;
+          }
           set({
             activeProbeGroups: [],
             activeProbeNodesByGroup: {},
@@ -429,6 +446,7 @@ export const useHelperStore = create<HelperState>()(
         const stopActiveProbePolling = async () => {
           if (activeProbeTimer !== null) {
             clearInterval(activeProbeTimer);
+            activeProbeTimer = null;
           }
           await get().loadActiveProbes();
         };
@@ -461,6 +479,13 @@ export const useHelperStore = create<HelperState>()(
             probingGroups: state.probingGroups.filter((item) => item !== group),
             error: formatHelperError(error)
           }));
+        } finally {
+          // Backstop: guarantee the high-frequency poller is never leaked even if
+          // a result handler above throws before stopActiveProbePolling runs.
+          if (activeProbeTimer !== null) {
+            clearInterval(activeProbeTimer);
+            activeProbeTimer = null;
+          }
         }
       },
       loadScores: async (group) => {
@@ -577,6 +602,7 @@ export const useHelperStore = create<HelperState>()(
       name: 'singdeck-helper',
       partialize: (state) => ({
         helperUrl: state.helperUrl,
+        helperToken: state.helperToken,
         configPath: state.configPath,
         trafficSettings: state.trafficSettings,
         networkUsageSettings: state.networkUsageSettings
@@ -619,7 +645,8 @@ function networkUsageSourceTrendQuery(input: HelperNetworkUsageSourceTrendReques
 }
 
 function client(): HelperApiClient {
-  return new HelperApiClient({ baseUrl: useHelperStore.getState().helperUrl });
+  const { helperUrl, helperToken } = useHelperStore.getState();
+  return new HelperApiClient({ baseUrl: helperUrl, token: helperToken });
 }
 
 function controllerSyncKey(controllerUrl: string, secret: string): string {

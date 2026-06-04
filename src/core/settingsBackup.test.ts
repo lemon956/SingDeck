@@ -1,5 +1,37 @@
 import { describe, expect, it } from 'vitest';
-import { createSettingsBackup, parseSettingsBackup } from './settingsBackup';
+import { createSettingsBackup, mergeImportedSecret, parseSettingsBackup } from './settingsBackup';
+
+function controllerInput(secret: string) {
+  return {
+    controller: {
+      config: {
+        controllerUrl: 'http://127.0.0.1:9527',
+        secret,
+        defaultTestUrl: 'https://cp.cloudflare.com/generate_204',
+        delayTestConcurrency: 4,
+        delayTestTimeoutMs: 5000
+      },
+      urlSecretWarning: false
+    },
+    helper: { helperUrl: '', configPath: '', testingSettings: null, groupConfigs: [] },
+    proxies: { groupTestUrls: {}, nodeTestUrls: {} },
+    configWorkspace: { content: '{}', issues: [], snapshots: [], sourceEndpoint: null, lastLoadedAt: null },
+    ui: { railExpanded: true }
+  };
+}
+
+describe('settings backup secret redaction', () => {
+  it('never writes the controller secret into an exported backup', () => {
+    const backup = createSettingsBackup(controllerInput('super-secret'));
+    expect(backup.controller.config.secret).toBe('');
+  });
+
+  it('keeps the current secret on import when the backup secret is blank', () => {
+    expect(mergeImportedSecret('', 'stored-secret')).toBe('stored-secret');
+    expect(mergeImportedSecret('  ', 'stored-secret')).toBe('stored-secret');
+    expect(mergeImportedSecret('explicit', 'stored-secret')).toBe('explicit');
+  });
+});
 
 describe('settings backup', () => {
   it('creates a versioned backup with all configurable frontend sections', () => {

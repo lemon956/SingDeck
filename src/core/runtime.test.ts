@@ -6,6 +6,12 @@ describe('runtime formatting', () => {
     expect(formatBytes(1536)).toBe('1.5 KiB');
     expect(formatRate(2048)).toBe('2.0 KiB/s');
   });
+
+  it('formats fractional and zero byte counts without NaN/undefined units', () => {
+    expect(formatBytes(0)).toBe('0 B');
+    expect(formatBytes(0.5)).toBe('1 B');
+    expect(formatBytes(-5)).toBe('0 B');
+  });
 });
 
 describe('runtime summary', () => {

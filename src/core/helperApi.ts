@@ -289,15 +289,18 @@ export type HelperNetworkUsageSourceTrendRequest = {
 type HelperApiClientOptions = {
   baseUrl?: string;
   fetcher?: Fetcher;
+  token?: string;
 };
 
 export class HelperApiClient {
   private readonly baseUrl: string;
   private readonly fetcher: Fetcher;
+  private readonly token: string;
 
   constructor(options: HelperApiClientOptions = {}) {
     this.baseUrl = normalizeHelperUrl(options.baseUrl ?? DEFAULT_HELPER_URL);
     this.fetcher = options.fetcher ?? fetch.bind(globalThis);
+    this.token = (options.token ?? '').trim();
   }
 
   async getJson<T>(path: string): Promise<T> {
@@ -324,7 +327,11 @@ export class HelperApiClient {
   }
 
   async request(path: string, init: RequestInit = {}): Promise<Response> {
-    const response = await this.fetcher(this.resolve(path), init);
+    const headers = new Headers(init.headers);
+    if (this.token && !headers.has('authorization')) {
+      headers.set('authorization', `Bearer ${this.token}`);
+    }
+    const response = await this.fetcher(this.resolve(path), { ...init, headers });
     if (!response.ok) {
       throw response;
     }

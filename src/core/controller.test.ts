@@ -5,6 +5,7 @@ import {
   inferControllerFromLocation,
   normalizeControllerUrl,
   parseControllerFromHash,
+  stripSecretFromHash,
   validateNecessaryConfig
 } from './controller';
 
@@ -23,6 +24,14 @@ describe('controller startup', () => {
 
   it('normalizes controller urls without trailing slashes', () => {
     expect(normalizeControllerUrl(' http://127.0.0.1:9090/// ')).toBe('http://127.0.0.1:9090');
+  });
+
+  it('strips only the secret parameter from the startup hash', () => {
+    expect(stripSecretFromHash('#/setup?url=http%3A%2F%2F127.0.0.1%3A9090&secret=deck&testUrl=x')).toBe(
+      '#/setup?url=http%3A%2F%2F127.0.0.1%3A9090&testUrl=x'
+    );
+    expect(stripSecretFromHash('#/setup?secret=deck')).toBe('#/setup');
+    expect(stripSecretFromHash('#/proxies')).toBe('#/proxies');
   });
 
   it('infers the controller from sing-box hosted /ui/ pages', () => {
