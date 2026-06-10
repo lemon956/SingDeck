@@ -11,7 +11,7 @@ use anyhow::{anyhow, Context, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path as AxumPath, Query, Request, State,
+        ConnectInfo, Path as AxumPath, Query, Request, State,
     },
     http::{header, Method, StatusCode},
     middleware::{self, Next},
@@ -675,9 +675,9 @@ async fn main() -> Result<()> {
 
     match &auth_token {
         Some(token) => {
-            eprintln!("singdeck-helper: API auth is ENABLED. Token: {token}");
+            eprintln!("singdeck-helper: API auth is ENABLED for non-loopback peers. Token: {token}");
             eprintln!(
-                "singdeck-helper: paste this token into the dashboard Settings (Helper token) to authorize requests."
+                "singdeck-helper: the local dashboard (127.0.0.1) needs no token; paste this token into Settings (Helper token) only for LAN/mobile access."
             );
         }
         None => eprintln!(
@@ -755,7 +755,11 @@ async fn main() -> Result<()> {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(bind.parse::<SocketAddr>()?).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -2853,12 +2857,25 @@ fn token_from_request(req: &Request) -> Option<String> {
 }
 
 async fn require_auth(State(auth): State<AuthState>, req: Request, next: Next) -> Response {
+    // Requests from the local machine are trusted: the dashboard talks to the
+    // helper over loopback, so it must keep working with no token. Only remote
+    // (LAN / mobile) peers have to present the token.
+    if request_peer_is_loopback(&req) {
+        return next.run(req).await;
+    }
     match token_from_request(&req) {
         Some(token) if constant_time_eq(token.as_bytes(), auth.token.as_bytes()) => {
             next.run(req).await
         }
         _ => (StatusCode::UNAUTHORIZED, "helper auth token required").into_response(),
     }
+}
+
+fn request_peer_is_loopback(req: &Request) -> bool {
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| peer.ip().is_loopback())
+        .unwrap_or(false)
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -3958,6 +3975,34 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(token_from_request(&none_req), None);
+    }
+
+    #[test]
+    fn request_peer_loopback_is_detected() {
+        use axum::body::Body;
+        let mut loopback = Request::builder()
+            .uri("/api/v1/groups")
+            .body(Body::empty())
+            .unwrap();
+        loopback
+            .extensions_mut()
+            .insert(ConnectInfo("127.0.0.1:5000".parse::<SocketAddr>().unwrap()));
+        assert!(request_peer_is_loopback(&loopback));
+
+        let mut lan = Request::builder()
+            .uri("/api/v1/groups")
+            .body(Body::empty())
+            .unwrap();
+        lan.extensions_mut()
+            .insert(ConnectInfo("192.168.1.20:5000".parse::<SocketAddr>().unwrap()));
+        assert!(!request_peer_is_loopback(&lan));
+
+        // No ConnectInfo present (e.g. handler-direct call) is treated as not loopback.
+        let bare = Request::builder()
+            .uri("/api/v1/groups")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!request_peer_is_loopback(&bare));
     }
 
     #[test]
