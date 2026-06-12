@@ -49,6 +49,7 @@ type HelperState = {
   activeProbeGroups: string[];
   activeProbeNodesByGroup: Record<string, string[]>;
   traffic: HelperTrafficResponse | null;
+  trafficFetchedAt: number | null;
   trafficLoading: boolean;
   trafficError: string | null;
   networkUsageSummary: HelperNetworkUsageSummary | null;
@@ -92,6 +93,7 @@ type HelperState = {
   applyNode: (group: string, node?: string) => Promise<void>;
   loadHelperConfigContent: () => Promise<HelperConfigResponse>;
   loadTraffic: () => Promise<void>;
+  refreshTrafficIfStale: (maxAgeMs: number) => Promise<void>;
   loadNetworkUsageWindow: (request: HelperNetworkUsageWindowRequest) => Promise<void>;
   loadNetworkUsageSourceTrend: (request: HelperNetworkUsageSourceTrendRequest) => Promise<void>;
   refreshNetworkUsageSourceTrend: (request: HelperNetworkUsageSourceTrendRequest) => Promise<void>;
@@ -113,6 +115,7 @@ export const useHelperStore = create<HelperState>()(
       activeProbeGroups: [],
       activeProbeNodesByGroup: {},
       traffic: null,
+      trafficFetchedAt: null,
       trafficLoading: false,
       trafficError: null,
       networkUsageSummary: null,
@@ -319,7 +322,13 @@ export const useHelperStore = create<HelperState>()(
       saveTrafficSettings: async (settings) => {
         try {
           const trafficSettings = await client().putJson<HelperTrafficSettings>('/api/v1/settings/traffic', settings);
-          set({ trafficSettings, traffic: trafficSettings.enabled ? get().traffic : null, trafficError: null, error: null });
+          set({
+            trafficSettings,
+            traffic: trafficSettings.enabled ? get().traffic : null,
+            trafficFetchedAt: trafficSettings.enabled ? get().trafficFetchedAt : null,
+            trafficError: null,
+            error: null
+          });
           if (trafficSettings.enabled) {
             await get().loadTraffic();
           }
@@ -529,16 +538,32 @@ export const useHelperStore = create<HelperState>()(
       },
       loadTraffic: async () => {
         if (!get().trafficSettings?.enabled) {
-          set({ traffic: null, trafficLoading: false, trafficError: null });
+          set({ traffic: null, trafficFetchedAt: null, trafficLoading: false, trafficError: null });
           return;
         }
+        // Keep the previously cached `traffic` visible while this refresh runs so
+        // the module never flashes empty on a background/silent sync.
         set({ trafficLoading: true, trafficError: null });
         try {
           const traffic = await client().getJson<HelperTrafficResponse>('/api/v1/traffic');
-          set({ traffic, trafficLoading: false, trafficError: null });
+          set({ traffic, trafficFetchedAt: Date.now(), trafficLoading: false, trafficError: null });
         } catch (error) {
           set({ trafficLoading: false, trafficError: formatHelperError(error) });
         }
+      },
+      refreshTrafficIfStale: async (maxAgeMs) => {
+        const state = get();
+        if (!state.trafficSettings?.enabled) {
+          return;
+        }
+        const isFresh =
+          state.traffic !== null &&
+          state.trafficFetchedAt !== null &&
+          Date.now() - state.trafficFetchedAt < maxAgeMs;
+        if (isFresh) {
+          return; // silently skip: cached data is recent enough
+        }
+        await get().loadTraffic();
       },
       loadNetworkUsageWindow: async (request) => {
         set({ networkUsageLoading: true, networkUsageError: null });
@@ -605,7 +630,12 @@ export const useHelperStore = create<HelperState>()(
         helperToken: state.helperToken,
         configPath: state.configPath,
         trafficSettings: state.trafficSettings,
-        networkUsageSettings: state.networkUsageSettings
+        networkUsageSettings: state.networkUsageSettings,
+        // Cache the last traffic snapshot so the module renders instantly on
+        // reload instead of flashing empty until the slow sync completes.
+        // TrafficSnapshot carries no secrets/tokens, only usage numbers.
+        traffic: state.traffic,
+        trafficFetchedAt: state.trafficFetchedAt
       })
     }
   )

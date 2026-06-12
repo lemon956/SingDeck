@@ -1045,4 +1045,39 @@ describe('helper store', () => {
     expect(useHelperStore.getState().configPath).toBe('/opt/sing-box/config.jsonc');
     expect(useHelperStore.getState().error).toBeNull();
   });
+
+  it('refreshTrafficIfStale silently skips when cached traffic is still fresh', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ providers: [], updatedAt: 'x', profile: 'p' }));
+    vi.stubGlobal('fetch', fetchMock);
+    useHelperStore.setState({
+      trafficSettings: { enabled: true, browserProfile: '/p' },
+      traffic: { providers: [], updatedAt: 'x', profile: 'p' },
+      trafficFetchedAt: Date.now()
+    });
+
+    await useHelperStore.getState().refreshTrafficIfStale(5 * 60 * 1000);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refreshTrafficIfStale fetches when the cache is stale and stamps trafficFetchedAt', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('/api/v1/traffic')) {
+        return jsonResponse({ providers: [{ id: 'yuyan' }], updatedAt: 'x', profile: 'p' });
+      }
+      return new Response('not found', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    useHelperStore.setState({
+      trafficSettings: { enabled: true, browserProfile: '/p' },
+      traffic: { providers: [], updatedAt: 'old', profile: 'p' },
+      trafficFetchedAt: Date.now() - 10 * 60 * 1000
+    });
+
+    await useHelperStore.getState().refreshTrafficIfStale(5 * 60 * 1000);
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(useHelperStore.getState().traffic?.providers[0]?.id).toBe('yuyan');
+    expect(useHelperStore.getState().trafficFetchedAt).not.toBeNull();
+  });
 });

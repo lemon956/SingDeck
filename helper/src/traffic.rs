@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::{fs::MetadataExt, process::CommandExt};
 use std::{
+    collections::HashMap,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -21,21 +22,26 @@ use serde_json::Value;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
-const WD_GOLD_HOMEPAGE: &str = "https://wd-gold.net/clientarea.php?action=productdetails&id=217101";
-const XNYUN_HOMEPAGE: &str = "https://xnyun.wiki/#/dashboard";
-const XNYUN_STORAGE_ORIGIN: &str = "https://xnyun.wiki";
-const XNYUN_ORIGIN: &str = "https://api.xnyun.wiki";
-const XNYUN_API_ORIGINS: &[&str] = &[XNYUN_ORIGIN, XNYUN_STORAGE_ORIGIN];
-const XNYUN_PRIMARY_AUTH_STORAGE_KEYS: &[&str] = &["auth_data", "cookie_auth_data"];
-const XNYUN_AUTH_COOKIE_NAMES: &[&str] = &["auth_data", "auth"];
-const XNYUN_FALLBACK_AUTH_STORAGE_KEYS: &[&str] = &["token"];
-const XNYUN_SUBSCRIBE_PATHS: &[&str] = &[
+const NEWSSID_HOMEPAGE: &str = "https://qe.newssid.com/#/dashboard";
+const NEWSSID_ORIGIN: &str = "https://qe.newssid.com";
+const NEWSSID_HOST: &str = "qe.newssid.com";
+const NEWSSID_API_ORIGINS: &[&str] = &[NEWSSID_ORIGIN];
+const NEWSSID_AUTH_STORAGE_KEYS: &[&str] = &["auth_data", "cookie_auth_data", "token"];
+const NEWSSID_AUTH_COOKIE_NAMES: &[&str] = &["auth_data", "auth"];
+const YUYAN_HOMEPAGE: &str = "https://yuyan.co/#/dashboard";
+const YUYAN_ORIGIN: &str = "https://yuyan.co";
+const YUYAN_HOST: &str = "yuyan.co";
+const YUYAN_API_ORIGINS: &[&str] = &[YUYAN_ORIGIN];
+const YUYAN_AUTH_STORAGE_KEYS: &[&str] =
+    &["ACCESS_TOKEN", "token", "auth_data", "authorization", "access_token"];
+const YUYAN_AUTH_COOKIE_NAMES: &[&str] = &["token", "auth_data"];
+const V2BOARD_SUBSCRIBE_PATHS: &[&str] = &[
     "/api/v1/user/getSubscribe",
     "/api/v1/user/getStat",
     "/api/v1/user/stat",
     "/api/v1/user/traffic",
 ];
-const XNYUN_USER_PATHS: &[&str] = &[
+const V2BOARD_USER_PATHS: &[&str] = &[
     "/api/v1/user/info",
     "/api/v1/user/getUserInfo",
     "/api/v1/user/profile",
@@ -74,8 +80,8 @@ pub struct TrafficResponse {
 pub async fn read_traffic(http: &Client, profile: &Path) -> TrafficResponse {
     let fetched_at = chrono::Local::now().to_rfc3339();
     let providers = vec![
-        fetch_wd_gold(http, profile, &fetched_at).await,
-        fetch_xnyun(http, profile, &fetched_at).await,
+        fetch_newssid(http, profile, &fetched_at).await,
+        fetch_yuyan(http, profile, &fetched_at).await,
     ];
 
     TrafficResponse {
@@ -125,406 +131,51 @@ pub fn parse_v2board_traffic(
     build_snapshot(id, name, homepage, &subscribe, user.as_ref(), fetched_at)
 }
 
-pub fn parse_wd_gold_product_details(html: &str, fetched_at: &str) -> Result<TrafficSnapshot> {
-    let text = normalize_html_text(html);
-    let total = extract_labeled_bytes(
-        &text,
-        &[
-            "总流量",
-            "total traffic",
-            "traffic limit",
-            "bandwidth limit",
-        ],
-    );
-    let used = extract_labeled_bytes(
-        &text,
-        &[
-            "已使用流量",
-            "已用流量",
-            "used traffic",
-            "traffic used",
-            "bandwidth usage",
-            "used bandwidth",
-        ],
-    );
-    let fraction = extract_fraction_bytes(&text);
-    let total = total.or_else(|| fraction.map(|(_, total)| total));
-    let used_total = used.or_else(|| fraction.map(|(used, _)| used));
-
-    let (Some(used_total), Some(total)) = (used_total, total) else {
-        if is_login_or_challenge_page(&text) {
-            return Err(anyhow!("provider returned login or challenge page"));
-        }
-        return Err(anyhow!("missing WD Gold traffic data"));
-    };
-
-    let remaining = (total - used_total).max(0);
-    let used_ratio = if total > 0 {
-        Some(round_one(used_total as f64 / total as f64 * 100.0))
-    } else {
-        None
-    };
-    let reset_at = extract_labeled_date(
-        &text,
-        &[
-            "重置时间",
-            "重置日期",
-            "reset time",
-            "reset date",
-            "next reset",
-        ],
-    );
-    let expire_at = extract_labeled_date(
-        &text,
-        &[
-            "到期时间",
-            "到期日期",
-            "付费时间",
-            "付款时间",
-            "续费时间",
-            "expire time",
-            "expire date",
-            "expiration date",
-            "expiry date",
-            "due date",
-            "next due date",
-            "payment due",
-            "paid until",
-        ],
-    );
-    let reset_day = if reset_at.is_none() {
-        extract_labeled_i64(&text, &["重置日", "reset day"])
-    } else {
-        None
-    };
-
-    Ok(TrafficSnapshot {
-        id: "wd-gold".to_string(),
-        name: "WD Gold".to_string(),
-        homepage: WD_GOLD_HOMEPAGE.to_string(),
-        plan_name: None,
-        used_upload_bytes: None,
-        used_download_bytes: None,
-        used_total_bytes: Some(used_total),
-        total_bytes: Some(total),
-        remaining_bytes: Some(remaining),
-        used_ratio,
-        expire_at,
-        reset_day,
-        reset_at,
-        stale: false,
-        last_successful_at: Some(fetched_at.to_string()),
-        fetched_at: fetched_at.to_string(),
-        error: None,
-    })
-}
-
-async fn fetch_wd_gold(http: &Client, profile: &Path, fetched_at: &str) -> TrafficSnapshot {
+async fn fetch_newssid(http: &Client, profile: &Path, fetched_at: &str) -> TrafficSnapshot {
     let result: Result<TrafficSnapshot> = async {
-        if let Ok(snapshot) = fetch_wd_gold_from_subscription(http, profile, fetched_at).await {
-            remember_wd_gold_success(&snapshot);
-            return Ok(snapshot);
-        }
-
-        let cookie = read_chrome_cookie_header(profile, "wd-gold.net")?;
-        let user_agent = chrome_profile_user_agent(profile);
-        let html = fetch_text(
-            http.get(WD_GOLD_HOMEPAGE)
-                .header(header::COOKIE, cookie)
-                .header(
-                    header::ACCEPT,
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                )
-                .header(header::USER_AGENT, user_agent),
-        )
-        .await?;
-        let snapshot = parse_wd_gold_product_details(&html, fetched_at)?;
-        remember_wd_gold_success(&snapshot);
-        Ok(snapshot)
-    }
-    .await;
-
-    result.unwrap_or_else(|error| wd_gold_stale_or_error(fetched_at, error))
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct WdSubscriptionUserInfo {
-    upload: i64,
-    download: i64,
-    total: i64,
-    expire: Option<i64>,
-}
-
-async fn fetch_wd_gold_from_subscription(
-    http: &Client,
-    profile: &Path,
-    fetched_at: &str,
-) -> Result<TrafficSnapshot> {
-    let urls = collect_wd_red_subscription_urls(profile)?;
-    if urls.is_empty() {
-        return Err(anyhow!(
-            "WD Gold subscription URL not found in Chrome session files"
-        ));
-    }
-
-    let mut errors = Vec::new();
-    for (index, url) in urls.iter().enumerate() {
-        match fetch_wd_subscription_userinfo(http, url)
-            .await
-            .and_then(|info| build_wd_subscription_snapshot(&info, fetched_at))
-        {
-            Ok(snapshot) => return Ok(snapshot),
-            Err(error) => errors.push(format!("candidate {}: {error}", index + 1)),
-        }
-    }
-
-    Err(anyhow!(
-        "WD Gold subscription traffic unavailable: {}",
-        errors.join("; ")
-    ))
-}
-
-async fn fetch_wd_subscription_userinfo(
-    http: &Client,
-    subscription_url: &str,
-) -> Result<WdSubscriptionUserInfo> {
-    let response = http
-        .get(subscription_url)
-        .header(header::ACCEPT, "*/*")
-        .header(header::USER_AGENT, "clash-verge/v2.0.0")
-        .send()
-        .await
-        .context("WD Gold subscription request failed")?;
-    if !response.status().is_success() {
-        return Err(anyhow!(
-            "WD Gold subscription returned HTTP {}",
-            response.status()
-        ));
-    }
-
-    let userinfo = response
-        .headers()
-        .get("subscription-userinfo")
-        .ok_or_else(|| anyhow!("WD Gold subscription-userinfo header missing"))?
-        .to_str()
-        .context("WD Gold subscription-userinfo header is not UTF-8")?;
-    parse_wd_subscription_userinfo(userinfo)
-}
-
-fn build_wd_subscription_snapshot(
-    info: &WdSubscriptionUserInfo,
-    fetched_at: &str,
-) -> Result<TrafficSnapshot> {
-    let used_total = info.upload + info.download;
-    let remaining = (info.total - used_total).max(0);
-    let used_ratio = if info.total > 0 {
-        Some(round_one(used_total as f64 / info.total as f64 * 100.0))
-    } else {
-        None
-    };
-
-    Ok(TrafficSnapshot {
-        id: "wd-gold".to_string(),
-        name: "WD Gold".to_string(),
-        homepage: WD_GOLD_HOMEPAGE.to_string(),
-        plan_name: Some("Subscription".to_string()),
-        used_upload_bytes: Some(info.upload),
-        used_download_bytes: Some(info.download),
-        used_total_bytes: Some(used_total),
-        total_bytes: Some(info.total),
-        remaining_bytes: Some(remaining),
-        used_ratio,
-        expire_at: info.expire,
-        reset_day: None,
-        reset_at: None,
-        stale: false,
-        last_successful_at: Some(fetched_at.to_string()),
-        fetched_at: fetched_at.to_string(),
-        error: None,
-    })
-}
-
-fn parse_wd_subscription_userinfo(header_value: &str) -> Result<WdSubscriptionUserInfo> {
-    let mut upload = None;
-    let mut download = None;
-    let mut total = None;
-    let mut expire = None;
-
-    for part in header_value.split(';') {
-        let Some((key, value)) = part.trim().split_once('=') else {
-            continue;
-        };
-        let value = value.trim().parse::<i64>().ok();
-        match key.trim() {
-            "upload" => upload = value,
-            "download" => download = value,
-            "total" => total = value,
-            "expire" => expire = value.filter(|value| *value > 0),
-            _ => {}
-        }
-    }
-
-    Ok(WdSubscriptionUserInfo {
-        upload: upload.ok_or_else(|| anyhow!("WD Gold subscription upload missing"))?,
-        download: download.ok_or_else(|| anyhow!("WD Gold subscription download missing"))?,
-        total: total.ok_or_else(|| anyhow!("WD Gold subscription total missing"))?,
-        expire,
-    })
-}
-
-fn collect_wd_red_subscription_urls(profile: &Path) -> Result<Vec<String>> {
-    let sessions_dir = profile.join("Sessions");
-    let mut files = Vec::new();
-    if sessions_dir.is_dir() {
-        for entry in fs::read_dir(&sessions_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_name = entry.file_name();
-            let file_name = file_name.to_string_lossy();
-            if !file_name.starts_with("Session_") && !file_name.starts_with("Tabs_") {
-                continue;
-            }
-            let modified = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .ok();
-            files.push((modified, path));
-        }
-    }
-    files.sort_by(|left, right| right.0.cmp(&left.0));
-
-    let mut urls = Vec::new();
-    for (_, path) in files {
-        let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        push_unique_urls(
-            &mut urls,
-            extract_wd_red_subscription_urls_from_bytes(&bytes),
-        );
-    }
-
-    Ok(urls)
-}
-
-fn extract_wd_red_subscription_urls_from_bytes(bytes: &[u8]) -> Vec<String> {
-    let mut urls = Vec::new();
-    if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-        push_unique_urls(&mut urls, extract_wd_red_subscription_urls_from_text(&text));
-    } else {
-        let text = String::from_utf8_lossy(bytes);
-        push_unique_urls(&mut urls, extract_wd_red_subscription_urls_from_text(&text));
-    }
-    let utf16 = decode_utf16le_lossy(bytes);
-    push_unique_urls(
-        &mut urls,
-        extract_wd_red_subscription_urls_from_text(&utf16),
-    );
-    urls
-}
-
-fn extract_wd_red_subscription_urls_from_text(text: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-    let mut rest = text;
-    while let Some(index) = rest.find("http") {
-        rest = &rest[index..];
-        let end = rest
-            .char_indices()
-            .find(|(_, character)| is_url_delimiter(*character))
-            .map(|(index, _)| index)
-            .unwrap_or(rest.len());
-        let candidate = &rest[..end];
-        if let Some(url) = normalize_wd_red_subscription_url(candidate) {
-            push_unique_url(&mut urls, url);
-        }
-        rest = &rest[end..];
-    }
-    urls
-}
-
-fn normalize_wd_red_subscription_url(candidate: &str) -> Option<String> {
-    if let Some(tail) = candidate.strip_prefix("https://wd-red.com/subscribe/") {
-        let token = tail
-            .chars()
-            .take_while(|character| {
-                character.is_ascii_alphanumeric() || *character == '-' || *character == '_'
-            })
-            .collect::<String>();
-        if !token.is_empty() {
-            return Some(format!("https://wd-red.com/subscribe/{token}"));
-        }
-    }
-
-    if candidate.starts_with("https://api.wd-red.com/sub?") {
-        for part in candidate.split('?').nth(1)?.split('&') {
-            let Some((key, value)) = part.split_once('=') else {
-                continue;
-            };
-            if key == "url" {
-                if let Some(decoded) = percent_decode(value) {
-                    if let Some(url) = normalize_wd_red_subscription_url(&decoded) {
-                        return Some(url);
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn decode_utf16le_lossy(bytes: &[u8]) -> String {
-    let units = bytes
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect::<Vec<_>>();
-    String::from_utf16_lossy(&units)
-}
-
-fn is_url_delimiter(character: char) -> bool {
-    character.is_whitespace()
-        || character.is_control()
-        || matches!(character, '"' | '\'' | '<' | '>' | '\\')
-}
-
-fn push_unique_urls(target: &mut Vec<String>, urls: Vec<String>) {
-    for url in urls {
-        push_unique_url(target, url);
-    }
-}
-
-fn push_unique_url(target: &mut Vec<String>, url: String) {
-    if !target.iter().any(|existing| existing == &url) {
-        target.push(url);
-    }
-}
-
-async fn fetch_xnyun(http: &Client, profile: &Path, fetched_at: &str) -> TrafficSnapshot {
-    let result: Result<TrafficSnapshot> = async {
-        let cookie = read_chrome_cookie_header(profile, "xnyun.wiki").ok();
-        let auth = read_xnyun_auth(profile).ok();
+        // read_chrome_cookie_header brings every cookie for the host, including
+        // Cloudflare's cf_clearance, which (with a Chrome User-Agent and the
+        // same machine/IP) lets a plain HTTP client pass the managed challenge.
+        let cookie_result = read_chrome_cookie_header(profile, NEWSSID_HOST);
+        let cookie = cookie_result.as_ref().ok().cloned();
+        let auth = read_newssid_auth(profile).ok();
         if cookie.is_none() && auth.is_none() {
-            return Err(anyhow!("Chrome login state not found for xnyun.wiki"));
+            return Err(anyhow!("Chrome login state not found for {NEWSSID_HOST}"));
         }
-        let subscribe = fetch_first_xnyun_api_text(
+        // Diagnostic: surface exactly why cf_clearance might be absent — DB read
+        // failure vs cookies-read-but-no-cf_clearance vs present-but-rejected.
+        let cookie_diag = match &cookie_result {
+            Ok(value) if value.contains("cf_clearance") => "cf_clearance present".to_string(),
+            Ok(value) => format!("cookies read but no cf_clearance (names: {})", cookie_names(value)),
+            Err(error) => format!("cookie read failed: {error}"),
+        };
+        // Match the user's real Chrome version: Cloudflare binds cf_clearance to
+        // the User-Agent that solved the challenge, so a stale default UA can fail.
+        let user_agent = chrome_profile_user_agent(profile);
+        let subscribe = fetch_first_provider_api_text(
             http,
-            XNYUN_API_ORIGINS,
-            XNYUN_SUBSCRIBE_PATHS,
+            NEWSSID_API_ORIGINS,
+            V2BOARD_SUBSCRIBE_PATHS,
             auth.as_deref(),
             cookie.as_deref(),
+            &user_agent,
         )
-        .await?;
-        let user = fetch_optional_xnyun_api_text(
+        .await
+        .map_err(|error| anyhow!("{error} [{cookie_diag}]"))?;
+        let user = fetch_optional_provider_api_text(
             http,
-            XNYUN_API_ORIGINS,
-            XNYUN_USER_PATHS,
+            NEWSSID_API_ORIGINS,
+            V2BOARD_USER_PATHS,
             auth.as_deref(),
             cookie.as_deref(),
+            &user_agent,
         )
         .await;
 
         parse_v2board_traffic(
-            "xnyun",
-            "XNYun",
-            XNYUN_HOMEPAGE,
+            "newssid",
+            "SS-ID",
+            NEWSSID_HOMEPAGE,
             &subscribe,
             user.as_deref(),
             fetched_at,
@@ -532,17 +183,16 @@ async fn fetch_xnyun(http: &Client, profile: &Path, fetched_at: &str) -> Traffic
     }
     .await;
 
-    result
-        .unwrap_or_else(|error| provider_error("xnyun", "XNYun", XNYUN_HOMEPAGE, fetched_at, error))
+    finalize_provider("newssid", "SS-ID", NEWSSID_HOMEPAGE, fetched_at, result)
 }
 
-fn read_xnyun_auth(profile: &Path) -> Result<String> {
+fn read_newssid_auth(profile: &Path) -> Result<String> {
     let mut errors = Vec::new();
 
-    for key in XNYUN_PRIMARY_AUTH_STORAGE_KEYS {
-        match read_xnyun_storage_auth(profile, key) {
+    for key in NEWSSID_AUTH_STORAGE_KEYS {
+        match read_chrome_local_storage(profile, NEWSSID_ORIGIN, key) {
             Ok(value) => {
-                if let Some(auth) = normalize_xnyun_auth(&value) {
+                if let Some(auth) = normalize_provider_auth(&value) {
                     return Ok(auth);
                 }
                 errors.push(format!("localStorage {key} was empty"));
@@ -551,10 +201,10 @@ fn read_xnyun_auth(profile: &Path) -> Result<String> {
         }
     }
 
-    for name in XNYUN_AUTH_COOKIE_NAMES {
-        match read_chrome_cookie(profile, "xnyun.wiki", name) {
+    for name in NEWSSID_AUTH_COOKIE_NAMES {
+        match read_chrome_cookie(profile, NEWSSID_HOST, name) {
             Ok(value) => {
-                if let Some(auth) = normalize_xnyun_auth(&value) {
+                if let Some(auth) = normalize_provider_auth(&value) {
                     return Ok(auth);
                 }
                 errors.push(format!("cookie {name} was empty"));
@@ -563,11 +213,60 @@ fn read_xnyun_auth(profile: &Path) -> Result<String> {
         }
     }
 
-    for key in XNYUN_FALLBACK_AUTH_STORAGE_KEYS {
-        match read_xnyun_storage_auth(profile, key) {
+    Err(anyhow!(
+        "Chrome {NEWSSID_HOST} auth unavailable: {}",
+        errors.join("; ")
+    ))
+}
+
+async fn fetch_yuyan(http: &Client, profile: &Path, fetched_at: &str) -> TrafficSnapshot {
+    let result: Result<TrafficSnapshot> = async {
+        // yuyan.co is a plain V2board (no Cloudflare challenge); auth is a Bearer
+        // token kept in localStorage, not a session cookie. Cookies are optional.
+        let cookie = read_chrome_cookie_header(profile, YUYAN_HOST).ok();
+        let auth = read_yuyan_auth(profile)?;
+        let user_agent = chrome_profile_user_agent(profile);
+        let subscribe = fetch_first_provider_api_text(
+            http,
+            YUYAN_API_ORIGINS,
+            V2BOARD_SUBSCRIBE_PATHS,
+            Some(auth.as_str()),
+            cookie.as_deref(),
+            &user_agent,
+        )
+        .await?;
+        let user = fetch_optional_provider_api_text(
+            http,
+            YUYAN_API_ORIGINS,
+            V2BOARD_USER_PATHS,
+            Some(auth.as_str()),
+            cookie.as_deref(),
+            &user_agent,
+        )
+        .await;
+
+        parse_v2board_traffic(
+            "yuyan",
+            "雨燕云",
+            YUYAN_HOMEPAGE,
+            &subscribe,
+            user.as_deref(),
+            fetched_at,
+        )
+    }
+    .await;
+
+    finalize_provider("yuyan", "雨燕云", YUYAN_HOMEPAGE, fetched_at, result)
+}
+
+fn read_yuyan_auth(profile: &Path) -> Result<String> {
+    let mut errors = Vec::new();
+
+    for key in YUYAN_AUTH_STORAGE_KEYS {
+        match read_chrome_local_storage(profile, YUYAN_ORIGIN, key) {
             Ok(value) => {
-                if let Some(auth) = normalize_xnyun_auth(&value) {
-                    return Ok(auth);
+                if let Some(auth) = normalize_provider_auth(&value) {
+                    return Ok(bearer_token(&auth));
                 }
                 errors.push(format!("localStorage {key} was empty"));
             }
@@ -575,38 +274,47 @@ fn read_xnyun_auth(profile: &Path) -> Result<String> {
         }
     }
 
+    for name in YUYAN_AUTH_COOKIE_NAMES {
+        match read_chrome_cookie(profile, YUYAN_HOST, name) {
+            Ok(value) => {
+                if let Some(auth) = normalize_provider_auth(&value) {
+                    return Ok(bearer_token(&auth));
+                }
+                errors.push(format!("cookie {name} was empty"));
+            }
+            Err(error) => errors.push(format!("cookie {name}: {error}")),
+        }
+    }
+
     Err(anyhow!(
-        "Chrome XNYun auth unavailable: {}",
+        "Chrome {YUYAN_HOST} auth unavailable: {}",
         errors.join("; ")
     ))
 }
 
-fn read_xnyun_storage_auth(profile: &Path, key: &str) -> Result<String> {
-    read_chrome_local_storage(profile, XNYUN_STORAGE_ORIGIN, key)
+/// List cookie names from a `name=value; name2=value2` header, values omitted
+/// (so diagnostics never leak cookie contents).
+fn cookie_names(header_value: &str) -> String {
+    header_value
+        .split(';')
+        .filter_map(|pair| pair.split('=').next())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
-#[cfg(test)]
-fn select_xnyun_auth_from_pairs(values: &[(&str, &str)]) -> Option<String> {
-    for key in [
-        "localStorage:auth_data",
-        "auth_data",
-        "localStorage:cookie_auth_data",
-        "cookie_auth_data",
-        "cookie:auth_data",
-        "cookie:auth",
-        "localStorage:token",
-        "token",
-    ] {
-        if let Some((_, value)) = values.iter().find(|(candidate, _)| *candidate == key) {
-            if let Some(auth) = normalize_xnyun_auth(value) {
-                return Some(auth);
-            }
-        }
+/// Ensure a token carries a single `Bearer ` prefix for the Authorization header.
+fn bearer_token(token: &str) -> String {
+    let trimmed = token.trim();
+    if trimmed.to_ascii_lowercase().starts_with("bearer ") {
+        trimmed.to_string()
+    } else {
+        format!("Bearer {trimmed}")
     }
-    None
 }
 
-fn normalize_xnyun_auth(raw: &str) -> Option<String> {
+fn normalize_provider_auth(raw: &str) -> Option<String> {
     let trimmed = raw.trim().trim_matches('"').trim();
     if trimmed.is_empty() {
         return None;
@@ -626,9 +334,11 @@ fn normalize_xnyun_auth(raw: &str) -> Option<String> {
             "authorization",
             "access_token",
             "token",
+            // Xboard frontends store auth_data as {"site":"...","value":"<JWT>"}.
+            "value",
         ] {
             if let Some(auth) = value.get(key).and_then(Value::as_str) {
-                if let Some(auth) = normalize_xnyun_auth(auth) {
+                if let Some(auth) = normalize_provider_auth(auth) {
                     return Some(auth);
                 }
             }
@@ -675,17 +385,18 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-async fn fetch_first_xnyun_api_text(
+async fn fetch_first_provider_api_text(
     http: &Client,
     origins: &[&str],
     paths: &[&str],
     auth: Option<&str>,
     cookie: Option<&str>,
+    user_agent: &str,
 ) -> Result<String> {
     let mut errors = Vec::new();
     for origin in origins {
         for path in paths {
-            match fetch_xnyun_api_text(http, origin, path, auth, cookie).await {
+            match fetch_provider_api_text(http, origin, path, auth, cookie, user_agent).await {
                 Ok(body) => return Ok(body),
                 Err(error) => errors.push(format!("{origin}{path}: {error}")),
             }
@@ -693,34 +404,50 @@ async fn fetch_first_xnyun_api_text(
     }
 
     Err(anyhow!(
-        "all XNYun API candidates failed: {}",
+        "all provider API candidates failed: {}",
         errors.join("; ")
     ))
 }
 
-async fn fetch_optional_xnyun_api_text(
+async fn fetch_optional_provider_api_text(
     http: &Client,
     origins: &[&str],
     paths: &[&str],
     auth: Option<&str>,
     cookie: Option<&str>,
+    user_agent: &str,
 ) -> Option<String> {
-    fetch_first_xnyun_api_text(http, origins, paths, auth, cookie)
+    fetch_first_provider_api_text(http, origins, paths, auth, cookie, user_agent)
         .await
         .ok()
 }
 
-async fn fetch_xnyun_api_text(
+async fn fetch_provider_api_text(
     http: &Client,
     origin: &str,
     path: &str,
     auth: Option<&str>,
     cookie: Option<&str>,
+    user_agent: &str,
 ) -> Result<String> {
+    // Mimic a real Chrome XHR so Cloudflare-fronted providers don't flag the
+    // request as a bot (Chrome UA without client-hints / sec-fetch headers).
+    let major = chrome_major_from_user_agent(user_agent).unwrap_or("124");
+    let sec_ch_ua =
+        format!("\"Google Chrome\";v=\"{major}\", \"Chromium\";v=\"{major}\", \"Not)A;Brand\";v=\"24\"");
     let mut request = http
         .get(format!("{origin}{path}"))
         .header(header::ACCEPT, "application/json, text/plain, */*")
-        .header(header::USER_AGENT, default_chrome_user_agent());
+        .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
+        .header(header::USER_AGENT, user_agent.to_string())
+        .header(header::REFERER, format!("{origin}/"))
+        .header("sec-ch-ua", sec_ch_ua)
+        .header("sec-ch-ua-mobile", "?0")
+        .header("sec-ch-ua-platform", "\"Linux\"")
+        .header("sec-fetch-dest", "empty")
+        .header("sec-fetch-mode", "cors")
+        .header("sec-fetch-site", "same-origin")
+        .header("priority", "u=1, i");
     if let Some(auth) = auth {
         request = request.header(header::AUTHORIZATION, auth);
     }
@@ -769,47 +496,41 @@ fn provider_error(
     }
 }
 
-static WD_GOLD_LAST_SUCCESS: OnceLock<Mutex<Option<TrafficSnapshot>>> = OnceLock::new();
+// Per-provider last-successful snapshot, so a transient sync failure (e.g. an
+// expired cf_clearance) shows the previous numbers marked stale instead of a
+// red error. In-memory only; resets on helper restart.
+static TRAFFIC_LAST_SUCCESS: OnceLock<Mutex<HashMap<String, TrafficSnapshot>>> = OnceLock::new();
 
-fn wd_gold_last_success() -> &'static Mutex<Option<TrafficSnapshot>> {
-    WD_GOLD_LAST_SUCCESS.get_or_init(|| Mutex::new(None))
+fn traffic_last_success() -> &'static Mutex<HashMap<String, TrafficSnapshot>> {
+    TRAFFIC_LAST_SUCCESS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn remember_wd_gold_success(snapshot: &TrafficSnapshot) {
-    if snapshot.error.is_some() || snapshot.stale {
-        return;
-    }
-    if let Ok(mut cached) = wd_gold_last_success().lock() {
-        *cached = Some(snapshot.clone());
-    }
-}
-
-fn wd_gold_stale_or_error(fetched_at: &str, error: impl std::fmt::Display) -> TrafficSnapshot {
-    let error = error.to_string();
-    if let Ok(cached) = wd_gold_last_success().lock() {
-        if let Some(snapshot) = cached.as_ref() {
-            let mut stale = snapshot.clone();
-            let last_successful_at = stale
-                .last_successful_at
-                .clone()
-                .unwrap_or_else(|| stale.fetched_at.clone());
-            stale.fetched_at = fetched_at.to_string();
-            stale.last_successful_at = Some(last_successful_at);
-            stale.stale = true;
-            stale.error = Some(format!(
-                "WD Gold sync failed; showing last successful traffic snapshot: {error}"
-            ));
-            return stale;
+fn finalize_provider(id: &str, name: &str, homepage: &str, fetched_at: &str, result: Result<TrafficSnapshot>) -> TrafficSnapshot {
+    match result {
+        Ok(snapshot) => {
+            if let Ok(mut cache) = traffic_last_success().lock() {
+                cache.insert(snapshot.id.clone(), snapshot.clone());
+            }
+            snapshot
         }
-    }
-
-    provider_error("wd-gold", "WD Gold", WD_GOLD_HOMEPAGE, fetched_at, error)
-}
-
-#[cfg(test)]
-fn clear_wd_gold_cache_for_test() {
-    if let Ok(mut cached) = wd_gold_last_success().lock() {
-        *cached = None;
+        Err(error) => {
+            let error = error.to_string();
+            if let Ok(cache) = traffic_last_success().lock() {
+                if let Some(previous) = cache.get(id) {
+                    let mut stale = previous.clone();
+                    let last_successful_at = stale
+                        .last_successful_at
+                        .clone()
+                        .unwrap_or_else(|| stale.fetched_at.clone());
+                    stale.fetched_at = fetched_at.to_string();
+                    stale.last_successful_at = Some(last_successful_at);
+                    stale.stale = true;
+                    stale.error = Some(format!("sync failed, showing last successful data: {error}"));
+                    return stale;
+                }
+            }
+            provider_error(id, name, homepage, fetched_at, error)
+        }
     }
 }
 
@@ -831,9 +552,24 @@ fn read_chrome_profile_version(profile: &Path) -> Option<String> {
 }
 
 fn chrome_user_agent_for_version(version: &str) -> String {
+    // Chrome reduces its User-Agent header to "<major>.0.0.0" (the full build
+    // version only appears in sec-ch-ua-full-version). Cloudflare's cf_clearance
+    // is bound to the exact UA header, so we must emit the reduced form to match
+    // what the browser sent when it solved the challenge.
+    let major = version
+        .split('.')
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or("124");
     format!(
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
     )
+}
+
+fn chrome_major_from_user_agent(user_agent: &str) -> Option<&str> {
+    let after = user_agent.split("Chrome/").nth(1)?;
+    let major = after.split('.').next()?;
+    (!major.is_empty() && major.chars().all(|c| c.is_ascii_digit())).then_some(major)
 }
 
 fn is_valid_chrome_version(version: &str) -> bool {
@@ -877,19 +613,37 @@ pub fn read_chrome_cookie(profile: &Path, host_key: &str, name: &str) -> Result<
     decrypt_chrome_linux_cookie_with_secrets(&actual_host_key, &encrypted_value, &secrets)
 }
 
+/// Host-key candidates a browser would send to `host`: the exact host plus each
+/// dotted parent domain down to (but not including) the bare TLD. So for
+/// `qe.newssid.com` → `["qe.newssid.com", ".qe.newssid.com", ".newssid.com"]`,
+/// which is where Cloudflare's cf_clearance domain cookie actually lives.
+fn cookie_host_key_candidates(host: &str) -> Vec<String> {
+    let mut candidates = vec![host.to_string()];
+    let labels: Vec<&str> = host.split('.').collect();
+    for start in 0..labels.len() {
+        let suffix = labels[start..].join(".");
+        // Only dotted suffixes with >=2 labels (one dot), never the bare TLD.
+        if suffix.contains('.') {
+            candidates.push(format!(".{suffix}"));
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
 pub fn read_chrome_cookie_header(profile: &Path, host_key: &str) -> Result<String> {
     let cookies_path = find_cookies_db(profile)?;
     let db = open_cookies_db(&cookies_path)?;
-    let host_with_dot = format!(".{host_key}");
-    let mut stmt = db.prepare(
-        r#"
-        SELECT host_key, name, value, encrypted_value
-        FROM cookies
-        WHERE host_key = ?1 OR host_key = ?2
-        ORDER BY CASE WHEN host_key = ?1 THEN 0 ELSE 1 END, name
-        "#,
-    )?;
-    let rows = stmt.query_map(params![host_key, host_with_dot], |row| {
+    // Match the exact host AND parent-domain cookies (e.g. cf_clearance is often
+    // stored under ".newssid.com", not "qe.newssid.com") — the browser sends
+    // those to the subdomain too, so we must include them.
+    let host_keys = cookie_host_key_candidates(host_key);
+    let placeholders = vec!["?"; host_keys.len()].join(",");
+    let mut stmt = db.prepare(&format!(
+        "SELECT host_key, name, value, encrypted_value FROM cookies WHERE host_key IN ({placeholders}) ORDER BY name"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(host_keys.iter()), |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -912,7 +666,16 @@ pub fn read_chrome_cookie_header(profile: &Path, host_key: &str) -> Result<Strin
                     secrets.as_ref().unwrap()
                 }
             };
-            decrypt_chrome_linux_cookie_with_secrets(&actual_host_key, &encrypted_value, secrets)?
+            // Skip an individual cookie that won't decrypt instead of dropping the
+            // whole header. Otherwise one bad sibling cookie (e.g. __cf_bm) would
+            // take cf_clearance / auth_data down with it and break the request.
+            match decrypt_chrome_linux_cookie_with_secrets(&actual_host_key, &encrypted_value, secrets) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("singdeck-helper: skipping cookie {name} for {host_key}: {error}");
+                    continue;
+                }
+            }
         };
         if !name.is_empty() {
             cookies.push(format!("{name}={cookie_value}"));
@@ -1044,7 +807,23 @@ fn open_copied_cookies_db(path: &Path) -> Result<Connection> {
         crate::now_ms()
     ));
     fs::copy(path, &copy_path)?;
-    Connection::open_with_flags(copy_path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(Into::into)
+    // Chrome's Cookies DB is WAL-mode: recently-set cookies (e.g. a just-refreshed
+    // cf_clearance) live in the -wal file, not the main DB. Copy the sidecars too
+    // so the snapshot includes them, otherwise we read a stale view.
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = path_with_suffix(path, suffix);
+        if sidecar.exists() {
+            let _ = fs::copy(&sidecar, path_with_suffix(&copy_path, suffix));
+        }
+    }
+    // Open read-write (it is our throwaway copy) so SQLite can replay the WAL.
+    Connection::open(copy_path).map_err(Into::into)
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1142,13 +921,12 @@ fn chrome_linux_secrets(profile: &Path) -> Result<Vec<Vec<u8>>> {
         }
     }
 
-    if secrets.is_empty() {
-        Err(anyhow!(
-            "Chrome cookie key not available from secret-tool; install libsecret tools or unlock the Chrome profile owner's keyring"
-        ))
-    } else {
-        Ok(secrets)
-    }
+    // Always try the basic-store key ("peanuts") last. Chrome uses it for v10
+    // cookies / when no keyring is configured, and it needs no keyring access —
+    // so it still decrypts even when the helper runs as root and can't open the
+    // user's keyring. Keyring secrets (above) are tried first for v11 cookies.
+    push_unique_secret(&mut secrets, b"peanuts".to_vec());
+    Ok(secrets)
 }
 
 fn push_unique_secret(secrets: &mut Vec<Vec<u8>>, secret: Vec<u8>) {
@@ -1324,208 +1102,6 @@ fn v2board_reset_at(reset_day: Option<i64>, fetched_at: &str) -> Option<i64> {
         .map(|time| time.timestamp())
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ByteQuantity {
-    start: usize,
-    end: usize,
-    bytes: i64,
-}
-
-fn normalize_html_text(html: &str) -> String {
-    let mut text = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for character in html.chars() {
-        match character {
-            '<' => {
-                in_tag = true;
-                text.push(' ');
-            }
-            '>' => {
-                in_tag = false;
-                text.push(' ');
-            }
-            _ if !in_tag => text.push(character),
-            _ => {}
-        }
-    }
-    collapse_whitespace(&decode_basic_html_entities(&text))
-}
-
-fn decode_basic_html_entities(text: &str) -> String {
-    text.replace("&nbsp;", " ")
-        .replace("&#160;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#039;", "'")
-}
-
-fn collapse_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn extract_labeled_bytes(text: &str, labels: &[&str]) -> Option<i64> {
-    let lower = text.to_lowercase();
-    let quantities = byte_quantities(text);
-    for label in labels {
-        let mut search_start = 0;
-        while let Some(relative) = lower[search_start..].find(label) {
-            let label_start = search_start + relative;
-            if let Some(quantity) = quantities
-                .iter()
-                .filter(|quantity| {
-                    quantity.start >= label_start
-                        && quantity.start.saturating_sub(label_start) <= 120
-                })
-                .min_by_key(|quantity| quantity.start - label_start)
-            {
-                return Some(quantity.bytes);
-            }
-            search_start = label_start + label.len();
-        }
-    }
-    None
-}
-
-fn extract_fraction_bytes(text: &str) -> Option<(i64, i64)> {
-    let quantities = byte_quantities(text);
-    for pair in quantities.windows(2) {
-        let first = pair[0];
-        let second = pair[1];
-        let separator = &text[first.end..second.start];
-        let separator_lower = separator.to_lowercase();
-        if separator.contains('/') || separator_lower.contains(" of ") {
-            return Some((first.bytes, second.bytes));
-        }
-    }
-    None
-}
-
-fn byte_quantities(text: &str) -> Vec<ByteQuantity> {
-    let bytes = text.as_bytes();
-    let mut quantities = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let start = index;
-        if !bytes[index].is_ascii_digit() {
-            index += 1;
-            continue;
-        }
-
-        let mut number_end = index + 1;
-        while number_end < bytes.len()
-            && (bytes[number_end].is_ascii_digit()
-                || bytes[number_end] == b'.'
-                || bytes[number_end] == b',')
-        {
-            number_end += 1;
-        }
-        let mut unit_start = number_end;
-        while unit_start < bytes.len() && bytes[unit_start].is_ascii_whitespace() {
-            unit_start += 1;
-        }
-        let mut unit_end = unit_start;
-        while unit_end < bytes.len() && bytes[unit_end].is_ascii_alphabetic() {
-            unit_end += 1;
-        }
-
-        if let (Ok(number), Some(multiplier)) = (
-            text[start..number_end].replace(',', "").parse::<f64>(),
-            parse_byte_unit(&text[unit_start..unit_end]),
-        ) {
-            quantities.push(ByteQuantity {
-                start,
-                end: unit_end,
-                bytes: (number * multiplier as f64).round() as i64,
-            });
-        }
-        index = number_end.max(index + 1);
-    }
-    quantities
-}
-
-fn parse_byte_unit(unit: &str) -> Option<i64> {
-    let normalized = unit.trim().to_ascii_lowercase();
-    let power = match normalized.as_str() {
-        "b" | "byte" | "bytes" => 0,
-        "k" | "kb" | "kib" => 1,
-        "m" | "mb" | "mib" => 2,
-        "g" | "gb" | "gib" => 3,
-        "t" | "tb" | "tib" => 4,
-        "p" | "pb" | "pib" => 5,
-        _ => return None,
-    };
-    Some(1024_i64.pow(power))
-}
-
-fn extract_labeled_date(text: &str, labels: &[&str]) -> Option<i64> {
-    let lower = text.to_lowercase();
-    for label in labels {
-        let mut search_start = 0;
-        while let Some(relative) = lower[search_start..].find(label) {
-            let label_start = search_start + relative;
-            let tail_end = (label_start + 140).min(text.len());
-            if let Some(timestamp) = extract_first_date_timestamp(&text[label_start..tail_end]) {
-                return Some(timestamp);
-            }
-            search_start = label_start + label.len();
-        }
-    }
-    None
-}
-
-fn extract_first_date_timestamp(text: &str) -> Option<i64> {
-    for token in text.split_whitespace() {
-        let normalized = token
-            .trim_matches(|character: char| {
-                matches!(
-                    character,
-                    ',' | '.' | ':' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
-                )
-            })
-            .replace('/', "-");
-        let candidate = normalized.chars().take(10).collect::<String>();
-        if candidate.len() < 10 {
-            continue;
-        }
-        if let Ok(date) = chrono::NaiveDate::parse_from_str(&candidate, "%Y-%m-%d") {
-            return date
-                .and_hms_opt(0, 0, 0)
-                .map(|date_time| date_time.and_utc().timestamp());
-        }
-    }
-    None
-}
-
-fn extract_labeled_i64(text: &str, labels: &[&str]) -> Option<i64> {
-    let lower = text.to_lowercase();
-    for label in labels {
-        if let Some(label_start) = lower.find(label) {
-            let tail = &text[label_start..(label_start + 80).min(text.len())];
-            for token in tail.split_whitespace() {
-                let digits = token
-                    .chars()
-                    .filter(|character| character.is_ascii_digit())
-                    .collect::<String>();
-                if let Ok(value) = digits.parse::<i64>() {
-                    return Some(value);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn is_login_or_challenge_page(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    lower.contains("just a moment")
-        || lower.contains("enable javascript and cookies")
-        || lower.contains("cloudflare")
-        || (lower.contains("login") && lower.contains("password"))
-        || (lower.contains("登录") && lower.contains("密码"))
-}
-
 fn read_i64(value: &Value, key: &str) -> Option<i64> {
     value
         .get(key)
@@ -1577,35 +1153,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_xnyun_v2board_traffic() {
-        let subscribe = r#"{"data":{"u":2147483648,"d":3221225472,"transfer_enable":10737418240,"expired_at":1783094400,"reset_day":30,"plan":{"name":"XNYun Pro"}}}"#;
-        let user = r#"{"data":{"transfer_enable":10737418240,"expired_at":1783094400}}"#;
-
-        let snapshot = parse_v2board_traffic(
-            "xnyun",
-            "XNYun",
-            "https://xnyun.wiki/#/dashboard",
-            subscribe,
-            Some(user),
-            "2026-05-28T09:00:00+08:00",
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.id, "xnyun");
-        assert_eq!(snapshot.plan_name.as_deref(), Some("XNYun Pro"));
-        assert_eq!(snapshot.used_total_bytes, Some(5368709120));
-        assert_eq!(snapshot.total_bytes, Some(10737418240));
-        assert_eq!(snapshot.expire_at, Some(1783094400));
-        assert_eq!(snapshot.reset_day, Some(30));
-        assert_eq!(snapshot.reset_at, Some(1782489600));
-        assert!(!snapshot.stale);
-        assert_eq!(
-            snapshot.last_successful_at.as_deref(),
-            Some("2026-05-28T09:00:00+08:00")
-        );
-    }
-
-    #[test]
     fn v2board_reset_day_zero_resets_today() {
         let subscribe = r#"{"data":{"u":1024,"d":2048,"transfer_enable":8192,"expired_at":1783094400,"reset_day":0}}"#;
 
@@ -1644,47 +1191,143 @@ mod tests {
     }
 
     #[test]
-    fn selects_xnyun_auth_data_before_legacy_token() {
-        let auth = select_xnyun_auth_from_pairs(&[
-            ("token", "legacy-token"),
-            ("auth_data", "Bearer current-token"),
-            ("cookie_auth_data", "Bearer cookie-token"),
-        ]);
-
-        assert_eq!(auth.as_deref(), Some("Bearer current-token"));
-    }
-
-    #[test]
-    fn selects_xnyun_cookie_auth_data_before_legacy_token() {
-        let auth = select_xnyun_auth_from_pairs(&[
-            ("localStorage:token", "legacy-token"),
-            ("cookie:auth_data", "Bearer cookie-token"),
-        ]);
-
-        assert_eq!(auth.as_deref(), Some("Bearer cookie-token"));
-    }
-
-    #[test]
     fn normalizes_xnyun_auth_from_json_value() {
-        let auth = normalize_xnyun_auth(r#"{"token":"json-token"}"#);
+        let auth = normalize_provider_auth(r#"{"token":"json-token"}"#);
 
         assert_eq!(auth.as_deref(), Some("json-token"));
     }
 
     #[test]
     fn normalizes_xnyun_percent_encoded_auth_cookie() {
-        let auth = normalize_xnyun_auth("Bearer%20cookie-token");
+        let auth = normalize_provider_auth("Bearer%20cookie-token");
 
         assert_eq!(auth.as_deref(), Some("Bearer cookie-token"));
     }
 
     #[test]
-    fn xnyun_api_origin_uses_real_api_host() {
-        assert_eq!(XNYUN_ORIGIN, "https://api.xnyun.wiki");
+    fn normalizes_xboard_auth_data_value_from_url_encoded_cookie() {
+        // Shape of qe.newssid.com's auth_data cookie: URL-encoded
+        // {"site":"SS-ID","value":"<JWT>"}; the JWT lives under `.value`.
+        let auth = normalize_provider_auth(
+            "%7B%22site%22%3A%22SS-ID%22%2C%22value%22%3A%22jwt-token-abc%22%7D",
+        );
+
+        assert_eq!(auth.as_deref(), Some("jwt-token-abc"));
+    }
+
+    #[test]
+    fn parses_newssid_v2board_traffic() {
+        let subscribe = r#"{"data":{"u":1073741824,"d":2147483648,"transfer_enable":10737418240,"expired_at":1781843330,"reset_day":1,"plan":{"name":"SS-ID 高级"}}}"#;
+
+        let snapshot = parse_v2board_traffic(
+            "newssid",
+            "SS-ID",
+            NEWSSID_HOMEPAGE,
+            subscribe,
+            None,
+            "2026-06-12T13:00:00+08:00",
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.id, "newssid");
+        assert_eq!(snapshot.name, "SS-ID");
+        assert_eq!(snapshot.homepage, NEWSSID_HOMEPAGE);
+        assert_eq!(snapshot.plan_name.as_deref(), Some("SS-ID 高级"));
+        assert_eq!(snapshot.used_total_bytes, Some(3221225472));
+        assert_eq!(snapshot.total_bytes, Some(10737418240));
+        assert_eq!(snapshot.expire_at, Some(1781843330));
+        assert_eq!(snapshot.error, None);
+    }
+
+    #[test]
+    fn parses_yuyan_v2board_traffic() {
+        let subscribe = r#"{"data":{"u":1073741824,"d":2147483648,"transfer_enable":53687091200,"expired_at":1796797452,"reset_day":5,"plan":{"name":"雨燕云 标准"}}}"#;
+
+        let snapshot = parse_v2board_traffic(
+            "yuyan",
+            "雨燕云",
+            YUYAN_HOMEPAGE,
+            subscribe,
+            None,
+            "2026-06-12T13:00:00+08:00",
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.id, "yuyan");
+        assert_eq!(snapshot.name, "雨燕云");
+        assert_eq!(snapshot.homepage, YUYAN_HOMEPAGE);
+        assert_eq!(snapshot.plan_name.as_deref(), Some("雨燕云 标准"));
+        assert_eq!(snapshot.used_total_bytes, Some(3221225472));
+        assert_eq!(snapshot.total_bytes, Some(53687091200));
+        assert_eq!(snapshot.expire_at, Some(1796797452));
+        assert_eq!(snapshot.error, None);
+    }
+
+    #[test]
+    fn extracts_yuyan_access_token_value_with_bearer() {
+        // yuyan.co localStorage ACCESS_TOKEN holds {"value":"Bearer <token>",...}.
+        let raw = r#"{"value":"Bearer Ad6AMiv9zrNYppXrIG8ZV1iJW0g3wBMZjw02EV2U3e1269a6","time":1781245652306,"expire":1781267252306}"#;
+        let token = normalize_provider_auth(raw).unwrap();
+        assert_eq!(token, "Bearer Ad6AMiv9zrNYppXrIG8ZV1iJW0g3wBMZjw02EV2U3e1269a6");
+        // bearer_token leaves an already-prefixed token untouched.
+        assert_eq!(bearer_token(&token), token);
+    }
+
+    #[test]
+    fn finalize_provider_falls_back_to_stale_snapshot_on_failure() {
+        let id = "stale-cache-test";
+        let ok = parse_v2board_traffic(
+            id,
+            "Stale Test",
+            "https://x/",
+            r#"{"data":{"u":1,"d":2,"transfer_enable":10}}"#,
+            None,
+            "2026-06-12T13:00:00+08:00",
+        )
+        .unwrap();
+
+        // Success is cached and returned as-is.
+        let cached = finalize_provider(id, "Stale Test", "https://x/", "2026-06-12T13:00:00+08:00", Ok(ok));
+        assert_eq!(cached.error, None);
+        assert!(!cached.stale);
+
+        // A later failure returns the previous numbers, marked stale.
+        let stale = finalize_provider(
+            id,
+            "Stale Test",
+            "https://x/",
+            "2026-06-12T13:30:00+08:00",
+            Err(anyhow!("HTTP 403 Forbidden")),
+        );
+        assert!(stale.stale);
+        assert_eq!(stale.used_total_bytes, Some(3));
+        assert_eq!(stale.last_successful_at.as_deref(), Some("2026-06-12T13:00:00+08:00"));
+        assert_eq!(stale.fetched_at, "2026-06-12T13:30:00+08:00");
+        assert!(stale.error.unwrap().contains("HTTP 403 Forbidden"));
+
+        // A provider that never succeeded just returns a plain error snapshot.
+        let fresh_error = finalize_provider(
+            "never-succeeded-xyz",
+            "X",
+            "https://x/",
+            "2026-06-12T13:30:00+08:00",
+            Err(anyhow!("boom")),
+        );
+        assert!(!fresh_error.stale);
+        assert_eq!(fresh_error.used_total_bytes, None);
+        assert!(fresh_error.error.unwrap().contains("boom"));
+    }
+
+    #[test]
+    fn bearer_token_wraps_once() {
+        assert_eq!(bearer_token("Ad6AtokenXYZ"), "Bearer Ad6AtokenXYZ");
+        assert_eq!(bearer_token("Bearer Ad6AtokenXYZ"), "Bearer Ad6AtokenXYZ");
+        assert_eq!(bearer_token("bearer lowercase"), "bearer lowercase");
+        assert_eq!(bearer_token("  spaced  "), "Bearer spaced");
     }
 
     #[tokio::test]
-    async fn fetches_first_successful_xnyun_api_candidate() {
+    async fn fetches_first_successful_provider_api_candidate() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(StdMutex::new(Vec::new()));
@@ -1713,12 +1356,13 @@ mod tests {
         });
 
         let origins = [origin.as_str()];
-        let body = fetch_first_xnyun_api_text(
+        let body = fetch_first_provider_api_text(
             &Client::new(),
             &origins,
             &["/missing", "/api/v1/user/getStat"],
             Some("Bearer test-token"),
             Some("session=test"),
+            "test-agent/1.0",
         )
         .await
         .unwrap();
@@ -1731,94 +1375,25 @@ mod tests {
         let second_request = requests[1].to_ascii_lowercase();
         assert!(second_request.contains("authorization: bearer test-token"));
         assert!(second_request.contains("cookie: session=test"));
+        assert!(second_request.contains("user-agent: test-agent/1.0"));
+        // Browser-mimic headers so Cloudflare-fronted providers don't flag a bot.
+        assert!(second_request.contains("sec-fetch-site: same-origin"));
+        assert!(second_request.contains("sec-fetch-mode: cors"));
+        assert!(second_request.contains("sec-ch-ua:"));
+        assert!(second_request.contains("referer: http://"));
+        assert!(second_request.contains("accept-language:"));
     }
 
     #[test]
-    fn parses_wd_gold_product_page_text() {
-        let html = r#"
-          <main>
-            <section>套餐名称 WD Gold Premium</section>
-            <div>总流量</div><strong>100 GB</strong>
-            <div>已使用流量</div><strong>37.5 GB</strong>
-            <div>重置时间</div><strong>2026-06-01</strong>
-          </main>
-        "#;
-
-        let snapshot = parse_wd_gold_product_details(html, "2026-05-27T18:00:00+08:00").unwrap();
-
-        assert_eq!(snapshot.id, "wd-gold");
-        assert_eq!(snapshot.name, "WD Gold");
-        assert_eq!(snapshot.homepage, WD_GOLD_HOMEPAGE);
-        assert_eq!(snapshot.used_total_bytes, Some(40265318400));
-        assert_eq!(snapshot.total_bytes, Some(107374182400));
-        assert_eq!(snapshot.remaining_bytes, Some(67108864000));
-        assert_eq!(snapshot.used_ratio, Some(37.5));
-        assert_eq!(snapshot.reset_at, Some(1780272000));
-        assert_eq!(snapshot.error, None);
-        assert!(!snapshot.stale);
-    }
-
-    #[test]
-    fn parses_wd_gold_payment_time_separately_from_reset_time() {
-        let html = r#"
-          <main>
-            <div>总流量</div><strong>100 GB</strong>
-            <div>已使用流量</div><strong>37.5 GB</strong>
-            <div>重置时间</div><strong>2026-06-01</strong>
-            <div>到期时间</div><strong>2026-06-21</strong>
-          </main>
-        "#;
-
-        let snapshot = parse_wd_gold_product_details(html, "2026-05-27T18:00:00+08:00").unwrap();
-
-        assert_eq!(snapshot.reset_at, Some(1780272000));
-        assert_eq!(snapshot.expire_at, Some(1782000000));
-    }
-
-    #[test]
-    fn rejects_wd_gold_login_or_challenge_pages() {
-        let html = r#"<html><title>Just a moment...</title><body>Enable JavaScript and cookies to continue</body></html>"#;
-
-        let error = parse_wd_gold_product_details(html, "2026-05-27T18:00:00+08:00").unwrap_err();
-
-        assert!(error.to_string().contains("login or challenge page"));
-    }
-
-    #[test]
-    fn returns_stale_wd_gold_snapshot_when_current_fetch_fails() {
-        clear_wd_gold_cache_for_test();
-        let fresh = parse_wd_gold_product_details(
-            r#"
-            <section>
-              <span>Total Traffic</span><b>2 TB</b>
-              <span>Used Traffic</span><b>512 GB</b>
-              <span>Reset Date</span><b>2026-06-01</b>
-            </section>
-            "#,
-            "2026-05-27T18:00:00+08:00",
-        )
-        .unwrap();
-        remember_wd_gold_success(&fresh);
-
-        let stale = wd_gold_stale_or_error(
-            "2026-05-28T09:00:00+08:00",
-            anyhow!("provider returned login or challenge page"),
-        );
-
-        assert_eq!(stale.id, "wd-gold");
-        assert!(stale.stale);
-        assert_eq!(stale.used_total_bytes, fresh.used_total_bytes);
-        assert_eq!(stale.total_bytes, fresh.total_bytes);
+    fn chrome_major_from_user_agent_extracts_major() {
         assert_eq!(
-            stale.last_successful_at.as_deref(),
-            Some("2026-05-27T18:00:00+08:00")
+            chrome_major_from_user_agent(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+            ),
+            Some("149")
         );
-        assert!(stale
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("provider returned login or challenge page"));
-        clear_wd_gold_cache_for_test();
+        assert_eq!(chrome_major_from_user_agent("curl/8.0"), None);
+        assert_eq!(chrome_major_from_user_agent("Chrome/"), None);
     }
 
     #[test]
@@ -1830,54 +1405,91 @@ mod tests {
 
         let user_agent = chrome_profile_user_agent(&profile);
 
-        assert!(user_agent.contains("Chrome/148.0.7778.178 "));
+        // Reduced UA (major.0.0.0) so it matches Chrome's actual header / cf_clearance.
+        assert!(user_agent.contains("Chrome/148.0.0.0 "));
+        assert!(!user_agent.contains("148.0.7778.178"));
     }
 
     #[test]
-    fn extracts_wd_red_subscription_url_from_chrome_session_text() {
-        let text = "https://api.wd-red.com/sub?target=surge&url=https%3A%2F%2Fwd-red.com%2Fsubscribe%2Fabc-123_X&emoji=true";
+    fn copied_cookies_db_includes_wal_resident_rows() {
+        // Simulate Chrome's WAL-mode Cookies DB where a freshly-set cookie still
+        // lives in the -wal file (not yet checkpointed into the main DB file).
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("Cookies");
+        let writer = Connection::open(&db_path).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        writer
+            .execute(
+                "CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB)",
+                [],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO cookies VALUES ('qe.newssid.com', 'cf_clearance', 'wal-token', x'')",
+                [],
+            )
+            .unwrap();
+        // Keep `writer` open so the row stays in -wal (closing would checkpoint).
+        assert!(path_with_suffix(&db_path, "-wal").exists());
 
-        let urls = extract_wd_red_subscription_urls_from_text(text);
+        let copy = open_copied_cookies_db(&db_path).unwrap();
+        let value: String = copy
+            .query_row(
+                "SELECT value FROM cookies WHERE name = 'cf_clearance'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
-        assert_eq!(urls, vec!["https://wd-red.com/subscribe/abc-123_X"]);
+        assert_eq!(value, "wal-token");
+        drop(writer);
     }
 
     #[test]
-    fn parses_wd_subscription_userinfo_header() {
-        let info = parse_wd_subscription_userinfo(
-            "upload=1317600046; download=15225664223; total=214748364800; expire=1781971200",
-        )
-        .unwrap();
-
+    fn cookie_host_key_candidates_includes_parent_domains() {
         assert_eq!(
-            info,
-            WdSubscriptionUserInfo {
-                upload: 1317600046,
-                download: 15225664223,
-                total: 214748364800,
-                expire: Some(1781971200)
-            }
+            cookie_host_key_candidates("qe.newssid.com"),
+            vec![
+                ".newssid.com".to_string(),
+                ".qe.newssid.com".to_string(),
+                "qe.newssid.com".to_string(),
+            ]
+        );
+        // Never matches the bare TLD.
+        assert!(!cookie_host_key_candidates("qe.newssid.com").contains(&".com".to_string()));
+        assert_eq!(
+            cookie_host_key_candidates("yuyan.co"),
+            vec![".yuyan.co".to_string(), "yuyan.co".to_string()]
         );
     }
 
     #[test]
-    fn builds_wd_gold_snapshot_from_subscription_userinfo() {
-        let info = WdSubscriptionUserInfo {
-            upload: 1000,
-            download: 3000,
-            total: 10_000,
-            expire: Some(1781971200),
-        };
+    fn reads_parent_domain_cf_clearance_cookie() {
+        let profile = tempfile::tempdir().unwrap();
+        let db = Connection::open(profile.path().join("Cookies")).unwrap();
+        db.execute(
+            "CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, encrypted_value BLOB NOT NULL)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO cookies VALUES ('.qe.newssid.com', 'auth_data', 'a', x'')",
+            [],
+        )
+        .unwrap();
+        // cf_clearance lives under the parent domain ".newssid.com".
+        db.execute(
+            "INSERT INTO cookies VALUES ('.newssid.com', 'cf_clearance', 'cf', x'')",
+            [],
+        )
+        .unwrap();
 
-        let snapshot = build_wd_subscription_snapshot(&info, "2026-05-28T13:00:00+08:00").unwrap();
+        let header = read_chrome_cookie_header(profile.path(), "qe.newssid.com").unwrap();
 
-        assert_eq!(snapshot.used_upload_bytes, Some(1000));
-        assert_eq!(snapshot.used_download_bytes, Some(3000));
-        assert_eq!(snapshot.used_total_bytes, Some(4000));
-        assert_eq!(snapshot.total_bytes, Some(10_000));
-        assert_eq!(snapshot.remaining_bytes, Some(6000));
-        assert_eq!(snapshot.used_ratio, Some(40.0));
-        assert_eq!(snapshot.expire_at, Some(1781971200));
+        assert!(header.contains("cf_clearance=cf"));
+        assert!(header.contains("auth_data=a"));
     }
 
     #[test]
@@ -1936,6 +1548,36 @@ mod tests {
         let decrypted = decrypt_chrome_linux_cookie_with_secret(host, &encrypted, secret).unwrap();
 
         assert_eq!(decrypted, "browser-cookie-value");
+    }
+
+    #[test]
+    fn decrypts_v10_basic_store_cookie_with_peanuts_key() {
+        type Aes128CbcEnc = cbc::Encryptor<Aes128>;
+
+        // Chrome's basic password store ("peanuts") used for v10 cookies — no
+        // keyring needed, so the helper can read it even when running as root.
+        let secret = b"peanuts";
+        let host = "qe.newssid.com";
+        let value = b"cf_clearance-token";
+        let mut plaintext = Sha256::digest(host.as_bytes()).to_vec();
+        plaintext.extend_from_slice(value);
+        let mut key = [0u8; 16];
+        pbkdf2_hmac::<Sha1>(secret, b"saltysalt", 1, &mut key);
+        let iv = [b' '; 16];
+        let mut buffer = plaintext;
+        let message_len = buffer.len();
+        buffer.resize(message_len + 16, 0);
+        let ciphertext = Aes128CbcEnc::new(&key.into(), &iv.into())
+            .encrypt_padded_mut::<Pkcs7>(&mut buffer, message_len)
+            .unwrap()
+            .to_vec();
+        let mut encrypted = b"v10".to_vec();
+        encrypted.extend_from_slice(&ciphertext);
+
+        let decrypted =
+            decrypt_chrome_linux_cookie_with_secrets(host, &encrypted, &[b"peanuts".to_vec()]).unwrap();
+
+        assert_eq!(decrypted, "cf_clearance-token");
     }
 
     #[test]
@@ -2041,8 +1683,8 @@ mod tests {
 
         assert_eq!(response.profile, profile.display().to_string());
         assert_eq!(response.providers.len(), 2);
-        assert_eq!(response.providers[0].id, "wd-gold");
-        assert_eq!(response.providers[1].id, "xnyun");
+        assert_eq!(response.providers[0].id, "newssid");
+        assert_eq!(response.providers[1].id, "yuyan");
     }
 
     #[test]

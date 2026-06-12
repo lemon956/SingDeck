@@ -1562,10 +1562,13 @@ export function App() {
       return;
     }
 
-    void useHelperStore.getState().loadTraffic();
+    // Silent: only sync if the cached snapshot is missing or older than 5 min.
+    // Switching tabs / refocusing no longer triggers a full reload-and-flash-empty.
+    const TRAFFIC_MAX_AGE_MS = 5 * 60 * 1000;
+    void useHelperStore.getState().refreshTrafficIfStale(TRAFFIC_MAX_AGE_MS);
     const timer = window.setInterval(() => {
-      void useHelperStore.getState().loadTraffic();
-    }, 5 * 60 * 1000);
+      void useHelperStore.getState().refreshTrafficIfStale(TRAFFIC_MAX_AGE_MS);
+    }, TRAFFIC_MAX_AGE_MS);
 
     return () => window.clearInterval(timer);
   }, [activeRoute, helperServiceAvailable, pageVisible, trafficModuleEnabled]);
@@ -2587,7 +2590,10 @@ export function App() {
               </>
             ) : (
               <div className="traffic-provider-empty">
-                {helper.trafficError ?? 'Provider traffic has not been synced yet.'}
+                {helper.trafficError ??
+                  (helper.trafficLoading
+                    ? 'Syncing provider traffic…'
+                    : 'Provider traffic has not been synced yet.')}
               </div>
             )}
           </article>
