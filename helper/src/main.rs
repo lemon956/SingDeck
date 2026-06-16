@@ -56,6 +56,18 @@ const SINGDECK_CONFIG_FILE: &str = "singdeck.json";
 const SINGDECK_CONFIG_JSONC_FILE: &str = "singdeck.jsonc";
 const NODE_SOURCE_STARTUP_SYNC_ATTEMPTS: usize = 30;
 const NODE_SOURCE_STARTUP_SYNC_RETRY_MS: u64 = 2_000;
+// Re-sync node sources periodically so a source that failed at startup (e.g. a
+// rate-limited subscription) still populates once a quiet window opens. Kept
+// gentle — only sources that are NOT freshly-succeeded are actually re-fetched.
+const NODE_SOURCE_RESYNC_INTERVAL_SECS: u64 = 30 * 60;
+// A source that synced successfully within this window is left untouched (its
+// node list rarely changes), so the helper never hammers rate-limited /
+// Cloudflare-fronted subscription endpoints once it has the data.
+const NODE_SOURCE_SUCCESS_TTL_MS: i64 = 6 * 60 * 60 * 1000;
+// After a source fails (e.g. a 429/403 from a rate-limited endpoint) wait at
+// least this long before retrying it — even across helper restarts — so we never
+// re-poke a penalized endpoint on every restart and keep its cooldown reset.
+const NODE_SOURCE_FAILURE_BACKOFF_MS: i64 = 60 * 60 * 1000;
 const NODE_SOURCE_FETCH_USER_AGENT: &str = "SingDeck-helper/0.1.0";
 
 #[derive(Clone)]
@@ -1542,9 +1554,16 @@ async fn sync_node_sources_on_startup_with_retries(
         match sync_node_sources_on_startup(state).await {
             Ok(()) => return Ok(()),
             Err(error) => {
+                // Retry transient failures (controller still starting, subscription
+                // briefly unavailable) — but NOT a 429: hammering a rate-limited
+                // source just sustains the 429. It is recorded per source and the
+                // periodic re-sync retries it later in a gentler window.
+                let rate_limited = error.to_string().contains("429");
                 last_error = Some(error);
-                if attempt < attempts {
+                if attempt < attempts && !rate_limited {
                     tokio::time::sleep(retry_delay).await;
+                } else {
+                    break;
                 }
             }
         }
@@ -1572,6 +1591,18 @@ async fn sync_node_sources_with_nodes(
         if !source.associate {
             save_node_source_metadata_preserving_links(state, source)?;
             continue;
+        }
+
+        // Skip if it synced successfully recently (keep its nodes) or failed
+        // recently (back off — leave the failure intact so we don't re-poke a
+        // rate-limited / Cloudflare-fronted endpoint on every restart).
+        match node_source_fetch_plan(state, &source.name)? {
+            NodeSourceFetchPlan::KeepSuccess => {
+                save_node_source_metadata_preserving_links(state, source)?;
+                continue;
+            }
+            NodeSourceFetchPlan::BackoffFailure => continue,
+            NodeSourceFetchPlan::Fetch => {}
         }
 
         let result = async {
@@ -1776,6 +1807,53 @@ fn count_node_source_nodes_from_db(db: &Connection, source_name: &str) -> Result
         params![source_name.trim()],
         |row| row.get::<_, i64>(0),
     )?)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NodeSourceFetchPlan {
+    /// Fetch the source now.
+    Fetch,
+    /// Skip: synced successfully recently, keep its nodes.
+    KeepSuccess,
+    /// Skip: failed recently, back off (leave the failure row untouched).
+    BackoffFailure,
+}
+
+/// Decide whether to fetch a source this cycle based on its last attempt: keep a
+/// fresh success, back off a recent failure (so a rate-limited endpoint isn't
+/// re-poked on every restart), otherwise fetch.
+fn node_source_fetch_plan(state: &AppState, name: &str) -> Result<NodeSourceFetchPlan> {
+    let db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
+    let row: Option<(Option<i64>, Option<String>, i64)> = db
+        .query_row(
+            "SELECT last_synced_ms, last_error, node_count FROM node_sources WHERE name = ?1",
+            params![name.trim()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((Some(last_attempt_ms), last_error, node_count)) => {
+            let age = now_ms() - last_attempt_ms;
+            match last_error {
+                None if node_count > 0 && age < NODE_SOURCE_SUCCESS_TTL_MS => {
+                    NodeSourceFetchPlan::KeepSuccess
+                }
+                // Only rate-limit failures (429/403) back off — transient errors
+                // (503, network, controller-not-ready) are retried promptly.
+                Some(error)
+                    if age < NODE_SOURCE_FAILURE_BACKOFF_MS && is_rate_limited_error(&error) =>
+                {
+                    NodeSourceFetchPlan::BackoffFailure
+                }
+                _ => NodeSourceFetchPlan::Fetch,
+            }
+        }
+        _ => NodeSourceFetchPlan::Fetch,
+    })
+}
+
+fn is_rate_limited_error(error: &str) -> bool {
+    error.contains("429") || error.contains("403")
 }
 
 fn bool_int(value: bool) -> i64 {
@@ -2175,6 +2253,18 @@ fn spawn_node_source_startup_sync(state: AppState) {
         .await
         {
             eprintln!("node source startup sync failed: {error}");
+        }
+
+        // Periodic re-sync so rate-limited sources that 429'd at startup populate
+        // once a quiet window opens. Previously-synced node links persist across
+        // transient failures, so this only ever adds coverage.
+        let mut ticker = tokio::time::interval(Duration::from_secs(NODE_SOURCE_RESYNC_INTERVAL_SECS));
+        ticker.tick().await; // consume the immediate first tick (startup already ran)
+        loop {
+            ticker.tick().await;
+            if let Err(error) = sync_node_sources_on_startup(&state).await {
+                eprintln!("node source periodic sync: {error}");
+            }
         }
     });
 }
@@ -6093,6 +6183,197 @@ mod tests {
         let source = response.sources.iter().find(|source| source.name == "west-data").unwrap();
         assert_eq!(source.nodes, vec!["hk-1".to_string()]);
         assert!(source.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_node_source_sync_does_not_hammer_rate_limited_source() {
+        // A rate-limited (429) source must be fetched once, not retried in a tight
+        // loop — that just sustains the 429. The periodic re-sync retries it later.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sub_addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server_hits = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let server_hits = server_hits.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 1024];
+                    let _ = stream.read(&mut buffer).await.unwrap_or(0);
+                    server_hits.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+        let subscription_url = format!("http://{sub_addr}");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.jsonc");
+        let sidecar_path = temp_dir.path().join("singdeck.json");
+        fs::write(
+            &sidecar_path,
+            format!(
+                r#"{{"nodeSources":[{{"name":"ss-id","url":"{subscription_url}","associate":true}}]}}"#
+            ),
+        )
+        .unwrap();
+        let controller_url = spawn_flaky_proxy_controller(
+            0,
+            r#"{"proxies":{"select":{"type":"Selector","all":["hk-1"]},"hk-1":{"type":"Trojan"}}}"#,
+        )
+        .await;
+
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        save_string_kv(&state, "config_path", config_path.to_str().unwrap()).unwrap();
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+
+        let _ = sync_node_sources_on_startup_with_retries(&state, 5, Duration::from_millis(1)).await;
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let response = load_node_sources_response(&state).unwrap();
+        let source = response.sources.iter().find(|source| source.name == "ss-id").unwrap();
+        assert!(source.last_error.as_deref().unwrap_or_default().contains("429"));
+    }
+
+    #[tokio::test]
+    async fn sync_skips_recently_succeeded_source() {
+        // A source that already synced successfully must NOT be re-fetched —
+        // otherwise the helper keeps hitting a rate-limited subscription endpoint.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server_hits = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let server_hits = server_hits.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 512];
+                    let _ = stream.read(&mut buffer).await.unwrap_or(0);
+                    server_hits.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        let source = NodeSourceConfigEntry {
+            name: "ss-id".to_string(),
+            url: format!("http://{addr}"),
+            associate: true,
+        };
+        // Record a prior successful sync (no error, has a node).
+        save_node_source_links(&state, &source, &["hk-1".to_string()], None).unwrap();
+        assert_eq!(
+            node_source_fetch_plan(&state, "ss-id").unwrap(),
+            NodeSourceFetchPlan::KeepSuccess
+        );
+
+        let config = NodeSourceConfig {
+            sources: vec![source],
+        };
+        sync_node_sources_with_nodes(&state, &config, &["hk-1".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "fresh source must not be re-fetched");
+        let response = load_node_sources_response(&state).unwrap();
+        let kept = response.sources.iter().find(|source| source.name == "ss-id").unwrap();
+        assert_eq!(kept.nodes, vec!["hk-1".to_string()]);
+        assert!(kept.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_backs_off_recently_failed_source() {
+        // A source that just failed (e.g. 429) must NOT be re-fetched on the next
+        // cycle/restart — back off so we don't keep poking a penalized endpoint.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server_hits = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let server_hits = server_hits.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 512];
+                    let _ = stream.read(&mut buffer).await.unwrap_or(0);
+                    server_hits.fetch_add(1, Ordering::SeqCst);
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        let source = NodeSourceConfigEntry {
+            name: "ss-id".to_string(),
+            url: format!("http://{addr}"),
+            associate: true,
+        };
+        // Record a recent failure.
+        save_node_source_error(&state, &source, "HTTP 429 Too Many Requests".to_string()).unwrap();
+        assert_eq!(
+            node_source_fetch_plan(&state, "ss-id").unwrap(),
+            NodeSourceFetchPlan::BackoffFailure
+        );
+
+        let config = NodeSourceConfig {
+            sources: vec![source],
+        };
+        let _ = sync_node_sources_with_nodes(&state, &config, &["hk-1".to_string()]).await;
+
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "recently-failed source must back off");
+        // The failure state is preserved (so the backoff persists next cycle).
+        let response = load_node_sources_response(&state).unwrap();
+        let source = response.sources.iter().find(|source| source.name == "ss-id").unwrap();
+        assert!(source.last_error.as_deref().unwrap_or_default().contains("429"));
     }
 
     #[tokio::test]
