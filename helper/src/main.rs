@@ -62,12 +62,9 @@ const NODE_SOURCE_STARTUP_SYNC_RETRY_MS: u64 = 2_000;
 const NODE_SOURCE_RESYNC_INTERVAL_SECS: u64 = 30 * 60;
 // A source that synced successfully within this window is left untouched (its
 // node list rarely changes), so the helper never hammers rate-limited /
-// Cloudflare-fronted subscription endpoints once it has the data.
+// Cloudflare-fronted subscription endpoints once it has the data. Failed sources
+// are retried promptly (at startup and each periodic cycle).
 const NODE_SOURCE_SUCCESS_TTL_MS: i64 = 6 * 60 * 60 * 1000;
-// After a source fails (e.g. a 429/403 from a rate-limited endpoint) wait at
-// least this long before retrying it — even across helper restarts — so we never
-// re-poke a penalized endpoint on every restart and keep its cooldown reset.
-const NODE_SOURCE_FAILURE_BACKOFF_MS: i64 = 60 * 60 * 1000;
 const NODE_SOURCE_FETCH_USER_AGENT: &str = "SingDeck-helper/0.1.0";
 
 #[derive(Clone)]
@@ -1593,16 +1590,11 @@ async fn sync_node_sources_with_nodes(
             continue;
         }
 
-        // Skip if it synced successfully recently (keep its nodes) or failed
-        // recently (back off — leave the failure intact so we don't re-poke a
-        // rate-limited / Cloudflare-fronted endpoint on every restart).
-        match node_source_fetch_plan(state, &source.name)? {
-            NodeSourceFetchPlan::KeepSuccess => {
-                save_node_source_metadata_preserving_links(state, source)?;
-                continue;
-            }
-            NodeSourceFetchPlan::BackoffFailure => continue,
-            NodeSourceFetchPlan::Fetch => {}
+        // Already have a fresh successful sync — keep its nodes, don't re-fetch
+        // (subscription node lists rarely change; avoids re-hitting the endpoint).
+        if node_source_recently_synced(state, &source.name)? {
+            save_node_source_metadata_preserving_links(state, source)?;
+            continue;
         }
 
         let result = async {
@@ -1610,6 +1602,11 @@ async fn sync_node_sources_with_nodes(
                 .http
                 .get(source.url.trim())
                 .header(header::USER_AGENT, NODE_SOURCE_FETCH_USER_AGENT)
+                // A bare UA-only request gets flagged as a bot by Cloudflare-fronted
+                // subscription endpoints (e.g. get.ssidwork.com). Send the same
+                // basic headers a normal client/curl does so it isn't 403/429'd.
+                .header(header::ACCEPT, "*/*")
+                .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
                 .send()
                 .await
                 .with_context(|| format!("fetch {}", source.url))?
@@ -1809,20 +1806,10 @@ fn count_node_source_nodes_from_db(db: &Connection, source_name: &str) -> Result
     )?)
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum NodeSourceFetchPlan {
-    /// Fetch the source now.
-    Fetch,
-    /// Skip: synced successfully recently, keep its nodes.
-    KeepSuccess,
-    /// Skip: failed recently, back off (leave the failure row untouched).
-    BackoffFailure,
-}
-
-/// Decide whether to fetch a source this cycle based on its last attempt: keep a
-/// fresh success, back off a recent failure (so a rate-limited endpoint isn't
-/// re-poked on every restart), otherwise fetch.
-fn node_source_fetch_plan(state: &AppState, name: &str) -> Result<NodeSourceFetchPlan> {
+/// True if this source synced successfully (no error, has nodes) within the
+/// success TTL — skip re-fetching it to spare rate-limited endpoints. Failed
+/// sources return false so they are retried promptly.
+fn node_source_recently_synced(state: &AppState, name: &str) -> Result<bool> {
     let db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
     let row: Option<(Option<i64>, Option<String>, i64)> = db
         .query_row(
@@ -1831,29 +1818,11 @@ fn node_source_fetch_plan(state: &AppState, name: &str) -> Result<NodeSourceFetc
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    Ok(match row {
-        Some((Some(last_attempt_ms), last_error, node_count)) => {
-            let age = now_ms() - last_attempt_ms;
-            match last_error {
-                None if node_count > 0 && age < NODE_SOURCE_SUCCESS_TTL_MS => {
-                    NodeSourceFetchPlan::KeepSuccess
-                }
-                // Only rate-limit failures (429/403) back off — transient errors
-                // (503, network, controller-not-ready) are retried promptly.
-                Some(error)
-                    if age < NODE_SOURCE_FAILURE_BACKOFF_MS && is_rate_limited_error(&error) =>
-                {
-                    NodeSourceFetchPlan::BackoffFailure
-                }
-                _ => NodeSourceFetchPlan::Fetch,
-            }
-        }
-        _ => NodeSourceFetchPlan::Fetch,
-    })
-}
-
-fn is_rate_limited_error(error: &str) -> bool {
-    error.contains("429") || error.contains("403")
+    Ok(matches!(
+        row,
+        Some((Some(last_synced), None, node_count))
+            if node_count > 0 && now_ms() - last_synced < NODE_SOURCE_SUCCESS_TTL_MS
+    ))
 }
 
 fn bool_int(value: bool) -> i64 {
@@ -6257,6 +6226,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn node_source_fetch_sends_accept_header() {
+        // Cloudflare-fronted endpoints flag UA-only requests as bots, so the
+        // node-source fetch must send Accept like a normal client.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured = Arc::new(std::sync::Mutex::new(String::new()));
+        let server_cap = captured.clone();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buffer = [0_u8; 2048];
+                let n = stream.read(&mut buffer).await.unwrap_or(0);
+                *server_cap.lock().unwrap() = String::from_utf8_lossy(&buffer[..n]).to_string();
+                // base64 of "trojan://p@example.com:443#hk-1"
+                let body = "dHJvamFuOi8vcEBleGFtcGxlLmNvbTo0NDMjaGstMQ==";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+        let config = NodeSourceConfig {
+            sources: vec![NodeSourceConfigEntry {
+                name: "ss-id".to_string(),
+                url: format!("http://{addr}"),
+                associate: true,
+            }],
+        };
+        sync_node_sources_with_nodes(&state, &config, &["hk-1".to_string()])
+            .await
+            .unwrap();
+
+        let request = captured.lock().unwrap().to_ascii_lowercase();
+        assert!(request.contains("accept: */*"), "request: {request}");
+        assert!(request.contains("accept-language:"));
+    }
+
+    #[tokio::test]
     async fn sync_skips_recently_succeeded_source() {
         // A source that already synced successfully must NOT be re-fetched —
         // otherwise the helper keeps hitting a rate-limited subscription endpoint.
@@ -6298,10 +6317,7 @@ mod tests {
         };
         // Record a prior successful sync (no error, has a node).
         save_node_source_links(&state, &source, &["hk-1".to_string()], None).unwrap();
-        assert_eq!(
-            node_source_fetch_plan(&state, "ss-id").unwrap(),
-            NodeSourceFetchPlan::KeepSuccess
-        );
+        assert!(node_source_recently_synced(&state, "ss-id").unwrap());
 
         let config = NodeSourceConfig {
             sources: vec![source],
@@ -6315,65 +6331,6 @@ mod tests {
         let kept = response.sources.iter().find(|source| source.name == "ss-id").unwrap();
         assert_eq!(kept.nodes, vec!["hk-1".to_string()]);
         assert!(kept.last_error.is_none());
-    }
-
-    #[tokio::test]
-    async fn sync_backs_off_recently_failed_source() {
-        // A source that just failed (e.g. 429) must NOT be re-fetched on the next
-        // cycle/restart — back off so we don't keep poking a penalized endpoint.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let hits = Arc::new(AtomicUsize::new(0));
-        let server_hits = hits.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let server_hits = server_hits.clone();
-                tokio::spawn(async move {
-                    let mut buffer = [0_u8; 512];
-                    let _ = stream.read(&mut buffer).await.unwrap_or(0);
-                    server_hits.fetch_add(1, Ordering::SeqCst);
-                    let _ = stream
-                        .write_all(b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                        .await;
-                });
-            }
-        });
-
-        let conn = Connection::open_in_memory().unwrap();
-        init_db(&conn).unwrap();
-        let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
-            http: Client::new(),
-            mobile_config_url: None,
-            active_probes: Arc::new(Mutex::new(HashMap::new())),
-            probe_limiter: ProbeLimiter::new(),
-            events: helper_event_channel(),
-        };
-        let source = NodeSourceConfigEntry {
-            name: "ss-id".to_string(),
-            url: format!("http://{addr}"),
-            associate: true,
-        };
-        // Record a recent failure.
-        save_node_source_error(&state, &source, "HTTP 429 Too Many Requests".to_string()).unwrap();
-        assert_eq!(
-            node_source_fetch_plan(&state, "ss-id").unwrap(),
-            NodeSourceFetchPlan::BackoffFailure
-        );
-
-        let config = NodeSourceConfig {
-            sources: vec![source],
-        };
-        let _ = sync_node_sources_with_nodes(&state, &config, &["hk-1".to_string()]).await;
-
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "recently-failed source must back off");
-        // The failure state is preserved (so the backoff persists next cycle).
-        let response = load_node_sources_response(&state).unwrap();
-        let source = response.sources.iter().find(|source| source.name == "ss-id").unwrap();
-        assert!(source.last_error.as_deref().unwrap_or_default().contains("429"));
     }
 
     #[tokio::test]
