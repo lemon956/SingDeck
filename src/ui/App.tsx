@@ -2545,11 +2545,11 @@ export function App() {
                   <div className="traffic-trend-head">
                     <div>
                       <span>最近 7 天使用量</span>
-                      <small>按节点来源统计</small>
+                      <small>按策略组统计</small>
                     </div>
                     <div className="traffic-trend-actions">
                       <button
-                        aria-label="Refresh source trend"
+                        aria-label="Refresh strategy group trend"
                         className="ghost-action compact-icon-action"
                         disabled={helper.networkUsageSourceTrendRefreshing}
                         onClick={() =>
@@ -2562,7 +2562,7 @@ export function App() {
                         <RefreshCw size={13} />
                         {helper.networkUsageSourceTrendRefreshing ? 'Refreshing' : 'Refresh'}
                       </button>
-                      <div className="traffic-trend-tabs" aria-label="Provider traffic trend bucket">
+                      <div className="traffic-trend-tabs" aria-label="Strategy group traffic trend bucket">
                         {(['hour', 'day'] as const).map((bucket) => (
                           <button
                             className={trafficTrendBucket === bucket ? 'active' : ''}
@@ -2583,19 +2583,19 @@ export function App() {
                     <div className="traffic-trend-inline-error">{helper.networkUsageSourceTrendRefreshError}</div>
                   ) : null}
                   {!networkUsageModuleEnabled ? (
-                    <div className="traffic-provider-empty compact">Enable Network usage to build source trends.</div>
+                    <div className="traffic-provider-empty compact">Enable Network usage to build strategy group trends.</div>
                   ) : helper.networkUsageSourceTrendError && !helper.networkUsageSourceTrend ? (
                     <div className="traffic-provider-empty compact">{helper.networkUsageSourceTrendError}</div>
                   ) : helper.networkUsageSourceTrendLoading && !helper.networkUsageSourceTrend ? (
-                    <div className="traffic-provider-empty compact">Loading source trend...</div>
+                    <div className="traffic-provider-empty compact">Loading strategy group trend...</div>
                   ) : !sourceTrendHasSamples ? (
-                    <div className="traffic-provider-empty compact">No source usage samples in the last 7 days.</div>
+                    <div className="traffic-provider-empty compact">No strategy group usage samples in the last 7 days.</div>
                   ) : (
                     <>
                       <div className="traffic-trend-legend">
                         {sourceTrendSources.map((source, index) => (
                           <button
-                            aria-label={`Filter source ${source.name}`}
+                            aria-label={`Filter strategy group ${source.name}`}
                             aria-pressed={trafficTrendSourceFilter === source.name}
                             className={trafficTrendSourceFilter === source.name ? 'active' : ''}
                             key={source.name}
@@ -2621,19 +2621,6 @@ export function App() {
                         <span>{trafficTrendBucket === 'hour' ? 'hourly' : 'daily'}</span>
                         <span>now</span>
                       </div>
-                      {helper.networkUsageSourceTrend?.unknownNodes.length ? (
-                        <div className="traffic-unknown-nodes">
-                          <span>unknown 包含</span>
-                          <div>
-                            {helper.networkUsageSourceTrend.unknownNodes.map((node) => (
-                              <strong key={node.name}>
-                                {node.name}
-                                <em>{formatBytes(node.totalBytes)}</em>
-                              </strong>
-                            ))}
-                          </div>
-                        </div>
-                      ) : null}
                     </>
                   )}
                 </div>

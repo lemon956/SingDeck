@@ -869,13 +869,7 @@ pub fn query_source_trend(
         .map(|index| from_ms + index as i64 * bucket_size)
         .collect::<Vec<_>>();
 
-    let node_sources = query_node_source_map(conn)?;
-    let source_names = node_sources.values().cloned().collect::<BTreeSet<_>>();
-    let mut sources = source_names
-        .into_iter()
-        .map(|source| (source, SourceAggregate::default()))
-        .collect::<BTreeMap<_, _>>();
-    let mut unknown_nodes = BTreeMap::<String, (i64, i64)>::new();
+    let mut sources = BTreeMap::<String, SourceAggregate>::new();
 
     let mut stmt = conn.prepare(
         r#"
@@ -883,12 +877,13 @@ pub fn query_source_trend(
           b.bucket_start_ms,
           b.outbound,
           c.chains_json,
+          c.rule,
           COALESCE(SUM(b.upload_bytes), 0),
           COALESCE(SUM(b.download_bytes), 0)
         FROM network_usage_buckets b
         LEFT JOIN network_usage_connections c ON c.connection_id = b.connection_id
         WHERE b.bucket_start_ms >= ?1 AND b.bucket_start_ms < ?2
-        GROUP BY b.bucket_start_ms, b.connection_id, b.outbound, c.chains_json
+        GROUP BY b.bucket_start_ms, b.connection_id, b.outbound, c.chains_json, c.rule
         ORDER BY b.bucket_start_ms ASC
         "#,
     )?;
@@ -897,13 +892,14 @@ pub fn query_source_trend(
             row.get::<_, i64>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, Option<String>>(2)?,
-            row.get::<_, i64>(3)?,
+            row.get::<_, Option<String>>(3)?,
             row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
         ))
     })?;
 
     for row in rows {
-        let (raw_bucket_start, outbound, chains_json, upload_bytes, download_bytes) = row?;
+        let (raw_bucket_start, outbound, chains_json, rule, upload_bytes, download_bytes) = row?;
         if upload_bytes == 0 && download_bytes == 0 {
             continue;
         }
@@ -911,52 +907,34 @@ pub fn query_source_trend(
             .as_deref()
             .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
             .unwrap_or_default();
-        let candidates = source_candidate_nodes(&outbound, &chains);
-        let candidates = if let Some(current_nodes) = current_nodes {
-            let current_candidates = candidates
-                .into_iter()
-                .filter(|node| current_nodes.contains(node.as_str()))
-                .collect::<Vec<_>>();
-            if current_candidates.is_empty() {
-                continue;
+        if let Some(current_nodes) = current_nodes {
+            if !current_nodes.is_empty() {
+                let candidates = source_candidate_nodes(&outbound, &chains);
+                if !candidates.is_empty()
+                    && !candidates.iter().any(|node| current_nodes.contains(node.as_str()))
+                {
+                    continue;
+                }
             }
-            current_candidates
-        } else {
-            candidates
-        };
-        let source_name = candidates
-            .iter()
-            .find_map(|node| node_sources.get(node).cloned())
-            .unwrap_or_else(|| "unknown".to_string());
+        }
+        let rule_str = rule.as_deref().unwrap_or("");
+        let group_name = strategy_group_label(rule_str, &outbound, &chains);
         let grouped_bucket = aligned_bucket_start(raw_bucket_start, bucket_size, offset_ms);
         if grouped_bucket < from_ms || grouped_bucket >= to_ms {
             continue;
         }
 
-        let aggregate = sources.entry(source_name.clone()).or_default();
+        let aggregate = sources.entry(group_name).or_default();
         aggregate.upload_bytes += upload_bytes;
         aggregate.download_bytes += download_bytes;
         let bucket_total = aggregate.buckets.entry(grouped_bucket).or_default();
         bucket_total.0 += upload_bytes;
         bucket_total.1 += download_bytes;
-
-        if source_name == "unknown" {
-            let node_name = candidates
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            let node_total = unknown_nodes.entry(node_name).or_default();
-            node_total.0 += upload_bytes;
-            node_total.1 += download_bytes;
-        }
     }
 
     let mut source_rows = sources
         .into_iter()
-        .filter_map(|(name, aggregate)| {
-            if name == "unknown" && aggregate.upload_bytes == 0 && aggregate.download_bytes == 0 {
-                return None;
-            }
+        .map(|(name, aggregate)| {
             let buckets = bucket_starts
                 .iter()
                 .map(|bucket_start_ms| {
@@ -973,34 +951,16 @@ pub fn query_source_trend(
                     }
                 })
                 .collect::<Vec<_>>();
-            Some(UsageSourceTrendSource {
+            UsageSourceTrendSource {
                 name,
                 upload_bytes: aggregate.upload_bytes,
                 download_bytes: aggregate.download_bytes,
                 total_bytes: aggregate.upload_bytes + aggregate.download_bytes,
                 buckets,
-            })
+            }
         })
         .collect::<Vec<_>>();
-    source_rows.sort_by(
-        |left, right| match (left.name.as_str(), right.name.as_str()) {
-            ("unknown", "unknown") => std::cmp::Ordering::Equal,
-            ("unknown", _) => std::cmp::Ordering::Greater,
-            (_, "unknown") => std::cmp::Ordering::Less,
-            _ => left.name.cmp(&right.name),
-        },
-    );
-
-    let mut unknown_rows = unknown_nodes
-        .into_iter()
-        .map(|(name, (upload_bytes, download_bytes))| UsageUnknownNode {
-            name,
-            upload_bytes,
-            download_bytes,
-            total_bytes: upload_bytes + download_bytes,
-        })
-        .collect::<Vec<_>>();
-    unknown_rows.sort_by(|left, right| {
+    source_rows.sort_by(|left, right| {
         right
             .total_bytes
             .cmp(&left.total_bytes)
@@ -1012,7 +972,7 @@ pub fn query_source_trend(
         to_ms,
         bucket: bucket.label().to_string(),
         sources: source_rows,
-        unknown_nodes: unknown_rows,
+        unknown_nodes: vec![],
     })
 }
 
@@ -1493,29 +1453,26 @@ mod tests {
     }
 
     #[test]
-    fn query_source_trend_groups_usage_by_node_source_and_unknown_nodes() {
+    fn query_source_trend_groups_usage_by_strategy_groups() {
         let conn = test_db();
-        init_source_tables(&conn);
-        link_source_node(&conn, "wd", "wd-node");
-        link_source_node(&conn, "xnyun", "xnyun-node");
         apply_connections_snapshot(&conn, &json!({ "connections": [] }), 0).unwrap();
         apply_connections_snapshot(
             &conn,
             &json!({
                 "connections": [
                     {
-                        "id": "wd-conn",
+                        "id": "proxy-conn",
                         "start": "1970-01-01T00:00:00.500Z",
-                        "metadata": { "host": "wd.test", "network": "tcp" },
-                        "chains": ["wd-node", "select"],
+                        "metadata": { "host": "proxy.test", "network": "tcp" },
+                        "chains": ["hk-node", "Proxy"],
                         "upload": 100,
                         "download": 400
                     },
                     {
-                        "id": "unknown-conn",
+                        "id": "direct-conn",
                         "start": "1970-01-01T00:00:00.500Z",
-                        "metadata": { "host": "unknown.test", "network": "tcp" },
-                        "chains": ["manual-node", "select"],
+                        "metadata": { "host": "direct.test", "network": "tcp" },
+                        "chains": ["direct"],
                         "upload": 25,
                         "download": 75
                     }
@@ -1527,55 +1484,38 @@ mod tests {
 
         let trend = query_source_trend(&conn, 0, 7, SourceTrendBucket::Day, 0, None).unwrap();
 
-        let wd = trend
+        let proxy = trend
             .sources
             .iter()
-            .find(|source| source.name == "wd")
+            .find(|source| source.name == "Proxy")
             .unwrap();
-        assert_eq!(wd.total_bytes, 500);
-        assert_eq!(wd.buckets.len(), 7);
-        assert_eq!(wd.buckets[6].bucket_start_ms, 0);
-        assert_eq!(wd.buckets[6].total_bytes, 500);
+        assert_eq!(proxy.total_bytes, 500);
+        assert_eq!(proxy.buckets.len(), 7);
+        assert_eq!(proxy.buckets[6].bucket_start_ms, 0);
+        assert_eq!(proxy.buckets[6].total_bytes, 500);
 
-        let xnyun = trend
+        let direct = trend
             .sources
             .iter()
-            .find(|source| source.name == "xnyun")
+            .find(|source| source.name == "direct")
             .unwrap();
-        assert_eq!(xnyun.total_bytes, 0);
-        assert_eq!(xnyun.buckets.len(), 7);
-
-        let unknown = trend
-            .sources
-            .iter()
-            .find(|source| source.name == "unknown")
-            .unwrap();
-        assert_eq!(unknown.total_bytes, 100);
-        assert_eq!(
-            trend.unknown_nodes,
-            vec![UsageUnknownNode {
-                name: "manual-node".to_string(),
-                upload_bytes: 25,
-                download_bytes: 75,
-                total_bytes: 100,
-            }]
-        );
+        assert_eq!(direct.total_bytes, 100);
+        assert_eq!(direct.buckets.len(), 7);
+        assert_eq!(trend.unknown_nodes, vec![]);
     }
 
     #[test]
     fn query_source_trend_can_group_last_seven_days_by_hour() {
         let conn = test_db();
-        init_source_tables(&conn);
-        link_source_node(&conn, "wd", "wd-node");
         apply_connections_snapshot(&conn, &json!({ "connections": [] }), 0).unwrap();
         apply_connections_snapshot(
             &conn,
             &json!({
                 "connections": [{
-                    "id": "wd-conn",
+                    "id": "proxy-conn",
                     "start": "1970-01-01T00:00:00.500Z",
-                    "metadata": { "host": "wd.test", "network": "tcp" },
-                    "chains": ["wd-node"],
+                    "metadata": { "host": "proxy.test", "network": "tcp" },
+                    "chains": ["hk-node", "Proxy"],
                     "upload": 100,
                     "download": 200
                 }]
@@ -1596,87 +1536,44 @@ mod tests {
     #[test]
     fn query_source_trend_filters_nodes_not_in_current_config() {
         let conn = test_db();
-        init_source_tables(&conn);
-        link_source_node(&conn, "wd", "wd-node");
-        link_source_node(&conn, "xnyun", "removed-xnyun-node");
         apply_connections_snapshot(&conn, &json!({ "connections": [] }), 0).unwrap();
         apply_connections_snapshot(
             &conn,
             &json!({
                 "connections": [
                     {
-                        "id": "wd-conn",
+                        "id": "current-conn",
                         "start": "1970-01-01T00:00:00.500Z",
-                        "metadata": { "host": "wd.test", "network": "tcp" },
-                        "chains": ["wd-node"],
+                        "metadata": { "host": "current.test", "network": "tcp" },
+                        "chains": ["current-node", "Proxy"],
                         "upload": 100,
                         "download": 400
                     },
                     {
-                        "id": "removed-source-conn",
+                        "id": "removed-conn",
                         "start": "1970-01-01T00:00:00.500Z",
-                        "metadata": { "host": "removed-source.test", "network": "tcp" },
-                        "chains": ["removed-xnyun-node"],
+                        "metadata": { "host": "removed.test", "network": "tcp" },
+                        "chains": ["removed-node", "Proxy"],
                         "upload": 900,
                         "download": 100
-                    },
-                    {
-                        "id": "removed-unknown-conn",
-                        "start": "1970-01-01T00:00:00.500Z",
-                        "metadata": { "host": "removed-unknown.test", "network": "tcp" },
-                        "chains": ["removed-manual-node"],
-                        "upload": 200,
-                        "download": 300
-                    },
-                    {
-                        "id": "current-unknown-conn",
-                        "start": "1970-01-01T00:00:00.500Z",
-                        "metadata": { "host": "current-unknown.test", "network": "tcp" },
-                        "chains": ["current-manual-node"],
-                        "upload": 25,
-                        "download": 75
                     }
                 ]
             }),
             60_000,
         )
         .unwrap();
-        let current_nodes =
-            BTreeSet::from(["wd-node".to_string(), "current-manual-node".to_string()]);
+        let current_nodes = BTreeSet::from(["current-node".to_string()]);
 
         let trend =
             query_source_trend(&conn, 0, 7, SourceTrendBucket::Day, 0, Some(&current_nodes))
                 .unwrap();
-
-        let wd = trend
+        let proxy = trend
             .sources
             .iter()
-            .find(|source| source.name == "wd")
+            .find(|source| source.name == "Proxy")
             .unwrap();
-        assert_eq!(wd.total_bytes, 500);
-
-        let xnyun = trend
-            .sources
-            .iter()
-            .find(|source| source.name == "xnyun")
-            .unwrap();
-        assert_eq!(xnyun.total_bytes, 0);
-
-        let unknown = trend
-            .sources
-            .iter()
-            .find(|source| source.name == "unknown")
-            .unwrap();
-        assert_eq!(unknown.total_bytes, 100);
-        assert_eq!(
-            trend.unknown_nodes,
-            vec![UsageUnknownNode {
-                name: "current-manual-node".to_string(),
-                upload_bytes: 25,
-                download_bytes: 75,
-                total_bytes: 100,
-            }]
-        );
+        assert_eq!(proxy.total_bytes, 500);
+        assert_eq!(trend.unknown_nodes, vec![]);
     }
 
     #[test]

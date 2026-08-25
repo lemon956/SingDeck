@@ -5626,7 +5626,7 @@ mod tests {
                         "id": "wd-conn",
                         "start": "{connection_start}",
                         "metadata": {{ "host": "wd.test", "network": "tcp" }},
-                        "chains": ["wd-node"],
+                        "chains": ["wd-node", "select"],
                         "upload": 128,
                         "download": 1024
                     }}]
@@ -5657,12 +5657,12 @@ mod tests {
         .await
         .unwrap();
 
-        let wd = trend
+        let select = trend
             .sources
             .iter()
-            .find(|source| source.name == "wd")
+            .find(|source| source.name == "select")
             .unwrap();
-        assert_eq!(wd.total_bytes, 1152);
+        assert_eq!(select.total_bytes, 1152);
     }
 
     #[tokio::test]
@@ -5681,16 +5681,6 @@ mod tests {
         let connection_start = format_time(baseline_ms.saturating_add(100));
         {
             let db = state.db.lock().unwrap();
-            db.execute(
-                "INSERT INTO node_source_nodes (source_name, node_name) VALUES (?1, ?2)",
-                params!["wd", "wd-node"],
-            )
-            .unwrap();
-            db.execute(
-                "INSERT INTO node_source_nodes (source_name, node_name) VALUES (?1, ?2)",
-                params!["xnyun", "removed-xnyun-node"],
-            )
-            .unwrap();
             network_usage::apply_connections_snapshot(
                 &db,
                 &serde_json::json!({ "connections": [] }),
@@ -5705,7 +5695,7 @@ mod tests {
                             "id": "wd-conn",
                             "start": connection_start,
                             "metadata": { "host": "wd.test", "network": "tcp" },
-                            "chains": ["wd-node"],
+                            "chains": ["wd-node", "select"],
                             "upload": 100,
                             "download": 400
                         },
@@ -5713,7 +5703,7 @@ mod tests {
                             "id": "removed-source-conn",
                             "start": connection_start,
                             "metadata": { "host": "removed-source.test", "network": "tcp" },
-                            "chains": ["removed-xnyun-node"],
+                            "chains": ["removed-xnyun-node", "removed-group"],
                             "upload": 900,
                             "download": 100
                         },
@@ -5721,7 +5711,7 @@ mod tests {
                             "id": "removed-unknown-conn",
                             "start": connection_start,
                             "metadata": { "host": "removed-unknown.test", "network": "tcp" },
-                            "chains": ["removed-manual-node"],
+                            "chains": ["removed-manual-node", "removed-group"],
                             "upload": 200,
                             "download": 300
                         },
@@ -5729,7 +5719,7 @@ mod tests {
                             "id": "current-unknown-conn",
                             "start": connection_start,
                             "metadata": { "host": "current-unknown.test", "network": "tcp" },
-                            "chains": ["current-manual-node"],
+                            "chains": ["current-manual-node", "select"],
                             "upload": 25,
                             "download": 75
                         }
@@ -5765,35 +5755,13 @@ mod tests {
         .await
         .unwrap();
 
-        let wd = trend
+        let select = trend
             .sources
             .iter()
-            .find(|source| source.name == "wd")
+            .find(|source| source.name == "select")
             .unwrap();
-        assert_eq!(wd.total_bytes, 500);
-
-        let xnyun = trend
-            .sources
-            .iter()
-            .find(|source| source.name == "xnyun")
-            .unwrap();
-        assert_eq!(xnyun.total_bytes, 0);
-
-        let unknown = trend
-            .sources
-            .iter()
-            .find(|source| source.name == "unknown")
-            .unwrap();
-        assert_eq!(unknown.total_bytes, 100);
-        assert_eq!(
-            trend.unknown_nodes,
-            vec![network_usage::UsageUnknownNode {
-                name: "current-manual-node".to_string(),
-                upload_bytes: 25,
-                download_bytes: 75,
-                total_bytes: 100,
-            }]
-        );
+        assert_eq!(select.total_bytes, 600);
+        assert_eq!(trend.unknown_nodes, vec![]);
     }
 
     #[test]
