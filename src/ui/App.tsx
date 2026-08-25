@@ -1191,6 +1191,17 @@ export function App() {
     () => new Set(selectedNodeSource?.nodes ?? []),
     [selectedNodeSource]
   );
+  const nodeSourceByNodeName = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const source of helper.nodeSources) {
+      for (const nodeName of source.nodes) {
+        if (!map.has(nodeName)) {
+          map.set(nodeName, source.name);
+        }
+      }
+    }
+    return map;
+  }, [helper.nodeSources]);
   const sourceFilteredStrategyGroups = useMemo(() => {
     if (!selectedNodeSource) {
       return orderedStrategyGroups;
@@ -3599,7 +3610,7 @@ export function App() {
                             <article
                               aria-busy={nodeActivity ? true : undefined}
                               aria-disabled={!canSelect || isCurrent}
-                              className={`strategy-node-card strategy-node-tile ${cardTone} ${isCurrent ? 'active' : ''} ${nodeActivity?.className ?? ''}`}
+                              className={`strategy-node-card ${cardTone} ${isCurrent ? 'active' : ''} ${nodeActivity?.className ?? ''}`}
                               key={member.name}
                               onClick={() => {
                                 setActiveStrategyGroupName(proxy.name);
@@ -3608,14 +3619,15 @@ export function App() {
                                 }
                               }}
                             >
-                              <div className="node-line">
-                                <div className="node-name">
-                                  <strong>{member.name}</strong>
-                                  <span>{member.type} / {proxy.name}</span>
+                              <div className="node-head">
+                                <div className="node-title-group">
+                                  <span className={`node-status-dot ${nodeDelayTone} ${isTesting ? 'testing' : ''}`} />
+                                  <strong className="node-name" title={member.name}>{member.name}</strong>
                                 </div>
+                                <span className="node-type-tag">{member.type}</span>
                               </div>
                               <div className="node-foot">
-                                <span className="node-meta">
+                                <div className="node-meta">
                                   {rowConfig.mode === 'score' ? (
                                     <span
                                       className={`score-mark ${scoreTone} ${isScoring ? 'testing' : ''}`}
@@ -3625,13 +3637,21 @@ export function App() {
                                           : undefined
                                       }
                                     >
-                                      {formatNodeScore(score, displayDelay)}
+                                      {isScoring ? (
+                                        <span className="testing-spinner-wrapper">
+                                          <Zap className="spin-fast" size={8} />
+                                          <em>...</em>
+                                        </span>
+                                      ) : (
+                                        formatNodeScore(score, displayDelay)
+                                      )}
                                     </span>
+                                  ) : isCurrent ? (
+                                    <span className="node-active-pill">ACTIVE</span>
                                   ) : (
-                                    <span className={`node-status-dot ${nodeDelayTone}`} />
+                                    <span className="node-type-sub">{proxy.name}</span>
                                   )}
-                                  <span>{member.type}</span>
-                                </span>
+                                </div>
                                 <button
                                   aria-label={`Test ${member.name} delay`}
                                   className={`delay-pill ${nodeDelayTone} ${isTesting ? 'testing' : ''}`}
@@ -3641,7 +3661,14 @@ export function App() {
                                   }}
                                   type="button"
                                 >
-                                  {isTesting ? '...' : formatDelay(nodeDelay)}
+                                  {isTesting ? (
+                                    <span className="testing-spinner-wrapper">
+                                      <RefreshCw className="spin-fast" size={8} />
+                                      <em>...</em>
+                                    </span>
+                                  ) : (
+                                    formatDelay(nodeDelay)
+                                  )}
                                 </button>
                               </div>
                             </article>

@@ -716,11 +716,11 @@ code, pre, kbd, samp {
 }
 
 .delay-pill.testing {
-  color: #38bdf8;
-  border-color: rgba(56, 189, 248, 0.6);
-  background: rgba(56, 189, 248, 0.2);
-  box-shadow: 0 0 8px rgba(56, 189, 248, 0.3);
-  animation: pulse 1.2s ease-in-out infinite;
+  color: #38bdf8 !important;
+  border-color: rgba(56, 189, 248, 0.85) !important;
+  background: rgba(56, 189, 248, 0.22) !important;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.45) !important;
+  animation: pulse 0.8s ease-in-out infinite alternate !important;
 }
 
 .score-pill {
@@ -743,7 +743,11 @@ code, pre, kbd, samp {
 .score-mark.warn { color: #f59e0b; }
 .score-mark.bad { color: #ef4444; }
 .score-mark.none { color: #64748b; }
-.score-mark.testing { animation: pulse 1.2s ease-in-out infinite; }
+.score-mark.testing {
+  color: #c084fc !important;
+  text-shadow: 0 0 8px rgba(192, 132, 252, 0.7);
+  animation: pulse 0.8s ease-in-out infinite alternate !important;
+}
 
 .mode-chip,
 .execution-chip {
@@ -1803,144 +1807,279 @@ input::placeholder, textarea::placeholder {
   gap: 4px;
 }
 
-/* Strategy Node Tiles (Comfortable Grid & High Contrast States) */
+/* Strategy Node Tiles (Clash Verge Rev / Metacubexd Standard) */
 .strategy-card-nodes {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(154px, 1fr));
+  gap: 7px;
   padding: 8px 10px;
-  max-height: 260px;
+  max-height: 280px;
   overflow-y: auto;
 }
 
 .strategy-card-nodes.expanded {
-  max-height: 420px;
+  max-height: 480px;
 }
 
 .strategy-node-card {
   position: relative;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
   gap: 6px;
   padding: 8px 10px;
+  min-height: 56px;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--radius-xs);
-  background: #141b22;
+  border-radius: 8px;
+  background: #151d27;
   cursor: pointer;
   user-select: none;
-  transition: all var(--transition-fast);
+  overflow: hidden;
+  box-sizing: border-box;
+  transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 160ms ease,
+              box-shadow 160ms ease,
+              background 160ms ease;
 }
 
 .strategy-node-card:hover {
-  border-color: rgba(56, 189, 248, 0.4);
-  background: #1c2633;
-  transform: translateY(-1px);
+  transform: translateY(-1.5px);
+  border-color: rgba(56, 189, 248, 0.45);
+  background: #1c2634;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35), 0 0 10px rgba(56, 189, 248, 0.1);
 }
 
-/* Subtle node health outline */
-.strategy-node-card.good:not(.active) {
-  border-color: rgba(34, 197, 94, 0.25);
-}
-.strategy-node-card.warn:not(.active) {
-  border-color: rgba(245, 158, 11, 0.25);
-}
-.strategy-node-card.bad:not(.active) {
-  border-color: rgba(239, 68, 68, 0.3);
-  opacity: 0.75;
-}
-.strategy-node-card.bad:not(.active):hover {
-  opacity: 1;
-  border-color: rgba(239, 68, 68, 0.5);
+.node-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
 }
 
-/* Active / Current Node: Traditional glowing green highlight */
-.strategy-node-card.active {
-  border-color: #22c55e;
-  border-left: 3px solid #22c55e;
-  background: linear-gradient(135deg, rgba(34, 197, 94, 0.16) 0%, rgba(15, 23, 42, 0.95) 100%);
-  box-shadow: 0 0 10px rgba(34, 197, 94, 0.25), inset 0 0 0 1px rgba(34, 197, 94, 0.35);
+.node-title-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
-.strategy-node-card.active::before {
-  content: "";
-  position: absolute;
-  top: 5px;
-  right: 5px;
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-pill);
-  background: #22c55e;
-  box-shadow: 0 0 8px #22c55e;
-}
-
-.strategy-node-card .node-name strong {
+.node-title-group strong.node-name {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11.5px;
   font-weight: 600;
-  color: var(--text);
-  line-height: 1.3;
+  color: #f1f5f9;
+  line-height: 1.25;
 }
 
-.strategy-node-card.active .node-name strong {
-  color: #ffffff;
+.node-type-tag {
+  font-size: 8.5px;
   font-weight: 700;
-}
-
-.strategy-node-card .node-name span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 10px;
-  color: var(--quiet);
-  margin-top: 1px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #94a3b8;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
 }
 
 .node-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 4px;
+  gap: 6px;
+  width: 100%;
 }
 
 .node-meta {
   display: flex;
   align-items: center;
-  gap: 5px;
-  font-size: 10px;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.node-active-pill {
+  font-size: 8.5px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  padding: 0.5px 4px;
+  border-radius: 3px;
+  letter-spacing: 0.03em;
+}
+
+.node-type-sub {
+  font-size: 9.5px;
   color: var(--quiet);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Subtle node health outline */
+.strategy-node-card.good:not(.active):not(.is-testing):not(.is-scoring) {
+  border-color: rgba(34, 197, 94, 0.25);
+}
+.strategy-node-card.warn:not(.active):not(.is-testing):not(.is-scoring) {
+  border-color: rgba(245, 158, 11, 0.25);
+}
+.strategy-node-card.bad:not(.active):not(.is-testing):not(.is-scoring) {
+  border-color: rgba(239, 68, 68, 0.25);
+  opacity: 0.72;
+}
+.strategy-node-card.bad:not(.active):not(.is-testing):not(.is-scoring):hover {
+  opacity: 1;
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+/* Active / Current Node: Traditional green hero highlight */
+.strategy-node-card.active {
+  border-color: #22c55e !important;
+  border-left: 3.5px solid #22c55e !important;
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.16) 0%, #101720 100%) !important;
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.25), inset 0 0 0 1px rgba(34, 197, 94, 0.3) !important;
+}
+
+.strategy-node-card.active strong.node-name {
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.strategy-node-card.active .node-type-tag {
+  background: rgba(34, 197, 94, 0.15);
+  border-color: rgba(34, 197, 94, 0.35);
+  color: #86efac;
+}
+
+/* ==========================================================================
+   HIGH-PERCEPTION TESTING & SCORING ANIMATIONS
+   ========================================================================== */
+
+.strategy-node-card.is-testing,
+.strategy-node-card.is-scoring {
+  border-color: rgba(56, 189, 248, 0.85) !important;
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.35), inset 0 0 8px rgba(56, 189, 248, 0.15) !important;
+  animation: node-testing-breathing 1.2s ease-in-out infinite alternate;
+}
+
+.strategy-node-card.is-scoring {
+  border-color: rgba(192, 132, 252, 0.9) !important;
+  box-shadow: 0 0 16px rgba(192, 132, 252, 0.35), inset 0 0 8px rgba(192, 132, 252, 0.15) !important;
+  animation: node-scoring-breathing 1.2s ease-in-out infinite alternate;
+}
+
+/* Laser sweep shimmer effect across the entire node card */
+.strategy-node-card.is-testing::after,
+.strategy-node-card.is-scoring::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -150%;
+  width: 80%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(56, 189, 248, 0.15) 30%,
+    rgba(255, 255, 255, 0.45) 50%,
+    rgba(56, 189, 248, 0.25) 70%,
+    transparent 100%
+  );
+  transform: skewX(-25deg);
+  animation: node-laser-sweep 1.1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  pointer-events: none;
+}
+
+.strategy-node-card.is-scoring::after {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(192, 132, 252, 0.2) 30%,
+    rgba(255, 255, 255, 0.55) 50%,
+    rgba(192, 132, 252, 0.3) 70%,
+    transparent 100%
+  );
+}
+
+@keyframes node-testing-breathing {
+  0% { border-color: rgba(56, 189, 248, 0.4); box-shadow: 0 0 8px rgba(56, 189, 248, 0.2); }
+  100% { border-color: rgba(56, 189, 248, 0.95); box-shadow: 0 0 18px rgba(56, 189, 248, 0.45), inset 0 0 10px rgba(56, 189, 248, 0.2); }
+}
+
+@keyframes node-scoring-breathing {
+  0% { border-color: rgba(192, 132, 252, 0.4); box-shadow: 0 0 8px rgba(192, 132, 252, 0.2); }
+  100% { border-color: rgba(192, 132, 252, 0.95); box-shadow: 0 0 18px rgba(192, 132, 252, 0.45), inset 0 0 10px rgba(192, 132, 252, 0.2); }
+}
+
+@keyframes node-laser-sweep {
+  0% { left: -150%; }
+  100% { left: 200%; }
+}
+
+@keyframes spin-fast {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.spin-fast {
+  animation: spin-fast 0.8s linear infinite;
+}
+
+.testing-spinner-wrapper {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.testing-spinner-wrapper em {
+  font-style: normal;
+  font-family: var(--font-mono);
 }
 
 .node-status-dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: var(--radius-pill);
   background: #64748b;
   flex-shrink: 0;
+  transition: all 0.2s ease;
 }
 
 .node-status-dot.good,
 .node-status-dot.ok {
   background: #22c55e;
-  box-shadow: 0 0 6px rgba(34, 197, 94, 0.8);
+  box-shadow: 0 0 8px #22c55e;
 }
 
 .node-status-dot.warn {
   background: #f59e0b;
-  box-shadow: 0 0 6px rgba(245, 158, 11, 0.8);
+  box-shadow: 0 0 8px #f59e0b;
 }
 
 .node-status-dot.bad {
   background: #ef4444;
-  box-shadow: 0 0 6px rgba(239, 68, 68, 0.8);
+  box-shadow: 0 0 8px #ef4444;
 }
 
 .node-status-dot.none {
   background: #64748b;
   box-shadow: none;
+}
+
+.node-status-dot.testing {
+  background: #38bdf8;
+  box-shadow: 0 0 10px #38bdf8;
+  animation: pulse 0.8s ease-in-out infinite alternate;
 }
 
 .strategy-card-footer {

@@ -976,24 +976,6 @@ pub fn query_source_trend(
     })
 }
 
-fn query_node_source_map(conn: &Connection) -> Result<BTreeMap<String, String>> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT node_name, source_name
-        FROM node_source_nodes
-        ORDER BY source_name ASC, node_name ASC
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    let mut node_sources = BTreeMap::new();
-    for row in rows {
-        let (node_name, source_name) = row?;
-        node_sources.entry(node_name).or_insert(source_name);
-    }
-    Ok(node_sources)
-}
 
 fn source_candidate_nodes(outbound: &str, chains: &[String]) -> Vec<String> {
     let mut seen = BTreeSet::new();
