@@ -17,6 +17,24 @@ SingDeck 是一个本地优先、单 sing-box 控制器的 Web 面板。前端�
 - 前端解析常见 `ss://`、`trojan://`、`vless://` 订阅链接。
 - 高级工具：路由模拟、selector 图边、Linux 粘贴输出诊断和 API 兼容处理。
 
+## 路线图
+
+以下方向已经过探索，但尚未实现，优先级可能调整。
+
+计划中的功能：
+
+- 基于 Clash API 的运行时内存面板和一键模式切换（`/memory`、`/configs`）。
+- 基于 helper 已存探测样本的单节点延迟历史趋势图。
+- 在订阅和 Overview 视图中可视化展示订阅流量额度与到期时间。
+- 完整的界面国际化，支持英文和简体中文。
+
+工程改进：
+
+- 为 helper 的 `probe_samples` 表增加保留清理，控制数据库体积增长。
+- 让后台任务（探测调度、网络用量采样）具备 panic 容错和自动重启能力。
+- 在 helper 中引入 `tracing` 结构化日志，并支持 `RUST_LOG` 级别控制。
+- 拆分过大的 `helper/src/main.rs` 和 `src/ui/App.tsx`。
+
 ## 架构
 
 SingDeck 有两种运行方式：

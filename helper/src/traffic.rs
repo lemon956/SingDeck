@@ -26,6 +26,8 @@ const NEWSSID_HOMEPAGE: &str = "https://qe.newssid.com/#/dashboard";
 const NEWSSID_ORIGIN: &str = "https://qe.newssid.com";
 const NEWSSID_HOST: &str = "qe.newssid.com";
 const NEWSSID_API_ORIGINS: &[&str] = &[NEWSSID_ORIGIN];
+const NEWSSID_SUBSCRIBE_PATHS: &[&str] = &["/api/v1/access/getSubscribe"];
+const NEWSSID_USER_PATHS: &[&str] = &["/api/v1/access/info"];
 const NEWSSID_AUTH_STORAGE_KEYS: &[&str] = &["auth_data", "cookie_auth_data", "token"];
 const NEWSSID_AUTH_COOKIE_NAMES: &[&str] = &["auth_data", "auth"];
 const YUYAN_HOMEPAGE: &str = "https://yuyan.co/#/dashboard";
@@ -155,7 +157,7 @@ async fn fetch_newssid(http: &Client, profile: &Path, fetched_at: &str) -> Traff
         let subscribe = fetch_first_provider_api_text(
             http,
             NEWSSID_API_ORIGINS,
-            V2BOARD_SUBSCRIBE_PATHS,
+            NEWSSID_SUBSCRIBE_PATHS,
             auth.as_deref(),
             cookie.as_deref(),
             &user_agent,
@@ -165,7 +167,7 @@ async fn fetch_newssid(http: &Client, profile: &Path, fetched_at: &str) -> Traff
         let user = fetch_optional_provider_api_text(
             http,
             NEWSSID_API_ORIGINS,
-            V2BOARD_USER_PATHS,
+            NEWSSID_USER_PATHS,
             auth.as_deref(),
             cookie.as_deref(),
             &user_agent,
@@ -1324,6 +1326,61 @@ mod tests {
         assert_eq!(bearer_token("Bearer Ad6AtokenXYZ"), "Bearer Ad6AtokenXYZ");
         assert_eq!(bearer_token("bearer lowercase"), "bearer lowercase");
         assert_eq!(bearer_token("  spaced  "), "Bearer spaced");
+    }
+
+    #[tokio::test]
+    async fn fetches_newssid_access_traffic_contract() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let request = Arc::new(StdMutex::new(String::new()));
+        let captured = Arc::clone(&request);
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 4096];
+            let bytes_read = stream.read(&mut buffer).await.unwrap();
+            *captured.lock().unwrap() = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+
+            let body = r#"{"data":{"u":1024,"d":2048,"transfer_enable":10240,"expired_at":1781843330,"reset_day":18,"plan":{"id":1,"name":"100G"}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let origins = [origin.as_str()];
+        let body = fetch_first_provider_api_text(
+            &Client::new(),
+            &origins,
+            NEWSSID_SUBSCRIBE_PATHS,
+            Some("raw-auth-value"),
+            Some("auth_data=test-cookie"),
+            "test-agent/1.0",
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let snapshot = parse_v2board_traffic(
+            "newssid",
+            "SS-ID",
+            NEWSSID_HOMEPAGE,
+            &body,
+            None,
+            "2026-08-25T15:00:00+08:00",
+        )
+        .unwrap();
+        assert_eq!(snapshot.used_upload_bytes, Some(1024));
+        assert_eq!(snapshot.used_download_bytes, Some(2048));
+        assert_eq!(snapshot.total_bytes, Some(10240));
+        assert_eq!(snapshot.plan_name.as_deref(), Some("100G"));
+
+        let request = request.lock().unwrap().to_ascii_lowercase();
+        assert!(request.starts_with("get /api/v1/access/getsubscribe http/1.1"));
+        assert!(request.contains("authorization: raw-auth-value"));
+        assert!(!request.contains("authorization: bearer raw-auth-value"));
     }
 
     #[tokio::test]

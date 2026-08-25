@@ -6,17 +6,23 @@ import {
   Copy,
   FileJson,
   GitBranch,
+  Globe,
+  Layers,
   LayoutDashboard,
   QrCode,
   RefreshCw,
   Save,
   Search,
   Settings as SettingsIcon,
+  Shield,
+  Sliders,
   ScrollText,
   Wifi,
-  X
+  X,
+  Zap
 } from 'lucide-react';
 import QRCode from 'qrcode';
+import { WorldRequestMap } from './WorldRequestMap';
 import { isLoopbackUrl, resolveConfigDownloadUrl } from '../core/configDownloadUrl';
 import { routeFromHash, type AppRoute } from '../core/navigation';
 import { formatBytes } from '../core/runtime';
@@ -69,7 +75,7 @@ const TRAFFIC_SPARKLINE_WINDOW_MS = 2 * 60 * 1000;
 const TRAFFIC_SPARKLINE_WIDTH = 188;
 const TRAFFIC_SPARKLINE_HEIGHT = 44;
 const SOURCE_TREND_DAYS = 7;
-const SOURCE_TREND_COLORS = ['#72f2b4', '#e7d66b', '#7cc7ff', '#f3be6a', '#c3a3ff', '#ff8a7a'];
+const SOURCE_TREND_COLORS = ['#34d399', '#38bdf8', '#fbbf24', '#a78bfa', '#f87171', '#60a5fa'];
 const DEFAULT_DELAY_TEST_TIMEOUT_MS = 5000;
 const DEFAULT_MIN_PROBE_INTERVAL_SEC = 60;
 const DEFAULT_NETWORK_USAGE_SAMPLE_INTERVAL_SEC = 5;
@@ -173,7 +179,7 @@ type ConnectionTopology = {
 };
 
 const TOPOLOGY_HEIGHT = 220;
-const TOPOLOGY_COLORS = ['#6a6fc5', '#a8d4a0', '#fddb8a', '#f2a0a0'];
+const TOPOLOGY_COLORS = ['#38bdf8', '#a78bfa', '#fbbf24', '#34d399'];
 
 function buildConnectionTopology(connections: ConnectionRecord[]): ConnectionTopology {
   const nodeValues = new Map<string, TopologyNode>();
@@ -509,14 +515,19 @@ function buildSankeyOption(topology: ConnectionTopology) {
   const nodeNames = new Map(topology.nodes.map((node) => [node.id, node.label]));
   return {
     backgroundColor: 'transparent',
+    animation: true,
+    animationDuration: 350,
+    animationEasing: 'cubicOut' as const,
     tooltip: {
       trigger: 'item',
       triggerOn: 'mousemove',
-      backgroundColor: 'rgba(7, 10, 11, 0.92)',
-      borderColor: 'rgba(114, 242, 180, 0.32)',
+      backgroundColor: 'rgba(13, 18, 23, 0.95)',
+      borderColor: 'rgba(255, 255, 255, 0.12)',
+      padding: [8, 12],
       textStyle: {
-        color: '#e8f2ef',
-        fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+        color: '#f1f5f9',
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        fontSize: 12
       },
       formatter: (params: {
         dataType?: string;
@@ -530,26 +541,33 @@ function buildSankeyOption(topology: ConnectionTopology) {
         };
       }) => {
         if (params.dataType === 'node') {
-          return `${params.data?.displayName ?? params.data?.name ?? ''}<br/>${params.data?.nodeType ?? ''}`;
+          return `<strong>${params.data?.displayName ?? params.data?.name ?? ''}</strong><br/><span style="color:#94a3b8;font-size:11px">${params.data?.nodeType ?? ''}</span>`;
         }
         const source = params.data?.source ? nodeNames.get(params.data.source) : '';
         const target = params.data?.target ? nodeNames.get(params.data.target) : '';
-        return `${source} -> ${target}<br/>连接数: ${params.data?.originalValue ?? 0}`;
+        return `<div><strong style="color:#38bdf8">${source}</strong> <span style="color:#64748b">→</span> <strong style="color:#34d399">${target}</strong></div><div style="margin-top:4px;color:#94a3b8;font-size:11px">活跃会话: <strong style="color:#f1f5f9">${params.data?.originalValue ?? 0}</strong></div>`;
       }
     },
     series: [
       {
         type: 'sankey',
-        left: 8,
+        left: 10,
         right: 60,
-        top: 8,
-        bottom: 8,
+        top: 6,
+        bottom: 6,
         nodeAlign: 'left',
-        nodeGap: 3,
-        nodeWidth: 10,
+        nodeGap: 6,
+        nodeWidth: 12,
         draggable: false,
         emphasis: {
-          focus: 'trajectory'
+          focus: 'trajectory',
+          lineStyle: {
+            opacity: 0.85
+          },
+          itemStyle: {
+            shadowBlur: 10,
+            shadowColor: 'rgba(56, 189, 248, 0.4)'
+          }
         },
         data: topology.nodes.map((node) => ({
           name: node.id,
@@ -557,7 +575,9 @@ function buildSankeyOption(topology: ConnectionTopology) {
           nodeType: ['Source', 'Rule', 'Route', 'Outbound'][node.level],
           depth: node.level,
           itemStyle: {
-            color: TOPOLOGY_COLORS[node.level]
+            color: TOPOLOGY_COLORS[node.level],
+            borderRadius: 3,
+            borderWidth: 0
           }
         })),
         links: topology.links.map((link) => ({
@@ -568,21 +588,21 @@ function buildSankeyOption(topology: ConnectionTopology) {
         })),
         lineStyle: {
           color: 'gradient',
-          curveness: 0.5,
-          opacity: 0.38
+          curveness: 0.52,
+          opacity: 0.42
         },
         itemStyle: {
           borderWidth: 0
         },
         label: {
-          color: '#e8f2ef',
+          color: '#cbd5e1',
           fontSize: 10,
+          fontWeight: 500,
           formatter: (params: { data?: { displayName?: string } }) => {
             const name = params.data?.displayName ?? '';
             return name.length > 22 ? `${name.slice(0, 19)}...` : name;
           }
-        },
-        animation: false
+        }
       }
     ]
   };
@@ -709,12 +729,12 @@ function TrafficSourceTrendChart({
           trigger: 'axis',
           axisPointer: {
             type: 'line',
-            lineStyle: { color: 'rgba(219,237,241,0.28)', width: 1 }
+            lineStyle: { color: 'rgba(56,189,248,0.35)', width: 1 }
           },
-          borderColor: 'rgba(219,237,241,0.16)',
-          backgroundColor: 'rgba(7,10,11,0.94)',
+          borderColor: 'rgba(255,255,255,0.12)',
+          backgroundColor: 'rgba(13,18,23,0.95)',
           textStyle: {
-            color: '#e8f2ef',
+            color: '#f1f5f9',
             fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
             fontSize: 11
           },
@@ -735,10 +755,10 @@ function TrafficSourceTrendChart({
           type: 'category',
           boundaryGap: false,
           data: bucketStarts,
-          axisLine: { lineStyle: { color: 'rgba(219,237,241,0.13)' } },
+          axisLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
           axisTick: { show: false },
           axisLabel: {
-            color: '#8a999b',
+            color: '#94a3b8',
             fontSize: 10,
             formatter: (value: number) => formatSourceTrendTimestamp(Number(value), bucket)
           }
@@ -746,11 +766,11 @@ function TrafficSourceTrendChart({
         yAxis: {
           type: 'value',
           axisLabel: {
-            color: '#8a999b',
+            color: '#94a3b8',
             fontSize: 10,
             formatter: (value: number) => formatBytes(Number(value))
           },
-          splitLine: { lineStyle: { color: 'rgba(219,237,241,0.065)' } }
+          splitLine: { lineStyle: { color: 'rgba(255,255,255,0.04)' } }
         },
         series: visibleSources.map((source) => ({
           name: source.name,
@@ -901,8 +921,10 @@ export function App() {
   } | null>(null);
   const [collapsedStrategyGroups, setCollapsedStrategyGroups] = useState<Set<string>>(() => new Set());
   const [strategyGroupOrder, setStrategyGroupOrder] = useState<string[]>(readStrategyGroupOrder);
-  const [draggingStrategyGroupName, setDraggingStrategyGroupName] = useState<string | null>(null);
+   const [draggingStrategyGroupName, setDraggingStrategyGroupName] = useState<string | null>(null);
   const [groupConfigDrafts, setGroupConfigDrafts] = useState<Record<string, HelperGroupConfig>>({});
+  const [overviewVizMode, setOverviewVizMode] = useState<'worldMap' | 'topology'>('topology');
+  const [connectionsViewMode, setConnectionsViewMode] = useState<'list' | 'map'>('list');
   const topologyChartRef = useRef<HTMLDivElement | null>(null);
   const topologyChartInstanceRef = useRef<echarts.EChartsType | null>(null);
   const settingsImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -1651,7 +1673,7 @@ export function App() {
   }, [configQrUrl]);
 
   useEffect(() => {
-    if (activeRoute !== 'overview' || !topologyChartRef.current) {
+    if (activeRoute !== 'overview' || overviewVizMode !== 'topology' || !topologyChartRef.current) {
       return;
     }
 
@@ -1673,11 +1695,11 @@ export function App() {
       topologyChartInstanceRef.current = null;
       setTopologyPaused(false);
     };
-  }, [activeRoute]);
+  }, [activeRoute, overviewVizMode]);
 
   useEffect(() => {
     const chart = topologyChartInstanceRef.current;
-    if (activeRoute !== 'overview' || !pageVisible || !chart) {
+    if (activeRoute !== 'overview' || overviewVizMode !== 'topology' || !pageVisible || !chart) {
       return;
     }
 
@@ -1687,7 +1709,7 @@ export function App() {
     }
 
     chart.setOption(buildSankeyOption(topology), true);
-  }, [activeRoute, pageVisible, topology]);
+  }, [activeRoute, overviewVizMode, pageVisible, topology]);
 
   const runHelperAction = async (action: string, pendingText: string, work: () => Promise<InlineStatus>) => {
     setHelperPendingAction(action);
@@ -2418,18 +2440,46 @@ export function App() {
           <>
         <section className="topology-panel" aria-label="Connection topology">
           <div className="panel-heading compact">
-            <div>
-              <h2>连接拓扑</h2>
-              <span className="panel-stamp">source {'->'} rule {'->'} route/group {'->'} outbound</span>
+            <div className="overview-viz-heading">
+              <h2>{overviewVizMode === 'worldMap' ? '全球请求地图' : '连接拓扑'}</h2>
+              <div className="policy-segment">
+                <button
+                  className={overviewVizMode === 'worldMap' ? 'active' : ''}
+                  onClick={() => setOverviewVizMode('worldMap')}
+                  type="button"
+                >
+                  <Globe size={12} />
+                  全球地图
+                </button>
+                <button
+                  className={overviewVizMode === 'topology' ? 'active' : ''}
+                  onClick={() => setOverviewVizMode('topology')}
+                  type="button"
+                >
+                  <GitBranch size={12} />
+                  链路拓扑
+                </button>
+              </div>
             </div>
             <span className="panel-stamp">{topology.total} active connections</span>
           </div>
-          <div className="topology-stage">
-            {topology.links.length === 0 ? (
-              <div className="topology-empty">No active topology.</div>
-            ) : null}
-            <div className="topology-chart" ref={topologyChartRef} />
-          </div>
+          {overviewVizMode === 'worldMap' ? (
+            <WorldRequestMap
+              embedded
+              connections={connections.connections}
+              onSelectHost={(host) => {
+                connections.setQuery(host);
+                setActiveRoute('connections');
+              }}
+            />
+          ) : (
+            <div className="topology-stage">
+              {topology.links.length === 0 ? (
+                <div className="topology-empty">No active topology.</div>
+              ) : null}
+              <div className="topology-chart" ref={topologyChartRef} />
+            </div>
+          )}
         </section>
 
         <section className="overview-widgets" aria-label="Runtime widgets">
@@ -2895,7 +2945,8 @@ export function App() {
           ) : null}
 
           <form className="settings-board" onSubmit={handleSubmit}>
-            <div className="settings-stack">
+            {/* Column 1: Controller, Diagnostics, Local Buffers & Settings Transfer */}
+            <div className="settings-column">
               <article className="settings-card">
                 <div className="settings-card-head">
                   <h3>Controller</h3>
@@ -2943,6 +2994,47 @@ export function App() {
                 </div>
               </article>
 
+              <article className="settings-card">
+                <div className="settings-card-head">
+                  <h3>Local buffers</h3>
+                  <span>browser memory</span>
+                </div>
+                <div className="settings-note-grid">
+                  {healthRow('Logs', `${connections.logs.length}/500`, 'blue')}
+                  {healthRow('Trimmed', String(connections.droppedLogCount), connections.droppedLogCount > 0 ? 'warn' : 'ok')}
+                  {healthRow('Connections', String(connections.connections.length), 'blue')}
+                  {healthRow('History', `${runtime.history.length} points`, 'ok')}
+                </div>
+              </article>
+
+              <article className="settings-card">
+                <div className="settings-card-head">
+                  <h3>Settings transfer</h3>
+                  <span>json backup</span>
+                </div>
+                <div className="helper-actions">
+                  <button className="ghost-action" onClick={exportSettings} type="button">
+                    Export settings
+                  </button>
+                  <button className="ghost-action" onClick={() => settingsImportInputRef.current?.click()} type="button">
+                    Import settings
+                  </button>
+                </div>
+                <input
+                  accept="application/json,.json"
+                  hidden
+                  onChange={importSettingsFile}
+                  ref={settingsImportInputRef}
+                  type="file"
+                />
+                {settingsTransferMessage ? (
+                  <div className="settings-inline-status ok">{settingsTransferMessage}</div>
+                ) : null}
+              </article>
+            </div>
+
+            {/* Column 2: Helper Service & Background Sync */}
+            <div className="settings-column">
               <article className="settings-card">
                 <div className="settings-card-head">
                   <h3>Helper</h3>
@@ -3083,7 +3175,8 @@ export function App() {
               </article>
             </div>
 
-            <div className="settings-stack">
+            {/* Column 3: Testing Defaults, Per-group URLs & Local Behavior */}
+            <div className="settings-column">
               <article className="settings-card">
                 <div className="settings-card-head">
                   <h3>Testing</h3>
@@ -3154,116 +3247,78 @@ export function App() {
 
               <article className="settings-card">
                 <div className="settings-card-head">
-                  <h3>Local buffers</h3>
-                  <span>browser memory</span>
+                  <h3>Per-group test URLs</h3>
+                  <span>not per node</span>
                 </div>
-                <div className="settings-note-grid">
-                  {healthRow('Logs', `${connections.logs.length}/500`, 'blue')}
-                  {healthRow('Trimmed', String(connections.droppedLogCount), connections.droppedLogCount > 0 ? 'warn' : 'ok')}
-                  {healthRow('Connections', String(connections.connections.length), 'blue')}
-                  {healthRow('History', `${runtime.history.length} points`, 'ok')}
+                <div className="compact-form per-group-urls-list">
+                  {allStrategyGroups.map((group) => {
+                    const existing = helperGroupByName.get(group.name)?.config;
+                    const groupConfig = existing ?? fallbackGroupConfig(proxies.groupTestUrls[group.name] || helperDefaultTestUrl);
+                    const execution = resolveProbeExecution(group, groupConfig.mode);
+                    const nativeUrlTest = execution.mode === 'native-urltest';
+
+                    return (
+                      <label className={nativeUrlTest ? 'native-url-row' : ''} key={group.name}>
+                        <span>{group.name}</span>
+                        <input
+                          disabled={!helperServiceAvailable || nativeUrlTest}
+                          placeholder={nativeUrlTest ? 'sing-box urltest.url' : helperDefaultTestUrl}
+                          value={nativeUrlTest ? '' : proxies.groupTestUrls[group.name] ?? existing?.testUrl ?? ''}
+                          onBlur={(event) => {
+                            if (nativeUrlTest) {
+                              return;
+                            }
+                            void helper.saveGroupConfig(group.name, {
+                              testUrl: event.currentTarget.value.trim() || helperDefaultTestUrl,
+                              testUrlOverridden: true,
+                              mode: existing?.mode ?? 'score',
+                              scheme: existing?.scheme ?? 'Balanced',
+                              autoSwitch: existing?.autoSwitch ?? false,
+                              autoProbe: existing?.autoProbe ?? true,
+                              probeIntervalSec: existing?.probeIntervalSec ?? 15 * 60
+                            });
+                          }}
+                          onChange={(event) => {
+                            if (!nativeUrlTest) {
+                              proxies.setGroupTestUrl(group.name, event.target.value);
+                            }
+                          }}
+                        />
+                        {nativeUrlTest ? <small>Native URLTest uses sing-box config.</small> : null}
+                      </label>
+                    );
+                  })}
                 </div>
               </article>
 
               <article className="settings-card">
                 <div className="settings-card-head">
-                  <h3>Settings transfer</h3>
-                  <span>json backup</span>
+                  <h3>Local behavior</h3>
+                  <span>browser settings</span>
                 </div>
-                <div className="helper-actions">
-                  <button className="ghost-action" onClick={exportSettings} type="button">
-                    Export settings
-                  </button>
-                  <button className="ghost-action" onClick={() => settingsImportInputRef.current?.click()} type="button">
-                    Import settings
+                <div className="settings-note-grid">
+                  {healthRow('Security mode', 'local relaxed', 'blue')}
+                  {healthRow('Config validation', 'necessary only', 'blue')}
+                  {healthRow('External UI', 'relative path', 'ok')}
+                  {healthRow('Test workers', String(form.delayTestConcurrency ?? 4), 'ok')}
+                  {healthRow('Test timeout', `${form.delayTestTimeoutMs ?? helperDelayTestTimeoutMs} ms`, 'ok')}
+                  {healthRow('Min probe interval', `${helperMinProbeIntervalMinutes} min`, 'ok')}
+                </div>
+                <div className="settings-scope-note">
+                  Saves controller URL, secret, note, test worker count, and test timeout in browser storage.
+                </div>
+                <div className="settings-save-row">
+                  <button
+                    className={`primary-action form-action status-${localBehaviorButtonTone}`}
+                    disabled={detecting}
+                    title={localBehaviorStatus?.text}
+                    type="submit"
+                  >
+                    {localBehaviorButtonLabel}
                   </button>
                 </div>
-                <input
-                  accept="application/json,.json"
-                  hidden
-                  onChange={importSettingsFile}
-                  ref={settingsImportInputRef}
-                  type="file"
-                />
-                {settingsTransferMessage ? (
-                  <div className="settings-inline-status ok">{settingsTransferMessage}</div>
-                ) : null}
               </article>
             </div>
-
-            <article className="settings-card">
-              <div className="settings-card-head">
-                <h3>Per-group test URLs</h3>
-                <span>not per node</span>
-              </div>
-              <div className="compact-form">
-                {allStrategyGroups.map((group) => {
-                  const existing = helperGroupByName.get(group.name)?.config;
-                  const groupConfig = existing ?? fallbackGroupConfig(proxies.groupTestUrls[group.name] || helperDefaultTestUrl);
-                  const execution = resolveProbeExecution(group, groupConfig.mode);
-                  const nativeUrlTest = execution.mode === 'native-urltest';
-
-                  return (
-                    <label className={nativeUrlTest ? 'native-url-row' : ''} key={group.name}>
-                      <span>{group.name}</span>
-                      <input
-                        disabled={!helperServiceAvailable || nativeUrlTest}
-                        placeholder={nativeUrlTest ? 'sing-box urltest.url' : helperDefaultTestUrl}
-                        value={nativeUrlTest ? '' : proxies.groupTestUrls[group.name] ?? existing?.testUrl ?? ''}
-                        onBlur={(event) => {
-                          if (nativeUrlTest) {
-                            return;
-                          }
-                          void helper.saveGroupConfig(group.name, {
-                            testUrl: event.currentTarget.value.trim() || helperDefaultTestUrl,
-                            testUrlOverridden: true,
-                            mode: existing?.mode ?? 'score',
-                            scheme: existing?.scheme ?? 'Balanced',
-                            autoSwitch: existing?.autoSwitch ?? false,
-                            autoProbe: existing?.autoProbe ?? true,
-                            probeIntervalSec: existing?.probeIntervalSec ?? 15 * 60
-                          });
-                        }}
-                        onChange={(event) => {
-                          if (!nativeUrlTest) {
-                            proxies.setGroupTestUrl(group.name, event.target.value);
-                          }
-                        }}
-                      />
-                      {nativeUrlTest ? <small>Native URLTest uses sing-box config.</small> : null}
-                    </label>
-                  );
-                })}
-              </div>
-            </article>
-
-            <article className="settings-card settings-wide">
-              <div className="settings-card-head">
-                <h3>Local behavior</h3>
-                <span>browser settings</span>
-              </div>
-              <div className="settings-note-grid">
-                {healthRow('Security mode', 'local relaxed', 'blue')}
-                {healthRow('Config validation', 'necessary only', 'blue')}
-                {healthRow('External UI', 'relative path', 'ok')}
-                {healthRow('Test workers', String(form.delayTestConcurrency ?? 4), 'ok')}
-                {healthRow('Test timeout', `${form.delayTestTimeoutMs ?? helperDelayTestTimeoutMs} ms`, 'ok')}
-                {healthRow('Min probe interval', `${helperMinProbeIntervalMinutes} min`, 'ok')}
-              </div>
-              <div className="settings-scope-note">
-                Saves controller URL, secret, note, test worker count, and test timeout in browser storage. If helper is ready, testing limits are mirrored to helper.
-              </div>
-              <div className="settings-save-row">
-                <button
-                  className={`primary-action form-action status-${localBehaviorButtonTone}`}
-                  disabled={detecting}
-                  title={localBehaviorStatus?.text}
-                  type="submit"
-                >
-                  {localBehaviorButtonLabel}
-                </button>
-              </div>
-            </article>
           </form>
 
           {detection && !detection.ok ? (
@@ -3560,6 +3615,7 @@ export function App() {
                               className={`strategy-node-card strategy-node-tile ${cardTone} ${isCurrent ? 'active' : ''} ${nodeActivity?.className ?? ''}`}
                               key={member.name}
                               onClick={() => {
+                                setActiveStrategyGroupName(proxy.name);
                                 if (canSelect && !isCurrent) {
                                   void proxies.switchProxy(proxy.name, member.name);
                                 }
@@ -3628,27 +3684,48 @@ export function App() {
                 <>
                   <div className="inspector-head">
                     <div className="inspector-title">
-                      <div>
-                        <strong>{activeInspectorModel.name}</strong>
-                        <span>{activeInspectorModel.type} · {activeInspectorModel.membersLabel}</span>
+                      <div className="inspector-name-block">
+                        <div className="inspector-title-row">
+                          <Layers size={14} className="inspector-icon" />
+                          <strong title={activeInspectorModel.name}>{activeInspectorModel.name}</strong>
+                        </div>
+                        <div className="inspector-badge-row">
+                          <span className={`inspector-type-pill ${activeInspectorModel.type.toLowerCase()}`}>
+                            {activeInspectorModel.type}
+                          </span>
+                          <span className="inspector-members-count">{activeInspectorModel.membersLabel}</span>
+                        </div>
                       </div>
-                      <span className={`mode-chip ${activeGroupConfig.mode === 'delay' ? 'delay' : ''}`}>
-                        {activeGroupConfig.mode}
+                      <span className={`mode-chip ${activeGroupConfig.mode === 'score' ? 'score' : 'delay'}`}>
+                        {activeGroupConfig.mode === 'score' ? '🏆 综合评分' : '⚡ 真实延迟'}
                       </span>
                     </div>
-                    <div className="inspector-subtitle">Selected strategy group configuration</div>
                   </div>
 
                   <div className="inspector-summary">
-                    <div className="mini-stat"><span>Current</span><strong>{activeInspectorModel.current}</strong></div>
-                    <div className="mini-stat"><span>Metric</span><strong>{activeInspectorModel.metricLabel}</strong></div>
-                    <div className="mini-stat"><span>Switch</span><strong>{activeInspectorModel.autoSwitchLabel}</strong></div>
-                    <div className="mini-stat"><span>Schedule</span><strong>{activeInspectorModel.scheduleLabel}</strong></div>
+                    <div className="mini-stat">
+                      <span>当前选中节点</span>
+                      <strong title={activeInspectorModel.current}>{activeInspectorModel.current}</strong>
+                    </div>
+                    <div className="mini-stat">
+                      <span>评测指标</span>
+                      <strong>{activeInspectorModel.metricLabel}</strong>
+                    </div>
+                    <div className="mini-stat">
+                      <span>自动优选切换</span>
+                      <strong className={activeInspectorModel.autoSwitchLabel === 'On' ? 'status-text-ok' : ''}>
+                        {activeInspectorModel.autoSwitchLabel}
+                      </strong>
+                    </div>
+                    <div className="mini-stat">
+                      <span>定时巡检调度</span>
+                      <strong>{activeInspectorModel.scheduleLabel}</strong>
+                    </div>
                   </div>
 
                   {helperAvailability === 'offline' ? (
                     <div className="inspector-warning">
-                      Helper service is offline. Score, helper delay, schedule, and URL settings are disabled.
+                      Helper 辅助调度服务未连接。评分模式、自动调度与测试 URL 配置不可用。
                     </div>
                   ) : null}
                   {activeHelperScores?.applyError ? (
@@ -3656,70 +3733,116 @@ export function App() {
                   ) : null}
 
                   <form className="inspector-form" onSubmit={(event) => event.preventDefault()}>
-                    <label className="inspector-field">
-                      <span>Selection basis</span>
-                      <div className="policy-segment large" aria-label={`${activeStrategyGroup.name} selection basis`}>
-                        <button
-                          className={activeGroupConfig.mode === 'score' ? 'active' : ''}
-                          disabled={!helperServiceAvailable}
-                          onClick={() => draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { mode: 'score' })}
-                          type="button"
-                        >
-                          Score
-                        </button>
-                        <button
-                          className={activeGroupConfig.mode === 'delay' ? 'active' : ''}
-                          disabled={!helperServiceAvailable}
-                          onClick={() => draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { mode: 'delay' })}
-                          type="button"
-                        >
-                          Delay
-                        </button>
+                    <div className="inspector-group-card">
+                      <div className="inspector-card-header">
+                        <Sliders size={12} />
+                        <span>策略参数 / Parameters</span>
                       </div>
-                    </label>
 
-                    <label className="inspector-field">
-                      <span>Score scheme</span>
-                      <select
-                        disabled={!activeInspectorModel.canEditScheme}
-                        value={activeGroupConfig.scheme}
-                        onChange={(event) =>
-                          draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
-                            scheme: event.target.value as ScoreScheme
-                          })
-                        }
-                      >
-                        <option value="Balanced">Balanced</option>
-                        <option value="LatencyFirst">Latency</option>
-                      </select>
-                    </label>
+                      <div className="inspector-field">
+                        <label className="field-title">优选依据</label>
+                        <div className="policy-segment large" aria-label={`${activeStrategyGroup.name} selection basis`}>
+                          <button
+                            className={activeGroupConfig.mode === 'score' ? 'active' : ''}
+                            disabled={!helperServiceAvailable}
+                            onClick={() => draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { mode: 'score' })}
+                            type="button"
+                            title="综合评分优选"
+                          >
+                            Score
+                          </button>
+                          <button
+                            className={activeGroupConfig.mode === 'delay' ? 'active' : ''}
+                            disabled={!helperServiceAvailable}
+                            onClick={() => draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { mode: 'delay' })}
+                            type="button"
+                            title="真实延迟优选"
+                          >
+                            Delay
+                          </button>
+                        </div>
+                      </div>
 
-                    <label className="inspector-field">
-                      <span>Test URL</span>
-                      <input
-                        disabled={!helperServiceAvailable || activeProbeExecution?.mode === 'native-urltest'}
-                        value={
-                          activeProbeExecution?.mode === 'native-urltest'
-                            ? 'sing-box urltest.url'
-                            : activeGroupConfig.testUrl
-                        }
-                        onChange={(event) =>
-                          draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
-                            testUrl: event.target.value
-                          })
-                        }
-                      />
-                    </label>
+                      {activeGroupConfig.mode === 'score' ? (
+                        <label className="inspector-field">
+                          <span className="field-title">Score scheme</span>
+                          <select
+                            aria-label="Score scheme"
+                            disabled={!activeInspectorModel.canEditScheme}
+                            value={activeGroupConfig.scheme}
+                            onChange={(event) =>
+                              draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+                                scheme: event.target.value as ScoreScheme
+                              })
+                            }
+                          >
+                            <option value="Balanced">Balanced (综合平衡)</option>
+                            <option value="LatencyFirst">Latency (低延迟优先)</option>
+                          </select>
+                        </label>
+                      ) : null}
 
-                    <div className="inspector-field">
-                      <span>Automation</span>
+                      <div className="inspector-field">
+                        <div className="field-title-row">
+                          <label htmlFor="inspector-test-url" className="field-title">Test URL</label>
+                          <div className="test-url-presets">
+                            <button
+                              type="button"
+                              className="url-chip"
+                              disabled={!helperServiceAvailable || activeProbeExecution?.mode === 'native-urltest'}
+                              onClick={() => draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { testUrl: 'https://cp.cloudflare.com/generate_204' })}
+                            >
+                              Cloudflare
+                            </button>
+                            <button
+                              type="button"
+                              className="url-chip"
+                              disabled={!helperServiceAvailable || activeProbeExecution?.mode === 'native-urltest'}
+                              onClick={() => draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { testUrl: 'http://www.gstatic.com/generate_204' })}
+                            >
+                              Google
+                            </button>
+                            <button
+                              type="button"
+                              className="url-chip"
+                              disabled={!helperServiceAvailable || activeProbeExecution?.mode === 'native-urltest'}
+                              onClick={() => draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { testUrl: 'https://www.bilibili.com' })}
+                            >
+                              Bilibili
+                            </button>
+                          </div>
+                        </div>
+                        <input
+                          id="inspector-test-url"
+                          aria-label="Test URL"
+                          disabled={!helperServiceAvailable || activeProbeExecution?.mode === 'native-urltest'}
+                          value={
+                            activeProbeExecution?.mode === 'native-urltest'
+                              ? 'sing-box urltest.url'
+                              : activeGroupConfig.testUrl
+                          }
+                          onChange={(event) =>
+                            draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+                              testUrl: event.target.value
+                            })
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="inspector-group-card">
+                      <div className="inspector-card-header">
+                        <Zap size={12} />
+                        <span>自动化调度 / Automation</span>
+                      </div>
+
                       <div className="inspector-automation-grid">
                         {activeInspectorModel.autoSwitchManagedBySingBox ? (
-                          <div className="automation-option disabled">
+                          <div className="automation-option disabled on">
                             <span className="automation-switch on" aria-hidden="true" />
                             <span>
-                              <strong>sing-box switch</strong>
-                              <small>Managed by native URLTest</small>
+                              <strong>sing-box 原生优选</strong>
+                              <small>由 sing-box URLTest 自动管理切换</small>
                             </span>
                           </div>
                         ) : (
@@ -3734,10 +3857,13 @@ export function App() {
                                 })
                               }
                             />
-                            <span className="automation-switch" aria-hidden="true" />
+                            <span
+                              className={`automation-switch ${activeGroupConfig.autoSwitch && activeInspectorModel.canAutoSwitch ? 'on' : ''}`}
+                              aria-hidden="true"
+                            />
                             <span>
-                              <strong>Auto switch</strong>
-                              <small>Apply the best node after probing</small>
+                              <strong>自动切换最佳节点</strong>
+                              <small>测速评分完成后自动应用最佳节点</small>
                             </span>
                           </label>
                         )}
@@ -3752,79 +3878,96 @@ export function App() {
                               })
                             }
                           />
-                          <span className="automation-switch" aria-hidden="true" />
+                          <span
+                            className={`automation-switch ${activeGroupConfig.autoProbe && activeInspectorModel.canSchedule ? 'on' : ''}`}
+                            aria-hidden="true"
+                          />
                           <span>
-                            <strong>Schedule</strong>
-                            <small>Run this group by interval</small>
+                            <strong>定时后台巡检</strong>
+                            <small>按设定周期自动在后台探测与评分</small>
                           </span>
                         </label>
                       </div>
+
+                      <div className="inspector-field-inline">
+                        <label className="inspector-field">
+                          <span className="field-title">Probe interval minutes</span>
+                          <input
+                            aria-label="Probe interval minutes"
+                            disabled={!activeInspectorModel.canSchedule || !activeGroupConfig.autoProbe}
+                            max={1440}
+                            min={helperMinProbeIntervalMinutes}
+                            type="number"
+                            value={activeProbeIntervalDraft}
+                            onBlur={draftActiveProbeInterval}
+                            onChange={(event) => setActiveProbeIntervalDraft(event.target.value)}
+                          />
+                        </label>
+
+                        <label className="inspector-field">
+                          <span className="field-title">Parallel requests</span>
+                          <input
+                            aria-label="Parallel requests"
+                            disabled={!helperServiceAvailable}
+                            max={64}
+                            min={1}
+                            type="number"
+                            value={delayConcurrencyDraft}
+                            onBlur={() => commitDelayConcurrency(4)}
+                            onChange={(event) => setDelayConcurrencyDraft(event.target.value)}
+                          />
+                        </label>
+                      </div>
                     </div>
-
-                    <label className="inspector-field">
-                      <span>Probe interval minutes</span>
-                      <input
-                        disabled={!activeInspectorModel.canSchedule || !activeGroupConfig.autoProbe}
-                        max={1440}
-                        min={helperMinProbeIntervalMinutes}
-                        type="number"
-                        value={activeProbeIntervalDraft}
-                        onBlur={draftActiveProbeInterval}
-                        onChange={(event) => setActiveProbeIntervalDraft(event.target.value)}
-                      />
-                    </label>
-
-                    <label className="inspector-field">
-                      <span>Parallel requests</span>
-                      <input
-                        disabled={!helperServiceAvailable}
-                        max={64}
-                        min={1}
-                        type="number"
-                        value={delayConcurrencyDraft}
-                        onBlur={() => commitDelayConcurrency(4)}
-                        onChange={(event) => setDelayConcurrencyDraft(event.target.value)}
-                      />
-                    </label>
                   </form>
 
                   <div className="inspector-actions">
                     <button
-                      className={`ghost-action ${
-                        activeGroupConfigSaveStatus?.tone === 'ok'
-                          ? 'status-ok'
-                          : activeGroupConfigSaveStatus?.tone === 'bad'
-                            ? 'status-warn'
-                            : ''
-                      }`}
-                      disabled={!helperServiceAvailable || activeGroupConfigSaveStatus?.tone === 'saving'}
-                      onClick={() => void saveActiveGroupConfig()}
+                      className="primary-action inspector-primary-action"
+                      disabled={!activeCanRunProbe}
+                      onClick={runActiveGroupProbe}
                       type="button"
                     >
-                      <Save size={14} />
-                      {activeGroupConfigSaveStatus?.text ?? 'Save settings'}
-                    </button>
-                    <button className="primary-action" disabled={!activeCanRunProbe} onClick={runActiveGroupProbe} type="button">
+                      <Zap size={14} />
                       {activeGroupActivity
                         ? activeGroupConfig.mode === 'score'
                           ? 'Scoring...'
                           : 'Testing...'
                         : activeInspectorModel.runLabel}
                     </button>
-                    <button
-                      className="ghost-action"
-                      onClick={() => {
-                        void proxies.refresh();
-                        void useHelperStore.getState().loadGroups();
-                      }}
-                      type="button"
-                    >
-                      Refresh data
-                    </button>
+                    <div className="inspector-secondary-actions">
+                      <button
+                        aria-label="Save settings"
+                        className={`ghost-action ${
+                          activeGroupConfigSaveStatus?.tone === 'ok'
+                            ? 'status-ok'
+                            : activeGroupConfigSaveStatus?.tone === 'bad'
+                              ? 'status-warn'
+                              : ''
+                        }`}
+                        disabled={!helperServiceAvailable || activeGroupConfigSaveStatus?.tone === 'saving'}
+                        onClick={() => void saveActiveGroupConfig()}
+                        type="button"
+                      >
+                        <Save size={13} />
+                        {activeGroupConfigSaveStatus?.text ?? 'Save settings'}
+                      </button>
+                      <button
+                        className="ghost-action"
+                        onClick={() => {
+                          void proxies.refresh();
+                          void useHelperStore.getState().loadGroups();
+                        }}
+                        type="button"
+                      >
+                        <RefreshCw size={13} />
+                        Refresh data
+                      </button>
+                    </div>
                   </div>
                 </>
               ) : (
-                <div className="inspector-empty">No strategy group is available.</div>
+                <div className="inspector-empty">请在左侧选择一个策略组查看与配置详细规则</div>
               )}
             </aside>
           </section>
@@ -3835,8 +3978,25 @@ export function App() {
         <section className="page-fill">
           <article className="connections-panel fill-panel" id="connections">
             <div className="panel-heading compact">
-              <div>
+              <div className="overview-viz-heading">
                 <h2>Live sessions</h2>
+                <div className="policy-segment">
+                  <button
+                    className={connectionsViewMode === 'list' ? 'active' : ''}
+                    onClick={() => setConnectionsViewMode('list')}
+                    type="button"
+                  >
+                    列表视图
+                  </button>
+                  <button
+                    className={connectionsViewMode === 'map' ? 'active' : ''}
+                    onClick={() => setConnectionsViewMode('map')}
+                    type="button"
+                  >
+                    <Globe size={12} />
+                    全球地图
+                  </button>
+                </div>
                 <span className="panel-stamp">{connections.connections.length} active rows</span>
               </div>
               <div className="compact-actions">
@@ -3880,6 +4040,16 @@ export function App() {
               value={connections.query}
               onChange={(event) => connections.setQuery(event.target.value)}
             />
+            {connectionsViewMode === 'map' ? (
+              <WorldRequestMap
+                embedded
+                connections={filteredConnections}
+                onSelectHost={(host) => {
+                  connections.setQuery(host);
+                  setConnectionsViewMode('list');
+                }}
+              />
+            ) : (
             <div className="connection-list">
               {filteredConnections.map((connection) => (
                   <div
@@ -3923,6 +4093,7 @@ export function App() {
                   </div>
                 ))}
             </div>
+            )}
           </article>
           {selectedConnection ? (
             <aside className="connection-detail-drawer" aria-label="Connection details">

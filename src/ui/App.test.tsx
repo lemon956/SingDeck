@@ -307,6 +307,39 @@ describe('App proxy workspace', () => {
     );
   });
 
+  it('fills test URL preset into draft when preset chip is clicked in inspector', () => {
+    render(<App />);
+
+    const cloudflareBtn = screen.getByRole('button', { name: 'Cloudflare' });
+    fireEvent.click(cloudflareBtn);
+
+    const testUrlInput = screen.getByLabelText('Test URL') as HTMLInputElement;
+    expect(testUrlInput.value).toBe('https://cp.cloudflare.com/generate_204');
+  });
+
+  it('selects node and tests node delay directly from the strategy node card', async () => {
+    const switchProxy = vi.fn(async () => {});
+    const testProxy = vi.fn(async () => {});
+    useProxyStore.setState({ switchProxy, testProxy });
+
+    const { container } = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /Expand all strategy groups/i }));
+
+    const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card'));
+    const unselectedNode = nodeCards.find((n) => !n.classList.contains('active')) ?? nodeCards[0];
+    expect(unselectedNode).toBeInTheDocument();
+    if (unselectedNode) {
+      fireEvent.click(unselectedNode);
+      expect(switchProxy).toHaveBeenCalled();
+    }
+
+    const testButton = unselectedNode?.querySelector('button');
+    if (testButton) {
+      fireEvent.click(testButton);
+      expect(testProxy).toHaveBeenCalled();
+    }
+  });
+
   it('opens the config QR dialog immediately while helper refresh is pending', () => {
     useHelperStore.setState({
       saveConfigPath: vi.fn(() => new Promise<void>(() => {})),

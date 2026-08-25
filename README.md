@@ -17,6 +17,24 @@ SingDeck is a local-first, single-controller sing-box dashboard. The web app tal
 - Client-side subscription parsing for common `ss://`, `trojan://`, and `vless://` links.
 - Advanced tools for route simulation, selector graph edges, Linux pasted-output diagnostics, and API compatibility shaping.
 
+## Roadmap
+
+The following directions have been explored but are not implemented yet. Priorities may change.
+
+Planned features:
+
+- Runtime memory panel and one-click proxy mode switch over the Clash API (`/memory`, `/configs`).
+- Per-node delay history trends rendered from stored helper probe samples.
+- Provider quota and expiry visualization in the subscription and Overview views.
+- Full UI internationalization for English and Simplified Chinese.
+
+Engineering improvements:
+
+- Retention cleanup for the helper `probe_samples` table to bound database growth.
+- Panic-resilient background tasks (probe scheduler, network-usage sampler) with automatic restart.
+- Structured logging with `tracing` and `RUST_LOG` level control in the helper.
+- Module split for the oversized `helper/src/main.rs` and `src/ui/App.tsx`.
+
 ## Architecture
 
 SingDeck can run in two modes:
