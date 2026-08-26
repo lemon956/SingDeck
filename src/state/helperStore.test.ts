@@ -23,6 +23,7 @@ describe('helper store', () => {
       scoresByGroup: {},
       activeProbeGroups: [],
       activeProbeNodesByGroup: {},
+      inspectingGroups: [],
       networkUsageSourceTrend: null,
       networkUsageSourceTrendLoading: false,
       networkUsageSourceTrendError: null,
@@ -532,6 +533,76 @@ describe('helper store', () => {
     expect(useHelperStore.getState().error).toBeNull();
     expect(useHelperStore.getState().lastCheckedAt).toBeNull();
     expect(useHelperStore.getState().lastSyncedControllerKey).toBeNull();
+  });
+
+  it('keeps inspection fields out of the speed probe API', async () => {
+    let speedRequestBody: unknown = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/groups/gemini-us/probe')) {
+          speedRequestBody = init?.body ? JSON.parse(String(init.body)) : null;
+          return jsonResponse({
+            group: 'gemini-us',
+            mode: 'score',
+            scheme: 'Balanced',
+            testUrl: 'https://example.test',
+            recommended: null,
+            applyError: null,
+            nodes: []
+          });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+    useHelperStore.setState({ eventStreamConnected: true });
+
+    await useHelperStore.getState().probeGroup('gemini-us', 4);
+
+    expect(speedRequestBody).toEqual({ concurrency: 4 });
+  });
+
+  it('posts selected checks only to the independent inspection API', async () => {
+    let inspectionRequestBody: unknown = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/groups/gemini-us/inspection')) {
+          inspectionRequestBody = init?.body ? JSON.parse(String(init.body)) : null;
+          return jsonResponse({
+            group: 'gemini-us',
+            mode: 'score',
+            scheme: 'Balanced',
+            testUrl: 'https://example.test',
+            recommended: null,
+            applyError: null,
+            nodes: []
+          });
+        }
+        return new Response('not found', { status: 404 });
+      })
+    );
+
+    await useHelperStore.getState().inspectGroup('gemini-us', {
+      geminiLocation: true,
+      nodeRisk: {
+        exitIp: true,
+        networkClass: true,
+        tor: false
+      }
+    });
+
+    expect(inspectionRequestBody).toEqual({
+      geminiLocation: true,
+      nodeRisk: {
+        exitIp: true,
+        networkClass: true,
+        tor: false
+      }
+    });
+    expect(useHelperStore.getState().inspectingGroups).toEqual([]);
   });
 
   it('polls active probe nodes while a manual group probe is pending', async () => {

@@ -16,7 +16,6 @@ import {
   ArrowRight,
   Crosshair,
   ExternalLink,
-  Filter,
   GripVertical,
   Maximize2,
   Minimize2,
@@ -51,6 +50,115 @@ const MAJOR_TECH_CITIES = [
   { name: 'Sydney', pos: { lng: 151.20, lat: -33.86 } }
 ];
 
+/**
+ * Static Background Layer: 285 Natural Earth Country Polygons, Reference Lines & Landmark Cities
+ * Memoized to NEVER re-evaluate during pan, zoom, hover, or connection stream updates.
+ */
+const StaticWorldBaseMap = React.memo(function StaticWorldBaseMap({ mapSvgId }: { mapSvgId: string }) {
+  return (
+    <>
+      <defs>
+        {/* Tactical Graticule Grid */}
+        <pattern height="25" id={`tactical-grid-${mapSvgId}`} patternUnits="userSpaceOnUse" width="25">
+          <path d="M 25 0 L 0 0 0 25" fill="none" stroke="rgba(56, 189, 248, 0.05)" strokeWidth="0.5" />
+        </pattern>
+      </defs>
+
+      {/* Deep Ocean Canvas */}
+      <rect width="1000" height="500" fill="#070a0e" />
+      <rect width="1000" height="500" fill={`url(#tactical-grid-${mapSvgId})`} />
+
+      {/* Major Lat/Long Reference Lines */}
+      <line x1="0" y1="250" x2="1000" y2="250" stroke="rgba(56, 189, 248, 0.2)" strokeDasharray="5,5" strokeWidth="1.2" />
+      <line x1="500" y1="0" x2="500" y2="500" stroke="rgba(56, 189, 248, 0.12)" strokeDasharray="5,5" strokeWidth="1.2" />
+      <line x1="0" y1="125" x2="1000" y2="125" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3,5" strokeWidth="0.6" />
+      <line x1="0" y1="375" x2="1000" y2="375" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3,5" strokeWidth="0.6" />
+
+      {/* Real Natural Earth 110m Geographic Country Polygons */}
+      <g className="world-real-countries">
+        {REAL_WORLD_COUNTRY_PATHS.map((pathD, idx) => (
+          <path
+            className="real-country-poly"
+            d={pathD}
+            fill="#15212f"
+            key={idx}
+            stroke="#283a4e"
+            strokeLinejoin="round"
+            strokeWidth="0.85"
+          />
+        ))}
+      </g>
+
+      {/* Major Landmark City Reference Points */}
+      <g className="world-landmark-dots">
+        {MAJOR_TECH_CITIES.map((city, idx) => {
+          const pt = projectGeoPoint(city.pos);
+          return (
+            <circle
+              cx={pt.x.toFixed(1)}
+              cy={pt.y.toFixed(1)}
+              fill="rgba(255, 255, 255, 0.3)"
+              key={idx}
+              r="1.5"
+            />
+          );
+        })}
+      </g>
+    </>
+  );
+});
+
+/**
+ * Memoized Live Request Stream Row Component
+ */
+type StreamRowItemProps = {
+  item: GeoConnection;
+  isSelected: boolean;
+  isHovered: boolean;
+  onSelect: (id: string) => void;
+  onHover: (id: string | null) => void;
+};
+
+const StreamRowItem = React.memo(function StreamRowItem({
+  item,
+  isSelected,
+  isHovered,
+  onSelect,
+  onHover
+}: StreamRowItemProps) {
+  return (
+    <article
+      className={`stream-row ${isSelected ? 'selected' : ''} ${isHovered ? 'hovered' : ''}`}
+      onClick={() => onSelect(item.id)}
+      onMouseEnter={() => onHover(item.id)}
+      onMouseLeave={() => onHover(null)}
+      title={isSelected ? '点击取消聚焦' : '点击在地图中单独聚焦此请求'}
+    >
+      <div className="stream-row-main">
+        <div className="stream-host">
+          <span className="dest-flag" title={item.destinationLocation.country}>
+            {item.destinationLocation.flag}
+          </span>
+          <strong title={item.targetHost}>{item.targetHost}</strong>
+          <span className="port-tag">:{item.destinationPort}</span>
+        </div>
+        <div className="stream-meta">
+          <span className="outbound-pill" style={{ color: item.color }}>
+            {item.outboundName}
+          </span>
+          <span className="city-name">{item.destinationLocation.name}</span>
+          {item.network ? <span className="net-tag">{item.network.toUpperCase()}</span> : null}
+        </div>
+      </div>
+
+      <div className="stream-traffic">
+        <strong style={{ color: '#34d399' }}>↓ {formatBytes(item.downloadBytes)}</strong>
+        <span style={{ color: '#38bdf8' }}>↑ {formatBytes(item.uploadBytes)}</span>
+      </div>
+    </article>
+  );
+});
+
 export function WorldRequestMap({ connections, onSelectHost, className, embedded }: WorldRequestMapProps) {
   const mapSvgId = useId();
   const [selectedOriginKey, setSelectedOriginKey] = useState<string>('cn-east');
@@ -62,11 +170,12 @@ export function WorldRequestMap({ connections, onSelectHost, className, embedded
   const [isExpanded, setIsExpanded] = useState<boolean>(false);
   const [stageHeightMode, setStageHeightMode] = useState<'immersive' | 'compact'>('immersive');
 
-  // Interactive Zoom & Pan State
+  // Interactive Zoom & Pan State (RAF batched for buttery 60/120fps dragging)
   const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState<boolean>(false);
   const panStartRef = useRef<{ mouseX: number; mouseY: number; startPanX: number; startPanY: number; moved: boolean } | null>(null);
+  const rafPanRef = useRef<number | null>(null);
 
   // Resizable live request stream width
   const [streamWidth, setStreamWidth] = useState<number>(() => {
@@ -105,13 +214,14 @@ export function WorldRequestMap({ connections, onSelectHost, className, embedded
     });
   }, [geoConnections, filterMode, searchQuery]);
 
+  // Active highlighted connection for HUD
   const activeSelectedOrHoveredConn = useMemo(() => {
     const targetId = hoveredConnectionId || selectedConnectionId;
     if (!targetId) return null;
     return geoConnections.find((c) => c.id === targetId) ?? null;
   }, [geoConnections, hoveredConnectionId, selectedConnectionId]);
 
-  // When a connection is selected, find its involved hubs
+  // Set of involved hub IDs for selected connection
   const selectedInvolvedHubIds = useMemo(() => {
     if (!selectedConnectionId) return null;
     const conn = geoConnections.find((c) => c.id === selectedConnectionId);
@@ -156,7 +266,7 @@ export function WorldRequestMap({ connections, onSelectHost, className, embedded
     };
   }, [isDraggingStream, streamWidth]);
 
-  // Map canvas mouse pan & wheel zoom handlers
+  // High-performance RAF Mouse Pan handlers
   const handleMapMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return; // Left click only
     setIsPanning(true);
@@ -176,15 +286,25 @@ export function WorldRequestMap({ connections, onSelectHost, className, embedded
     if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
       panStartRef.current.moved = true;
     }
-    setPanOffset({
-      x: panStartRef.current.startPanX + dx,
-      y: panStartRef.current.startPanY + dy
+    if (rafPanRef.current !== null) return;
+
+    rafPanRef.current = requestAnimationFrame(() => {
+      rafPanRef.current = null;
+      if (panStartRef.current) {
+        setPanOffset({
+          x: panStartRef.current.startPanX + dx,
+          y: panStartRef.current.startPanY + dy
+        });
+      }
     });
   };
 
   const handleMapMouseUp = (e: React.MouseEvent) => {
+    if (rafPanRef.current !== null) {
+      cancelAnimationFrame(rafPanRef.current);
+      rafPanRef.current = null;
+    }
     if (panStartRef.current && !panStartRef.current.moved) {
-      // Clicked without dragging: if clicked on blank canvas, deselect
       const target = e.target as HTMLElement | SVGElement;
       if (target.tagName === 'rect' || target.classList.contains('world-map-stage')) {
         setSelectedConnectionId(null);
@@ -205,12 +325,34 @@ export function WorldRequestMap({ connections, onSelectHost, className, embedded
     setPanOffset({ x: 0, y: 0 });
   };
 
+  const handleSelectRow = useCallback((id: string) => {
+    setSelectedConnectionId((prev) => (prev === id ? null : id));
+  }, []);
+
+  const handleHoverRow = useCallback((id: string | null) => {
+    setHoveredConnectionId(id);
+  }, []);
+
+  // Top active connections that get animated photon pulses (up to 12 max to prevent lag)
+  const topActivePhotonConnIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (selectedConnectionId) {
+      ids.add(selectedConnectionId);
+      return ids;
+    }
+    if (hoveredConnectionId) {
+      ids.add(hoveredConnectionId);
+    }
+    filteredGeoConnections.slice(0, 12).forEach((c) => ids.add(c.id));
+    return ids;
+  }, [filteredGeoConnections, selectedConnectionId, hoveredConnectionId]);
+
   return (
     <div
       className={`world-map-root ${isExpanded ? 'map-expanded' : ''} ${stageHeightMode === 'immersive' ? 'stage-immersive' : 'stage-compact'} ${embedded ? 'map-embedded' : ''} ${className ?? ''}`}
       ref={containerRef}
     >
-      {/* Tactical Header Bar */}
+      {/* Tactical Header Bar - Anti-wrap & Anti-folding */}
       <div className="world-map-toolbar">
         <div className="world-map-title">
           <div className="title-beacon" />
@@ -228,7 +370,7 @@ export function WorldRequestMap({ connections, onSelectHost, className, embedded
           <div className="map-control-group" title="设置本机客户端所在的物理地理位置，用于作为世界地图请求光束的出发点">
             <span className="map-control-label">
               <Navigation size={11} />
-              客户端位置:
+              客户端:
             </span>
             <select
               aria-label="Select Client Origin Region"
@@ -244,7 +386,7 @@ export function WorldRequestMap({ connections, onSelectHost, className, embedded
             </select>
           </div>
 
-          {/* Filter Mode - Slim, Lightweight Styling */}
+          {/* Filter Mode - Slim Anti-wrap Segment */}
           <div className="policy-segment map-filter-segment">
             <button
               className={filterMode === 'all' ? 'active' : ''}
@@ -349,109 +491,137 @@ export function WorldRequestMap({ connections, onSelectHost, className, embedded
             <Crosshair size={11} />
             <span>
               缩放: {(zoomLevel * 100).toFixed(0)}%
-              {selectedConnectionId ? ' · 🎯 已聚焦单条请求 (点击右侧记录或空白取消)' : ' (滚轮缩放 / 按住拖拽平移)'}
+              {selectedConnectionId ? ' · 🎯 已聚焦单条请求 (点击记录或空白取消)' : ' (滚轮缩放 / 拖拽平移)'}
             </span>
           </div>
 
           <svg
             aria-label="High Resolution Natural Earth World Connection Map"
             className="world-map-svg"
-            style={{
-              transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoomLevel})`,
-              transformOrigin: '500px 250px'
-            }}
             viewBox="0 0 1000 500"
           >
-            <defs>
-              {/* Tactical Graticule Grid */}
-              <pattern height="25" id={`tactical-grid-${mapSvgId}`} patternUnits="userSpaceOnUse" width="25">
-                <path d="M 25 0 L 0 0 0 25" fill="none" stroke="rgba(56, 189, 248, 0.05)" strokeWidth="0.5" />
-              </pattern>
+            {/* Transform Group for Smooth Hardware-Accelerated Pan & Zoom */}
+            <g
+              style={{
+                transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoomLevel})`,
+                transformOrigin: '500px 250px',
+                transition: isPanning ? 'none' : 'transform 120ms ease-out'
+              }}
+            >
+              {/* Static Background Layer (Memoized) */}
+              <StaticWorldBaseMap mapSvgId={mapSvgId} />
 
-              {/* Glowing Laser Filters */}
-              <filter id={`laser-glow-${mapSvgId}`} x="-20%" y="-20%" width="140%" height="140%">
-                <feGaussianBlur in="SourceGraphic" stdDeviation="2.5" result="blur" />
-                <feMerge>
-                  <feMergeNode in="blur" />
-                  <feMergeNode in="SourceGraphic" />
-                </feMerge>
-              </filter>
-            </defs>
+              {/* Individual Live Request Laser Beams */}
+              <g className="world-request-beams">
+                {filteredGeoConnections.map((item) => {
+                  const srcPos = projectGeoPoint(item.sourceOrigin.coordinates);
+                  const destPos = projectGeoPoint(item.destinationLocation.coordinates);
+                  const isSelected = selectedConnectionId === item.id;
+                  const isHovered = hoveredConnectionId === item.id;
+                  const isFocusActive = selectedConnectionId !== null;
+                  const canAnimatePhoton = topActivePhotonConnIds.has(item.id);
 
-            {/* Deep Ocean Canvas */}
-            <rect width="1000" height="500" fill="#070a0e" />
-            <rect width="1000" height="500" fill={`url(#tactical-grid-${mapSvgId})`} />
+                  // When a specific connection is selected, dim all other beams to subtle background
+                  if (isFocusActive && !isSelected) {
+                    const pathDirect = item.proxyLocation && !item.isDirect
+                      ? generateCurvedArcPath(srcPos, projectGeoPoint(item.proxyLocation.coordinates), item.curveOffset * 0.4)
+                      : generateCurvedArcPath(srcPos, destPos, item.curveOffset);
 
-            {/* Major Lat/Long Reference Lines */}
-            <line x1="0" y1="250" x2="1000" y2="250" stroke="rgba(56, 189, 248, 0.22)" strokeDasharray="5,5" strokeWidth="1.2" />
-            <line x1="500" y1="0" x2="500" y2="500" stroke="rgba(56, 189, 248, 0.15)" strokeDasharray="5,5" strokeWidth="1.2" />
-            <line x1="0" y1="125" x2="1000" y2="125" stroke="rgba(255, 255, 255, 0.06)" strokeDasharray="3,5" strokeWidth="0.6" />
-            <line x1="0" y1="375" x2="1000" y2="375" stroke="rgba(255, 255, 255, 0.06)" strokeDasharray="3,5" strokeWidth="0.6" />
+                    return (
+                      <path
+                        className="request-beam-dimmed"
+                        d={pathDirect}
+                        fill="none"
+                        key={item.id}
+                        stroke={item.color}
+                        strokeOpacity={0.05}
+                        strokeWidth={1}
+                      />
+                    );
+                  }
 
-            {/* Real Natural Earth 110m Geographic Country Polygons */}
-            <g className="world-real-countries">
-              {REAL_WORLD_COUNTRY_PATHS.map((pathD, idx) => (
-                <path
-                  className="real-country-poly"
-                  d={pathD}
-                  fill="#15212f"
-                  key={idx}
-                  stroke="#283a4e"
-                  strokeLinejoin="round"
-                  strokeWidth="0.85"
-                />
-              ))}
-            </g>
+                  if (item.proxyLocation && !item.isDirect) {
+                    const proxyPos = projectGeoPoint(item.proxyLocation.coordinates);
+                    const path1 = generateCurvedArcPath(srcPos, proxyPos, item.curveOffset * 0.4);
+                    const path2 = generateCurvedArcPath(proxyPos, destPos, item.curveOffset);
 
-            {/* Major Landmark City Reference Points */}
-            <g className="world-landmark-dots">
-              {MAJOR_TECH_CITIES.map((city, idx) => {
-                const pt = projectGeoPoint(city.pos);
-                return (
-                  <circle
-                    cx={pt.x.toFixed(1)}
-                    cy={pt.y.toFixed(1)}
-                    fill="rgba(255, 255, 255, 0.3)"
-                    key={idx}
-                    r="1.5"
-                  />
-                );
-              })}
-            </g>
+                    return (
+                      <g
+                        className={`request-beam-group ${isSelected || isHovered ? 'highlighted' : ''}`}
+                        key={item.id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedConnectionId((prev) => (prev === item.id ? null : item.id));
+                        }}
+                        onMouseEnter={() => setHoveredConnectionId(item.id)}
+                        onMouseLeave={() => setHoveredConnectionId(null)}
+                      >
+                        {/* Leg 1: Origin -> Proxy */}
+                        <path
+                          className="request-beam-bg"
+                          d={path1}
+                          fill="none"
+                          stroke={item.color}
+                          strokeOpacity={isSelected ? 0.95 : isHovered ? 0.8 : 0.28}
+                          strokeWidth={isSelected ? 5.5 : isHovered ? 4.5 : 2}
+                        />
+                        <path
+                          className="request-beam-pulse"
+                          d={path1}
+                          fill="none"
+                          stroke={item.color}
+                          strokeWidth={isSelected ? 3.5 : isHovered ? 3 : 1.8}
+                        />
+                        {canAnimatePhoton ? (
+                          <circle
+                            r={isSelected ? 3.5 : isHovered ? 3 : 2}
+                            fill="#ffffff"
+                            opacity={isSelected ? 1 : isHovered ? 0.95 : 0.8}
+                          >
+                            <animateMotion
+                              path={path1}
+                              dur="2.2s"
+                              repeatCount="indefinite"
+                            />
+                          </circle>
+                        ) : null}
 
-            {/* Individual Live Request Laser Beams */}
-            <g className="world-request-beams">
-              {filteredGeoConnections.map((item) => {
-                const srcPos = projectGeoPoint(item.sourceOrigin.coordinates);
-                const destPos = projectGeoPoint(item.destinationLocation.coordinates);
-                const isSelected = selectedConnectionId === item.id;
-                const isHovered = hoveredConnectionId === item.id;
-                const isFocusActive = selectedConnectionId !== null;
+                        {/* Leg 2: Proxy -> Destination */}
+                        <path
+                          className="request-beam-bg"
+                          d={path2}
+                          fill="none"
+                          stroke="#c084fc"
+                          strokeOpacity={isSelected ? 0.95 : isHovered ? 0.8 : 0.28}
+                          strokeWidth={isSelected ? 5.5 : isHovered ? 4.5 : 2}
+                        />
+                        <path
+                          className="request-beam-pulse secondary"
+                          d={path2}
+                          fill="none"
+                          stroke="#c084fc"
+                          strokeWidth={isSelected ? 3.5 : isHovered ? 3 : 1.8}
+                        />
+                        {canAnimatePhoton ? (
+                          <circle
+                            r={isSelected ? 3.5 : isHovered ? 3 : 2}
+                            fill="#ffffff"
+                            opacity={isSelected ? 1 : isHovered ? 0.95 : 0.8}
+                          >
+                            <animateMotion
+                              path={path2}
+                              dur="2.2s"
+                              begin="0.35s"
+                              repeatCount="indefinite"
+                            />
+                          </circle>
+                        ) : null}
+                      </g>
+                    );
+                  }
 
-                // When a specific connection is selected, dim all other beams to subtle background
-                if (isFocusActive && !isSelected) {
-                  const pathDirect = item.proxyLocation && !item.isDirect
-                    ? generateCurvedArcPath(srcPos, projectGeoPoint(item.proxyLocation.coordinates), item.curveOffset * 0.4)
-                    : generateCurvedArcPath(srcPos, destPos, item.curveOffset);
-
-                  return (
-                    <path
-                      className="request-beam-dimmed"
-                      d={pathDirect}
-                      fill="none"
-                      key={item.id}
-                      stroke={item.color}
-                      strokeOpacity={0.05}
-                      strokeWidth={1}
-                    />
-                  );
-                }
-
-                if (item.proxyLocation && !item.isDirect) {
-                  const proxyPos = projectGeoPoint(item.proxyLocation.coordinates);
-                  const path1 = generateCurvedArcPath(srcPos, proxyPos, item.curveOffset * 0.4);
-                  const path2 = generateCurvedArcPath(proxyPos, destPos, item.curveOffset);
-
+                  // Direct Connection Leg
+                  const pathDirect = generateCurvedArcPath(srcPos, destPos, item.curveOffset);
                   return (
                     <g
                       className={`request-beam-group ${isSelected || isHovered ? 'highlighted' : ''}`}
@@ -463,181 +633,102 @@ export function WorldRequestMap({ connections, onSelectHost, className, embedded
                       onMouseEnter={() => setHoveredConnectionId(item.id)}
                       onMouseLeave={() => setHoveredConnectionId(null)}
                     >
-                      {/* Leg 1: Origin -> Proxy */}
                       <path
                         className="request-beam-bg"
-                        d={path1}
+                        d={pathDirect}
                         fill="none"
                         stroke={item.color}
-                        strokeOpacity={isSelected ? 0.9 : isHovered ? 0.75 : 0.25}
-                        strokeWidth={isSelected ? 6 : isHovered ? 5 : 2.2}
+                        strokeOpacity={isSelected ? 0.95 : isHovered ? 0.8 : 0.28}
+                        strokeWidth={isSelected ? 5.5 : isHovered ? 4.5 : 2}
                       />
                       <path
                         className="request-beam-pulse"
-                        d={path1}
+                        d={pathDirect}
                         fill="none"
-                        filter={`url(#laser-glow-${mapSvgId})`}
                         stroke={item.color}
-                        strokeDasharray="8,10"
-                        strokeWidth={isSelected ? 4 : isHovered ? 3.5 : 2}
+                        strokeWidth={isSelected ? 3.5 : isHovered ? 3 : 1.8}
                       />
-                      <circle
-                        r={isSelected ? 3.5 : isHovered ? 3 : 2}
-                        fill="#ffffff"
-                        opacity={isSelected ? 1 : isHovered ? 0.95 : 0.8}
-                        filter={`url(#laser-glow-${mapSvgId})`}
-                      >
-                        <animateMotion
-                          path={path1}
-                          dur="2.2s"
-                          repeatCount="indefinite"
-                        />
-                      </circle>
-
-                      {/* Leg 2: Proxy -> Destination */}
-                      <path
-                        className="request-beam-bg"
-                        d={path2}
-                        fill="none"
-                        stroke="#c084fc"
-                        strokeOpacity={isSelected ? 0.9 : isHovered ? 0.75 : 0.25}
-                        strokeWidth={isSelected ? 6 : isHovered ? 5 : 2.2}
-                      />
-                      <path
-                        className="request-beam-pulse secondary"
-                        d={path2}
-                        fill="none"
-                        filter={`url(#laser-glow-${mapSvgId})`}
-                        stroke="#c084fc"
-                        strokeDasharray="8,10"
-                        strokeWidth={isSelected ? 4 : isHovered ? 3.5 : 2}
-                      />
-                      <circle
-                        r={isSelected ? 3.5 : isHovered ? 3 : 2}
-                        fill="#ffffff"
-                        opacity={isSelected ? 1 : isHovered ? 0.95 : 0.8}
-                        filter={`url(#laser-glow-${mapSvgId})`}
-                      >
-                        <animateMotion
-                          path={path2}
-                          dur="2.2s"
-                          begin="0.35s"
-                          repeatCount="indefinite"
-                        />
-                      </circle>
+                      {canAnimatePhoton ? (
+                        <circle
+                          r={isSelected ? 3.5 : isHovered ? 3 : 2}
+                          fill="#ffffff"
+                          opacity={isSelected ? 1 : isHovered ? 0.95 : 0.8}
+                        >
+                          <animateMotion
+                            path={pathDirect}
+                            dur="2.2s"
+                            repeatCount="indefinite"
+                          />
+                        </circle>
+                      ) : null}
                     </g>
                   );
-                }
+                })}
+              </g>
 
-                // Direct Connection Leg
-                const pathDirect = generateCurvedArcPath(srcPos, destPos, item.curveOffset);
-                return (
-                  <g
-                    className={`request-beam-group ${isSelected || isHovered ? 'highlighted' : ''}`}
-                    key={item.id}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSelectedConnectionId((prev) => (prev === item.id ? null : item.id));
-                    }}
-                    onMouseEnter={() => setHoveredConnectionId(item.id)}
-                    onMouseLeave={() => setHoveredConnectionId(null)}
-                  >
-                    <path
-                      className="request-beam-bg"
-                      d={pathDirect}
-                      fill="none"
-                      stroke={item.color}
-                      strokeOpacity={isSelected ? 0.9 : isHovered ? 0.75 : 0.25}
-                      strokeWidth={isSelected ? 6 : isHovered ? 5 : 2.2}
-                    />
-                    <path
-                      className="request-beam-pulse"
-                      d={pathDirect}
-                      fill="none"
-                      filter={`url(#laser-glow-${mapSvgId})`}
-                      stroke={item.color}
-                      strokeDasharray="8,10"
-                      strokeWidth={isSelected ? 4 : isHovered ? 3.5 : 2}
-                    />
-                    <circle
-                      r={isSelected ? 3.5 : isHovered ? 3 : 2}
-                      fill="#ffffff"
-                      opacity={isSelected ? 1 : isHovered ? 0.95 : 0.8}
-                      filter={`url(#laser-glow-${mapSvgId})`}
+              {/* High-Contrast Non-Colliding Radar Hub Pins */}
+              <g className="world-city-pins">
+                {cityHubs.map((hub) => {
+                  const pos = projectGeoPoint(hub.location.coordinates);
+                  const isOrigin = hub.location.id === clientOrigin.id;
+                  const isHovered = hoveredHubId === hub.id;
+                  const hasConnections = hub.connectionCount > 0;
+                  const isDimmed = selectedInvolvedHubIds !== null && !selectedInvolvedHubIds.has(hub.location.id);
+
+                  if (!hasConnections && !isOrigin) return null;
+
+                  return (
+                    <g
+                      className={`hub-pin ${isOrigin ? 'origin-hub' : ''} ${isHovered ? 'hovered' : ''} ${isDimmed ? 'dimmed' : ''}`}
+                      key={hub.id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (hub.connections.length > 0) {
+                          setSelectedConnectionId((prev) => (prev === hub.connections[0].id ? null : hub.connections[0].id));
+                        }
+                      }}
+                      onMouseEnter={() => setHoveredHubId(hub.id)}
+                      onMouseLeave={() => setHoveredHubId(null)}
+                      style={{ opacity: isDimmed ? 0.2 : 1, transition: 'opacity 150ms ease' }}
+                      transform={`translate(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)})`}
                     >
-                      <animateMotion
-                        path={pathDirect}
-                        dur="2.2s"
-                        repeatCount="indefinite"
+                      {/* Radar Pulse Wave */}
+                      <circle
+                        className="pin-pulse-wave"
+                        r={isOrigin ? 14 : 10}
+                        fill="none"
+                        stroke={isOrigin ? '#34d399' : '#38bdf8'}
+                        strokeWidth="1.5"
                       />
-                    </circle>
-                  </g>
-                );
-              })}
-            </g>
-
-            {/* High-Contrast Non-Colliding Radar Hub Pins */}
-            <g className="world-city-pins">
-              {cityHubs.map((hub) => {
-                const pos = projectGeoPoint(hub.location.coordinates);
-                const isOrigin = hub.location.id === clientOrigin.id;
-                const isHovered = hoveredHubId === hub.id;
-                const hasConnections = hub.connectionCount > 0;
-                const isDimmed = selectedInvolvedHubIds !== null && !selectedInvolvedHubIds.has(hub.location.id);
-
-                if (!hasConnections && !isOrigin) return null;
-
-                return (
-                  <g
-                    className={`hub-pin ${isOrigin ? 'origin-hub' : ''} ${isHovered ? 'hovered' : ''} ${isDimmed ? 'dimmed' : ''}`}
-                    key={hub.id}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (hub.connections.length > 0) {
-                        setSelectedConnectionId((prev) => (prev === hub.connections[0].id ? null : hub.connections[0].id));
-                      }
-                    }}
-                    onMouseEnter={() => setHoveredHubId(hub.id)}
-                    onMouseLeave={() => setHoveredHubId(null)}
-                    style={{ opacity: isDimmed ? 0.2 : 1, transition: 'opacity 200ms ease' }}
-                    transform={`translate(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)})`}
-                  >
-                    {/* Radar Pulse Wave */}
-                    <circle
-                      className="pin-pulse-wave"
-                      r={isOrigin ? 14 : 10}
-                      fill="none"
-                      stroke={isOrigin ? '#34d399' : '#38bdf8'}
-                      strokeWidth="1.5"
-                    />
-                    {/* Center Beacon Dot */}
-                    <circle
-                      className="pin-center-dot"
-                      r={isOrigin ? 5.5 : 4}
-                      fill={isOrigin ? '#34d399' : '#38bdf8'}
-                      stroke="#07090e"
-                      strokeWidth="2"
-                    />
-
-                    {/* Non-overlapping Compact Pill Badge */}
-                    <g className="pin-tag-badge" transform="translate(7, -8)">
-                      <rect
-                        className="pin-tag-bg"
-                        height="17"
-                        rx="8.5"
-                        width={isOrigin ? 82 : (hub.location.flag.length > 0 ? 44 : 34)}
-                        x="0"
-                        y="-11"
+                      {/* Center Beacon Dot */}
+                      <circle
+                        className="pin-center-dot"
+                        r={isOrigin ? 5.5 : 4}
+                        fill={isOrigin ? '#34d399' : '#38bdf8'}
+                        stroke="#07090e"
+                        strokeWidth="2"
                       />
-                      <text className="pin-tag-text" x="6" y="2">
-                        {isOrigin
-                          ? `${hub.location.flag} 客户端`
-                          : `${hub.location.flag} ${hub.connectionCount}`}
-                      </text>
+
+                      {/* Non-overlapping Compact Pill Badge */}
+                      <g className="pin-tag-badge" transform="translate(7, -8)">
+                        <rect
+                          className="pin-tag-bg"
+                          height="17"
+                          rx="8.5"
+                          width={isOrigin ? 82 : (hub.location.flag.length > 0 ? 44 : 34)}
+                          x="0"
+                          y="-11"
+                        />
+                        <text className="pin-tag-text" x="6" y="2">
+                          {isOrigin
+                            ? `${hub.location.flag} 客户端`
+                            : `${hub.location.flag} ${hub.connectionCount}`}
+                        </text>
+                      </g>
                     </g>
-                  </g>
-                );
-              })}
+                  );
+                })}
+              </g>
             </g>
           </svg>
 
@@ -717,7 +808,7 @@ export function WorldRequestMap({ connections, onSelectHost, className, embedded
           <GripVertical size={12} className="resizer-icon" />
         </div>
 
-        {/* Right: Resizable Live Requests Stream Panel */}
+        {/* Right: Resizable Live Requests Stream Panel (Memoized Rows) */}
         <aside className="world-requests-stream" style={{ width: `${streamWidth}px` }}>
           <div className="stream-head">
             <Activity size={14} style={{ color: '#38bdf8' }} />
@@ -738,43 +829,16 @@ export function WorldRequestMap({ connections, onSelectHost, className, embedded
             {filteredGeoConnections.length === 0 ? (
               <div className="stream-empty">无匹配的活跃请求连接</div>
             ) : (
-              filteredGeoConnections.map((item) => {
-                const isSelected = selectedConnectionId === item.id;
-                const isHovered = hoveredConnectionId === item.id;
-
-                return (
-                  <article
-                    className={`stream-row ${isSelected ? 'selected' : ''} ${isHovered ? 'hovered' : ''}`}
-                    key={item.id}
-                    onClick={() => setSelectedConnectionId((prev) => (prev === item.id ? null : item.id))}
-                    onMouseEnter={() => setHoveredConnectionId(item.id)}
-                    onMouseLeave={() => setHoveredConnectionId(null)}
-                    title={isSelected ? '点击取消聚焦' : '点击在地图中单独聚焦此请求'}
-                  >
-                    <div className="stream-row-main">
-                      <div className="stream-host">
-                        <span className="dest-flag" title={item.destinationLocation.country}>
-                          {item.destinationLocation.flag}
-                        </span>
-                        <strong title={item.targetHost}>{item.targetHost}</strong>
-                        <span className="port-tag">:{item.destinationPort}</span>
-                      </div>
-                      <div className="stream-meta">
-                        <span className="outbound-pill" style={{ color: item.color }}>
-                          {item.outboundName}
-                        </span>
-                        <span className="city-name">{item.destinationLocation.name}</span>
-                        {item.network ? <span className="net-tag">{item.network.toUpperCase()}</span> : null}
-                      </div>
-                    </div>
-
-                    <div className="stream-traffic">
-                      <strong style={{ color: '#34d399' }}>↓ {formatBytes(item.downloadBytes)}</strong>
-                      <span style={{ color: '#38bdf8' }}>↑ {formatBytes(item.uploadBytes)}</span>
-                    </div>
-                  </article>
-                );
-              })
+              filteredGeoConnections.map((item) => (
+                <StreamRowItem
+                  item={item}
+                  isHovered={hoveredConnectionId === item.id}
+                  isSelected={selectedConnectionId === item.id}
+                  key={item.id}
+                  onHover={handleHoverRow}
+                  onSelect={handleSelectRow}
+                />
+              ))
             )}
           </div>
         </aside>

@@ -192,12 +192,51 @@ sudo systemctl restart sing-box.service
 | `SINGDECK_HELPER_BIND` | `0.0.0.0:9531` | helper HTTP API 的监听地址和端口。本机访问建议设为 `127.0.0.1:9531`。 |
 | `SINGDECK_HELPER_DB` | `singdeck-helper.db` | SQLite 状态数据库路径。部署环境建议放在 git 工作区之外。 |
 | `SINGDECK_HELPER_PUBLIC_URL` | 未设置 | 用来生成 `/api/v1/config/raw` 远程配置导入链接的公开 base URL。 |
+| `SINGDECK_PROXYCHECK_KEY` | 未设置 | 可选的 proxycheck.io key。家宽/机房检测无需 key 也可运行；免费 key 可提高上游请求额度。 |
+| `SINGDECK_IPINFO_TOKEN` | 未设置 | 可选的 IPinfo 隐私/代理识别 token；只在对应高级检查开启时调用。 |
+| `SINGDECK_ABUSEIPDB_KEY` | 未设置 | 可选的 AbuseIPDB 信誉 key；只在对应高级检查开启时调用。 |
 
 helper 数据库会保存 controller 设置、secret、策略组设置、定时探测时间戳和探测样本。不要提交它，也不要把它作为部署产物分享。
 
+### Gemini 出口与家宽/机房检测
+
+在 Settings 的“Gemini 检测策略组”中选择一个 Selector 组。只有这个组会显示 Gemini 开关和 Gemini 出口结果；具体组名由 Settings 保存，代码没有写死 `gemini-us`。该组侧栏中的 Gemini 开关以及每个策略组各自的家宽/机房、高级检查开关，都会随“Save settings”保存到 helper。
+
+Gemini 定位始终使用 Settings 中 `Chrome profile (Gemini / Provider)` 指向的 Google 登录态，不存在匿名首请求或“Chrome 会话兜底”。Provider Traffic 是否开启不影响这个 profile 配置。helper 在每次切换节点后使用 Chrome Cookie 和 UA 加载 `https://gemini.google.com/app`，从本次页面会话提取 `at`、`f.sid`、`bl`，再通过同一节点和同一临时 Cookie 会话请求 `K4WWud`。这些动态值不会写入数据库或日志，也不会在不同节点之间复用。
+
+Chrome profile 未配置、Google 账号 Cookie 缺失或无法解密、登录态已失效时，节点结果会显示 `auth_error`；helper 不会退回匿名定位，也不会因此中断其他已选检测。旧版保存的匿名 Gemini 结果不再显示，重新执行出口巡检后会被 Chrome 认证结果覆盖。
+
+测速与出口巡检是两个独立操作：`POST /api/v1/groups/<group>/probe` 只接受测速并发数，只产生延迟样本与评分，不会读取已保存的检测开关，也不会运行 Gemini、出口 IP 或网络类型判定：
+
+```json
+{
+  "concurrency": 4
+}
+```
+
+侧栏的 “Run egress inspection” 调用 `POST /api/v1/groups/<group>/inspection`。只有该接口会根据显式参数执行对应检测：
+
+```json
+{
+  "geminiLocation": true,
+  "nodeRisk": {
+    "exitIp": true,
+    "networkClass": true
+  }
+}
+```
+
+`geminiLocation: true` 只允许用于 Settings 指定的组。家宽/机房检测适用于能够逐节点切换的 Selector 组；其他类型的策略组会显示为不可用。定时后台测速和失败触发的重测同样只测速，不会隐式执行任何出口判定。出口 IP 通过 Google STUN 获取，因此 sing-box 路由必须保证 `stun.l.google.com:19302` 确实由当前 Selector 承载，否则结果属于实际承载 STUN 的其他路由，不能当作当前节点的权威分类。
+
+helper 会为每次巡检记录 `inspection start/complete`，并为每个节点分别记录 `Gemini location result` 与 `node risk result`。日志包含状态、检测结果和脱敏后的错误上下文，但不包含 Cookie、`at`、`f.sid` 或 `bl`。可使用 `journalctl -u singdeck-helper.service -f` 实时查看。
+
+家宽/机房分类先读取 proxycheck.io 的显式网络类型，再以无需 key 的 ipquery.io 作为兜底。只有明确的 `Residential` 证据才判为家宽；明确的 Hosting、Wireless、Business 分别判为机房、移动、商业网络；兜底结果无法证明家宽时保持“未知”，不会根据 ISP/ASN 猜测。
+
+Gemini 出现 Sorry 页面时，实际含义是带 Chrome Google 登录态的请求被 Google 重定向到 `/sorry/` 反滥用挑战。Google 不会返回具体命中规则，因此不能断言节点存在某一种确定风险，更不能等同于“恶意节点”。共享出口请求频率、自动化特征、账号会话与出口 IP 不一致、IP 信誉等都可能参与触发。
+
 ## Provider Traffic
 
-Provider Traffic 是可选模块，默认关闭。需要使用时，在 Settings 中打开开关，并设置保存 provider 登录状态的 Chrome profile 目录，例如：
+Provider Traffic 是可选模块，默认关闭。Settings 中的 Chrome profile 同时供 Gemini 认证定位和 Provider Traffic 使用；即使 Provider Traffic 关闭，也可以保存并用于 Gemini。需要同步 provider 用量时再打开 Provider Traffic 开关，例如配置：
 
 ```text
 /home/alice/.config/google-chrome/Default
@@ -246,6 +285,7 @@ curl http://127.0.0.1:9531/api/v1/health
 - Controller 已配置但不可达：确认前端纯浏览器功能能从浏览器访问该 URL，helper 功能能从 helper 所在主机访问该 URL。
 - 配置工作区无法读取文件：在 Settings 中设置配置路径，并确认 helper 进程用户有读取权限。
 - 没有评分结果：先把 controller 同步到 helper，然后加载策略组或手动探测某个策略组。
+- Gemini 显示 Chrome Google 登录态不可用：确认 Settings 中填写的是当前已登录 Google/Gemini 的 Chrome profile；用同一 profile 打开 Gemini 完成登录，并确认 helper 进程能读取 Cookie 数据库及已解锁的系统 keyring。
 - Provider Traffic 不显示：在 Settings 中打开该模块。
 - 流量工作区显示 provider 错误：检查 Settings 中的 Chrome profile 路径，并确认 WD Gold 和 XNYun 的登录 session 存在于该 Chrome profile。
 - WD Gold 显示旧数据：通常是 WD 登录态或 Cloudflare 验证过期。用同一个 Chrome profile 打开 WD Gold 并重新登录/通过验证，然后在 Overview 点击 Sync。

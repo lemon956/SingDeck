@@ -8,7 +8,7 @@ Usage: scripts/local-redeploy.sh
 Build and install the local SingDeck frontend and helper, then restart services.
 
 Environment overrides:
-  SINGDECK_WEB_ROOT=/var/www/singdeck/dist
+  SINGDECK_WEB_ROOT=                 existing /var/lib/sing-box/ui, otherwise /var/www/singdeck/dist
   SINGDECK_HELPER_BIN=/opt/singdeck/singdeck-helper
   SINGDECK_HELPER_SERVICE=singdeck-helper.service
   SINGDECK_SING_BOX_SERVICE=sing-box.service
@@ -263,7 +263,11 @@ main() {
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   cd "$ROOT_DIR"
 
-  WEB_ROOT="$(strip_trailing_slashes "${SINGDECK_WEB_ROOT:-/var/www/singdeck/dist}")"
+  local default_web_root="/var/www/singdeck/dist"
+  if [[ -d /var/lib/sing-box/ui ]]; then
+    default_web_root="/var/lib/sing-box/ui"
+  fi
+  WEB_ROOT="$(strip_trailing_slashes "${SINGDECK_WEB_ROOT:-$default_web_root}")"
   HELPER_BIN="$(strip_trailing_slashes "${SINGDECK_HELPER_BIN:-/opt/singdeck/singdeck-helper}")"
   HELPER_SERVICE="${SINGDECK_HELPER_SERVICE:-singdeck-helper.service}"
   SING_BOX_SERVICE="${SINGDECK_SING_BOX_SERVICE:-sing-box.service}"

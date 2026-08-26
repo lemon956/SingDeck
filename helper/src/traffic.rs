@@ -540,7 +540,7 @@ fn default_chrome_user_agent() -> &'static str {
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
 
-fn chrome_profile_user_agent(profile: &Path) -> String {
+pub fn chrome_profile_user_agent(profile: &Path) -> String {
     read_chrome_profile_version(profile)
         .map(|version| chrome_user_agent_for_version(&version))
         .unwrap_or_else(|| default_chrome_user_agent().to_string())

@@ -139,40 +139,59 @@ const DOMAIN_KEYWORD_MAP: Array<{ regex: RegExp; key: keyof typeof GLOBAL_HUBS }
   { regex: /(?:cloudflare|1\.1\.1\.1)/i, key: 'HK' }
 ];
 
+const outboundCache = new Map<string, GeoLocation | null>();
+const destinationCache = new Map<string, GeoLocation>();
+
 export function resolveOutboundLocation(outbound: string, chains?: string[]): GeoLocation | null {
+  const key = `${outbound}|${(chains ?? []).join(',')}`;
+  const cached = outboundCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
   const combined = [outbound, ...(chains ?? [])].join(' ');
   for (const item of PROXY_KEYWORD_MAP) {
     if (item.regex.test(combined)) {
-      return GLOBAL_HUBS[item.key];
+      const loc = GLOBAL_HUBS[item.key] ?? null;
+      if (outboundCache.size < 500) outboundCache.set(key, loc);
+      return loc;
     }
   }
+  if (outboundCache.size < 500) outboundCache.set(key, null);
   return null;
 }
 
 export function resolveDestinationLocation(host: string, ip: string, proxyLocation?: GeoLocation | null): GeoLocation {
+  const key = `${host}|${ip}|${proxyLocation?.id ?? ''}`;
+  const cached = destinationCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
   const target = `${host} ${ip}`.toLowerCase();
 
   for (const item of DOMAIN_KEYWORD_MAP) {
     if (item.regex.test(target)) {
-      return GLOBAL_HUBS[item.key];
+      const loc = GLOBAL_HUBS[item.key];
+      if (destinationCache.size < 1000) destinationCache.set(key, loc);
+      return loc;
     }
   }
 
   for (const item of PROXY_KEYWORD_MAP) {
     if (item.regex.test(target)) {
-      return GLOBAL_HUBS[item.key];
+      const loc = GLOBAL_HUBS[item.key];
+      if (destinationCache.size < 1000) destinationCache.set(key, loc);
+      return loc;
     }
   }
 
+  let result = GLOBAL_HUBS.GLOBAL;
   if (proxyLocation && proxyLocation.country !== '中国') {
-    return proxyLocation;
+    result = proxyLocation;
+  } else if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.16.') || ip.startsWith('127.')) {
+    result = GLOBAL_HUBS['CN-DIRECT'];
   }
-
-  if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('172.16.') || ip.startsWith('127.')) {
-    return GLOBAL_HUBS['CN-DIRECT'];
-  }
-
-  return GLOBAL_HUBS.GLOBAL;
+  if (destinationCache.size < 1000) destinationCache.set(key, result);
+  return result;
 }
 
 function computeStringHash(str: string): number {

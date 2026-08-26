@@ -40,10 +40,13 @@ import {
 import {
   buildSingBoxRemoteProfileUri,
   type HelperGroupConfig,
+  type HelperInspectionRequest,
   type HelperNetworkUsageConnection,
   type HelperNetworkUsageSourceTrendBucketMode,
   type HelperNetworkUsageSourceTrendSource,
+  type HelperNodeRiskChecks,
   type HelperNodeScore,
+  type HelperRiskCheckStatus,
   type ScoreScheme
 } from '../core/helperApi';
 import { getHelperAvailability } from '../core/helperStatus';
@@ -396,6 +399,208 @@ function formatScoreTooltip(score: HelperNodeScore): string {
   return parts.join(' / ');
 }
 
+function formatRiskCheckFailure(status: HelperRiskCheckStatus, error?: string | null): string {
+  const label =
+    status === 'not_configured'
+      ? '未配置'
+      : status === 'unavailable'
+        ? '暂不可用'
+        : status === 'error'
+          ? '检测错误'
+          : '未返回有效结果';
+  return error ? `${label} (${error})` : label;
+}
+
+function formatNodeCardTooltip(
+  name: string,
+  type: string,
+  sourceName?: string | null,
+  delay?: number | null,
+  score?: HelperNodeScore | null,
+  inspection?: {
+    showGemini: boolean;
+    nodeRisk: HelperNodeRiskChecks;
+  }
+): string {
+  const lines: string[] = [`【节点信息】`, `名称: ${name}`, `协议: ${type.toUpperCase()}`];
+  if (sourceName) {
+    lines.push(`来源: ${sourceName}`);
+  }
+  if (delay !== undefined && delay !== null) {
+    lines.push(`延迟: ${delay}ms`);
+  }
+  if (score) {
+    lines.push(`评分: ${score.score}分 (${formatScoreTooltip(score)})`);
+  }
+
+  const gemini = inspection?.showGemini ? score?.raw?.geminiLocation : null;
+  if (gemini) {
+    lines.push(``);
+    lines.push(`【Gemini 出口探测】`);
+    const statusText =
+      gemini.status === 'success'
+        ? '✅ 解锁正常'
+        : gemini.status === 'anti_abuse_challenge'
+        ? '⚠️ Google Sorry 反滥用挑战'
+        : gemini.status === 'auth_error'
+        ? '❌ Chrome Google 登录态不可用'
+        : gemini.status === 'routing_error'
+        ? '❌ 路由错误'
+        : gemini.status === 'transport_error'
+        ? '❌ 连接传输错误'
+        : `❌ 异常 (${gemini.status})`;
+    lines.push(`出口归属: ${gemini.label || '未知'}`);
+    lines.push(`解锁状态: ${statusText}`);
+    if (gemini.status === 'anti_abuse_challenge') {
+      lines.push(`触发依据: 请求被 Google 重定向到 /sorry/，上游未公开具体命中规则`);
+      lines.push(`风险含义: 可能与共享出口频率、自动化特征、会话/IP 不一致或 IP 信誉有关；不等于节点已被判定为恶意`);
+    }
+    if (gemini.authMode === 'chrome') {
+      lines.push(`认证模式: Chrome Google 登录态`);
+    } else {
+      lines.push(`认证模式: 旧版匿名结果（请重新巡检）`);
+    }
+    if (gemini.error) {
+      lines.push(`探测说明: ${gemini.error}`);
+    }
+    if (gemini.testedAt) {
+      lines.push(`探测时间: ${new Date(gemini.testedAt).toLocaleTimeString()}`);
+    }
+  }
+
+  const selected = inspection?.nodeRisk ?? emptyNodeRiskChecks();
+  const risk = hasSelectedNodeRiskCheck(selected) ? score?.raw?.nodeRisk : null;
+  if (risk) {
+    lines.push(``);
+    lines.push(`【风险与网络画像检测】`);
+    if (selected.exitIp) {
+      const exit = risk.exitIp;
+      if (!exit) {
+        lines.push(`出口 IP: 未返回结果`);
+      } else if (exit.status === 'success' && exit.ip) {
+        lines.push(`出口 IP: ${exit.ip}${exit.port ? `:${exit.port}` : ''} (${(exit.family || 'ipv4').toUpperCase()})`);
+      } else {
+        lines.push(`出口 IP: ${formatRiskCheckFailure(exit.status, exit.error)}`);
+      }
+    }
+
+    if (selected.addressScope) {
+      const scope = risk.addressScope;
+      if (!scope) {
+        lines.push(`地址范围: 未返回结果`);
+      } else if (scope.status === 'success') {
+        const clsName = scope.classification ? scope.classification.replace(/_/g, ' ') : 'global';
+        lines.push(`地址范围: ${clsName} (公网可达: ${scope.globallyReachable ? '是' : '否'})`);
+      } else {
+        lines.push(`地址范围: ${formatRiskCheckFailure(scope.status, scope.error)}`);
+      }
+    }
+
+    if (selected.networkIdentity) {
+      const ident = risk.networkIdentity;
+      if (!ident) {
+        lines.push(`BGP 归属: 未返回结果`);
+      } else if (ident.status === 'success') {
+        const asnStr = ident.originAsns && ident.originAsns.length > 0 ? ident.originAsns.map((asn) => `AS${asn}`).join(', ') : '未知';
+        lines.push(`BGP 归属: ${ident.prefix || '未知前缀'} [${asnStr}]`);
+      } else {
+        lines.push(`BGP 归属: ${formatRiskCheckFailure(ident.status, ident.error)}`);
+      }
+    }
+
+    if (selected.networkClass) {
+      const networkClass = risk.networkClass;
+      if (!networkClass) {
+        lines.push(`网络类型: 未返回结果`);
+      } else if (networkClass.status === 'success') {
+        const verdictMap: Record<string, string> = {
+          residential: '🏠 家宽 (Residential)',
+          data_center: '🏢 机房 (Data Center)',
+          mobile: '📱 移动网络 (Mobile)',
+          business: '🏬 企业网络 (Business)',
+          other: '其他接入类型 (Other)',
+          mixed: '⚠️ 家宽与托管证据冲突 (Mixed)',
+          unknown: '❓ 无法判定 (Unknown)'
+        };
+        const details = [networkClass.isp, networkClass.connectionType].filter(Boolean).join(' / ');
+        lines.push(
+          `网络类型: ${verdictMap[networkClass.verdict] || networkClass.verdict}${details ? ` / ${details}` : ''}`
+        );
+      } else {
+        lines.push(`网络类型: ${formatRiskCheckFailure(networkClass.status, networkClass.error)}`);
+      }
+    }
+
+    if (selected.routeSecurity) {
+      const route = risk.routeSecurity;
+      if (!route) {
+        lines.push(`RPKI 路由安全: 未返回结果`);
+      } else if (route.status === 'success') {
+        const validityMap: Record<string, string> = {
+          valid: '✅ 有效 (Valid)',
+          invalid_asn: '❌ ASN 不匹配 (Invalid ASN)',
+          invalid_length: '❌ 前缀长度无效 (Invalid Length)',
+          unknown: '❓ 未知 (Unknown)',
+          unrouted: '⚠️ 未路由 (Unrouted)',
+          mixed: '⚠️ 混合状态 (Mixed)'
+        };
+        const validityLabel = (route.validity && validityMap[route.validity]) || route.validity || '未知';
+        lines.push(`RPKI 路由安全: ${validityLabel}`);
+      } else {
+        lines.push(`RPKI 路由安全: ${formatRiskCheckFailure(route.status, route.error)}`);
+      }
+    }
+
+    if (selected.tor) {
+      const tor = risk.tor;
+      if (!tor) {
+        lines.push(`Tor 洋葱路由: 未返回结果`);
+      } else if (tor.status === 'success') {
+        const torMap: Record<string, string> = {
+          exit: '⚠️ Tor 出口节点 (Tor Exit)',
+          relay: '⚠️ Tor 中继节点 (Tor Relay)',
+          not_detected: '✅ 未发现 Tor (Not Tor)',
+          unknown: '❓ 未知 (Unknown)'
+        };
+        lines.push(`Tor 洋葱路由: ${torMap[tor.verdict] || tor.verdict}`);
+      } else {
+        lines.push(`Tor 洋葱路由: ${formatRiskCheckFailure(tor.status, tor.error)}`);
+      }
+    }
+
+    if (selected.privacy) {
+      const privacy = risk.privacy;
+      if (!privacy) {
+        lines.push(`IP 隐私特征: 未返回结果`);
+      } else if (privacy.status === 'success') {
+        const sigs = privacy.signals && privacy.signals.length > 0 ? privacy.signals.join(', ') : '无特殊标记';
+        lines.push(`IP 隐私特征: ${sigs}${privacy.service ? ` (${privacy.service})` : ''}`);
+      } else {
+        lines.push(`IP 隐私特征: ${formatRiskCheckFailure(privacy.status, privacy.error)}`);
+      }
+    }
+
+    if (selected.abuse) {
+      const abuse = risk.abuse;
+      if (!abuse) {
+        lines.push(`滥用信誉: 未返回结果`);
+      } else if (abuse.status === 'success') {
+        const scoreStr = abuse.abuseConfidenceScore !== null ? `${abuse.abuseConfidenceScore}%` : '0%';
+        const reportsStr = abuse.totalReports ? `${abuse.totalReports} 次举报` : '无举报记录';
+        lines.push(`滥用信誉: 风险分 ${scoreStr} (${reportsStr})${abuse.isp ? ` / ${abuse.isp}` : ''}`);
+      } else {
+        lines.push(`滥用信誉: ${formatRiskCheckFailure(abuse.status, abuse.error)}`);
+      }
+    }
+
+    if (risk.assessedAt) {
+      lines.push(`评估时间: ${new Date(risk.assessedAt).toLocaleTimeString()}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 function latestScoreUpdateAt(scores: HelperNodeScore[]): Date | null {
   const timestamps = scores
     .map((score) => (score.lastTestedAt ? Date.parse(score.lastTestedAt) : Number.NaN))
@@ -488,8 +693,39 @@ function fallbackGroupConfig(testUrl: string): HelperGroupConfig {
     scheme: 'Balanced',
     autoSwitch: false,
     autoProbe: true,
-    probeIntervalSec: 15 * 60
+    probeIntervalSec: 15 * 60,
+    geminiLocationProbeEnabled: false,
+    nodeRisk: emptyNodeRiskChecks()
   };
+}
+
+function emptyNodeRiskChecks(): HelperNodeRiskChecks {
+  return {
+    exitIp: false,
+    addressScope: false,
+    networkIdentity: false,
+    networkClass: false,
+    routeSecurity: false,
+    tor: false,
+    privacy: false,
+    abuse: false
+  };
+}
+
+function normalizeNodeRiskChecks(checks?: Partial<HelperNodeRiskChecks> | null): HelperNodeRiskChecks {
+  return { ...emptyNodeRiskChecks(), ...checks };
+}
+
+function hasSelectedNodeRiskCheck(checks: HelperNodeRiskChecks): boolean {
+  return (
+    checks.addressScope ||
+    checks.networkIdentity ||
+    checks.networkClass ||
+    checks.routeSecurity ||
+    checks.tor ||
+    checks.privacy ||
+    checks.abuse
+  );
 }
 
 function downloadTextFile(filename: string, content: string) {
@@ -1227,6 +1463,7 @@ export function App() {
     );
   }, [proxies.proxies]);
   const defaultStrategyGroup = allStrategyGroups[0] ?? null;
+  const geminiLocationGroups = allStrategyGroups.filter(isSelectableProxyGroup);
   const activeStrategyGroup = activeStrategyGroupName
     ? allStrategyGroups.find((group) => group.name === activeStrategyGroupName) ?? defaultStrategyGroup
     : defaultStrategyGroup;
@@ -1420,6 +1657,18 @@ export function App() {
     activeStrategyGroup && groupConfigDrafts[activeStrategyGroup.name]
       ? groupConfigDrafts[activeStrategyGroup.name]
       : activeHelperGroup?.config ?? fallbackGroupConfig(activeGroupTestUrl);
+  const activeNodeRisk = normalizeNodeRiskChecks(activeGroupConfig.nodeRisk);
+  const activeIsGeminiLocationGroup = Boolean(
+    activeStrategyGroup && helper.testingSettings?.geminiLocationGroup === activeStrategyGroup.name
+  );
+  const activeSupportsNodeInspection = Boolean(activeStrategyGroup && isSelectableProxyGroup(activeStrategyGroup));
+  const activeAdvancedRiskEnabled =
+    activeNodeRisk.addressScope ||
+    activeNodeRisk.networkIdentity ||
+    activeNodeRisk.routeSecurity ||
+    activeNodeRisk.tor ||
+    activeNodeRisk.privacy ||
+    activeNodeRisk.abuse;
   const activeProbeExecution = activeStrategyGroup
     ? resolveProbeExecution(activeStrategyGroup, activeGroupConfig.mode)
     : null;
@@ -1459,6 +1708,13 @@ export function App() {
   const activeGroupBusy = Boolean(
     activeStrategyGroup && (activeProbeGroupNames.has(activeStrategyGroup.name) || activeNativeGroupTesting)
   );
+  const activeGroupInspecting = Boolean(
+    activeStrategyGroup && helper.inspectingGroups.includes(activeStrategyGroup.name)
+  );
+  const activeHasInspectionSelection = Boolean(
+    (activeIsGeminiLocationGroup && activeGroupConfig.geminiLocationProbeEnabled) ||
+      hasSelectedNodeRiskCheck(activeNodeRisk)
+  );
   const activeGroupActivity = describeProbeActivity({
     mode: activeGroupConfig.mode,
     groupProbing: activeGroupBusy
@@ -1468,6 +1724,17 @@ export function App() {
       activeStrategyMembers.length > 0 &&
       (helperServiceAvailable || activeProbeExecution?.mode === 'native-urltest') &&
       !activeGroupBusy &&
+      !activeGroupInspecting &&
+      !proxies.testingAllNodes
+  );
+  const activeCanRunInspection = Boolean(
+    activeStrategyGroup &&
+      activeStrategyMembers.length > 0 &&
+      helperServiceAvailable &&
+      activeSupportsNodeInspection &&
+      activeHasInspectionSelection &&
+      !activeGroupBusy &&
+      !activeGroupInspecting &&
       !proxies.testingAllNodes
   );
   const strategyWallGroups = useMemo(() => {
@@ -1910,7 +2177,10 @@ export function App() {
       ...patch,
       probeIntervalSec: nextProbeIntervalSec,
       testUrl: ((patch.testUrl ?? currentConfig.testUrl) || helperDefaultTestUrl).trim() || helperDefaultTestUrl,
-      testUrlOverridden: patch.testUrlOverridden ?? (hasTestUrlPatch ? true : currentConfig.testUrlOverridden)
+      testUrlOverridden: patch.testUrlOverridden ?? (hasTestUrlPatch ? true : currentConfig.testUrlOverridden),
+      geminiLocationProbeEnabled:
+        patch.geminiLocationProbeEnabled ?? currentConfig.geminiLocationProbeEnabled ?? false,
+      nodeRisk: normalizeNodeRiskChecks(patch.nodeRisk ?? currentConfig.nodeRisk)
     };
     return nextConfig;
   };
@@ -1925,6 +2195,15 @@ export function App() {
   const saveGroupConfigFor = (groupName: string, currentConfig: HelperGroupConfig, patch: Partial<HelperGroupConfig>) => {
     const nextConfig = draftGroupConfigFor(groupName, currentConfig, patch);
     void helper.saveGroupConfig(groupName, nextConfig);
+  };
+
+  const draftActiveNodeRiskCheck = (key: keyof HelperNodeRiskChecks, enabled: boolean) => {
+    if (!activeStrategyGroup) {
+      return;
+    }
+    const next = { ...activeNodeRisk, [key]: enabled };
+    next.exitIp = hasSelectedNodeRiskCheck(next);
+    draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { nodeRisk: next });
   };
 
   const saveActiveGroupConfig = async () => {
@@ -2008,6 +2287,23 @@ export function App() {
 
   const runActiveGroupProbe = () => {
     void runGroupDelayOrProbe(activeStrategyGroup);
+  };
+
+  const runActiveGroupInspection = () => {
+    if (!activeStrategyGroup || !helperServiceAvailable) {
+      return;
+    }
+    const inspection: HelperInspectionRequest = {};
+    if (activeIsGeminiLocationGroup && activeGroupConfig.geminiLocationProbeEnabled) {
+      inspection.geminiLocation = true;
+    }
+    if (hasSelectedNodeRiskCheck(activeNodeRisk)) {
+      inspection.nodeRisk = { ...activeNodeRisk, exitIp: true };
+    }
+    if (inspection.geminiLocation === undefined && inspection.nodeRisk === undefined) {
+      return;
+    }
+    void useHelperStore.getState().inspectGroup(activeStrategyGroup.name, inspection);
   };
 
   const openConfigQr = async () => {
@@ -2460,7 +2756,7 @@ export function App() {
                   type="button"
                 >
                   <Globe size={12} />
-                  全球地图
+                  <span>全球地图</span>
                 </button>
                 <button
                   className={overviewVizMode === 'topology' ? 'active' : ''}
@@ -2468,7 +2764,7 @@ export function App() {
                   type="button"
                 >
                   <GitBranch size={12} />
-                  链路拓扑
+                  <span>链路拓扑</span>
                 </button>
               </div>
             </div>
@@ -3107,13 +3403,15 @@ export function App() {
                     <small>Higher values reduce helper database writes while keeping Overview usage data current.</small>
                   </label>
                   <label>
-                    <span>Chrome profile</span>
+                    <span>Chrome profile (Gemini / Provider)</span>
                     <input
                       placeholder="/home/user/.config/google-chrome/Default"
                       value={trafficProfileDraft}
                       onChange={(event) => setTrafficProfileDraft(event.target.value)}
                     />
-                    <small>Use the desktop Chrome profile that contains Cookies and Local Storage.</small>
+                    <small>
+                      Required for authenticated Gemini location probes and optional Provider Traffic; saved even when Provider Traffic is disabled.
+                    </small>
                   </label>
                   <div className="helper-actions">
                     <button
@@ -3240,6 +3538,23 @@ export function App() {
                       onChange={(event) => setMinProbeIntervalDraft(event.target.value)}
                     />
                   </label>
+                  <label>
+                    <span>Gemini 检测策略组</span>
+                    <select
+                      aria-label="Gemini 检测策略组"
+                      disabled={!helperServiceAvailable}
+                      value={helper.testingSettings?.geminiLocationGroup ?? ''}
+                      onChange={(event) => void helper.saveGeminiLocationGroup(event.target.value)}
+                    >
+                      <option value="">未指定（关闭）</option>
+                      {geminiLocationGroups.map((group) => (
+                        <option key={group.name} value={group.name}>
+                          {group.name}
+                        </option>
+                      ))}
+                    </select>
+                    <small>仅指定组的侧边栏会显示 Gemini 出口开关与检测结果。</small>
+                  </label>
                 </div>
               </article>
 
@@ -3273,7 +3588,9 @@ export function App() {
                               scheme: existing?.scheme ?? 'Balanced',
                               autoSwitch: existing?.autoSwitch ?? false,
                               autoProbe: existing?.autoProbe ?? true,
-                              probeIntervalSec: existing?.probeIntervalSec ?? 15 * 60
+                              probeIntervalSec: existing?.probeIntervalSec ?? 15 * 60,
+                              geminiLocationProbeEnabled: existing?.geminiLocationProbeEnabled ?? false,
+                              nodeRisk: normalizeNodeRiskChecks(existing?.nodeRisk)
                             });
                           }}
                           onChange={(event) => {
@@ -3597,6 +3914,7 @@ export function App() {
                           const displayDelay = proxyDelayByName.get(member.name) ?? member.delay;
                           const nodeDelay = execution.mode === 'helper-score' ? scoreDelayOrFallback(score, displayDelay) : displayDelay;
                           const scoreTone = score ? nodeScoreTone(score, displayDelay) : 'none';
+                          const nodeSourceName = nodeSourceByNodeName.get(member.name);
                           const nodeDelayTone = delayTone(nodeDelay);
                           const cardTone = rowConfig.mode === 'score' && score ? scoreTone : nodeDelayTone;
                           const nodeActivity = describeProbeActivity({
@@ -3612,6 +3930,19 @@ export function App() {
                               aria-disabled={!canSelect || isCurrent}
                               className={`strategy-node-card ${cardTone} ${isCurrent ? 'active' : ''} ${nodeActivity?.className ?? ''}`}
                               key={member.name}
+                              title={formatNodeCardTooltip(
+                                member.name,
+                                member.type,
+                                nodeSourceName,
+                                nodeDelay,
+                                score,
+                                {
+                                  showGemini:
+                                    helper.testingSettings?.geminiLocationGroup === proxy.name &&
+                                    Boolean(rowConfig.geminiLocationProbeEnabled),
+                                  nodeRisk: normalizeNodeRiskChecks(rowConfig.nodeRisk)
+                                }
+                              )}
                               onClick={() => {
                                 setActiveStrategyGroupName(proxy.name);
                                 if (canSelect && !isCurrent) {
@@ -3622,12 +3953,17 @@ export function App() {
                               <div className="node-head">
                                 <div className="node-title-group">
                                   <span className={`node-status-dot ${nodeDelayTone} ${isTesting ? 'testing' : ''}`} />
-                                  <strong className="node-name" title={member.name}>{member.name}</strong>
+                                  <strong className="node-name">{member.name}</strong>
                                 </div>
                                 <span className="node-type-tag">{member.type}</span>
                               </div>
                               <div className="node-foot">
                                 <div className="node-meta">
+                                  {nodeSourceName ? (
+                                    <span className="node-source-tag" title={`来源: ${nodeSourceName}`}>
+                                      {nodeSourceName}
+                                    </span>
+                                  ) : null}
                                   {rowConfig.mode === 'score' ? (
                                     <span
                                       className={`score-mark ${scoreTone} ${isScoring ? 'testing' : ''}`}
@@ -3648,9 +3984,9 @@ export function App() {
                                     </span>
                                   ) : isCurrent ? (
                                     <span className="node-active-pill">ACTIVE</span>
-                                  ) : (
+                                  ) : !nodeSourceName ? (
                                     <span className="node-type-sub">{proxy.name}</span>
-                                  )}
+                                  ) : null}
                                 </div>
                                 <button
                                   aria-label={`Test ${member.name} delay`}
@@ -3732,7 +4068,7 @@ export function App() {
                       </strong>
                     </div>
                     <div className="mini-stat">
-                      <span>定时巡检调度</span>
+                      <span>定时测速调度</span>
                       <strong>{activeInspectorModel.scheduleLabel}</strong>
                     </div>
                   </div>
@@ -3897,8 +4233,8 @@ export function App() {
                             aria-hidden="true"
                           />
                           <span>
-                            <strong>定时后台巡检</strong>
-                            <small>按设定周期自动在后台探测与评分</small>
+                              <strong>定时后台测速</strong>
+                              <small>按设定周期自动测速与评分，不运行出口或网络类型判定</small>
                           </span>
                         </label>
                       </div>
@@ -3933,9 +4269,144 @@ export function App() {
                         </label>
                       </div>
                     </div>
+
+                    <div className="inspector-group-card">
+                      <div className="inspector-card-header">
+                        <Shield size={12} />
+                        <span>出口与网络类型 / Egress & Network</span>
+                      </div>
+
+                      <div className="inspector-automation-grid">
+                        {activeIsGeminiLocationGroup ? (
+                          <label className={`automation-option ${activeGroupConfig.geminiLocationProbeEnabled ? 'on' : ''}`}>
+                            <input
+                              aria-label="Gemini 出口与解锁检测"
+                              checked={activeGroupConfig.geminiLocationProbeEnabled ?? false}
+                              disabled={!helperServiceAvailable}
+                              type="checkbox"
+                              onChange={(event) =>
+                                draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+                                  geminiLocationProbeEnabled: event.target.checked
+                                })
+                              }
+                            />
+                            <span
+                              className={`automation-switch ${activeGroupConfig.geminiLocationProbeEnabled ? 'on' : ''}`}
+                              aria-hidden="true"
+                            />
+                            <span>
+                              <strong>Gemini 出口与解锁检测</strong>
+                              <small>由独立巡检按钮执行；使用 Settings 中 Chrome profile 的 Google 登录态</small>
+                            </span>
+                          </label>
+                        ) : null}
+
+                        <label className={`automation-option ${activeNodeRisk.networkClass ? 'on' : ''}`}>
+                          <input
+                            aria-label="家宽 / 机房检测"
+                            checked={activeNodeRisk.networkClass}
+                            disabled={!helperServiceAvailable || !activeSupportsNodeInspection}
+                            type="checkbox"
+                            onChange={(event) => draftActiveNodeRiskCheck('networkClass', event.target.checked)}
+                          />
+                          <span
+                            className={`automation-switch ${activeNodeRisk.networkClass ? 'on' : ''}`}
+                            aria-hidden="true"
+                          />
+                          <span>
+                            <strong>家宽 / 机房检测</strong>
+                            <small>由独立巡检按钮执行；获取出口后判断家宽、机房、移动或商业网络</small>
+                          </span>
+                        </label>
+
+                        {!activeSupportsNodeInspection ? (
+                          <div className="settings-scope-note">
+                            当前组不是 Selector，无法逐节点切换出口，因此网络类型检测不可用。
+                          </div>
+                        ) : null}
+
+                        <details
+                          className="risk-cluster-container"
+                          key={`advanced-risk-${activeStrategyGroup.name}`}
+                          open={activeAdvancedRiskEnabled || undefined}
+                        >
+                          <summary className="risk-cluster-title">高级网络检查（可选，默认不调用）</summary>
+                          <div className="risk-cluster-options">
+                            <label className={`risk-sub-option ${activeNodeRisk.addressScope ? 'on' : ''}`}>
+                              <input
+                                checked={activeNodeRisk.addressScope}
+                                disabled={!helperServiceAvailable || !activeSupportsNodeInspection}
+                                type="checkbox"
+                                onChange={(event) => draftActiveNodeRiskCheck('addressScope', event.target.checked)}
+                              />
+                              <span>公网地址检查 — 排除私网、保留地址和特殊用途地址</span>
+                            </label>
+                            <label className={`risk-sub-option ${activeNodeRisk.networkIdentity ? 'on' : ''}`}>
+                              <input
+                                checked={activeNodeRisk.networkIdentity}
+                                disabled={!helperServiceAvailable || !activeSupportsNodeInspection}
+                                type="checkbox"
+                                onChange={(event) => draftActiveNodeRiskCheck('networkIdentity', event.target.checked)}
+                              />
+                              <span>BGP / ASN 归属 — 查看出口所属网络运营方</span>
+                            </label>
+                            <label className={`risk-sub-option ${activeNodeRisk.routeSecurity ? 'on' : ''}`}>
+                              <input
+                                checked={activeNodeRisk.routeSecurity}
+                                disabled={!helperServiceAvailable || !activeSupportsNodeInspection}
+                                type="checkbox"
+                                onChange={(event) => draftActiveNodeRiskCheck('routeSecurity', event.target.checked)}
+                              />
+                              <span>RPKI — 验证该 BGP 路由是否获得前缀持有者授权</span>
+                            </label>
+                            <label className={`risk-sub-option ${activeNodeRisk.tor ? 'on' : ''}`}>
+                              <input
+                                checked={activeNodeRisk.tor}
+                                disabled={!helperServiceAvailable || !activeSupportsNodeInspection}
+                                type="checkbox"
+                                onChange={(event) => draftActiveNodeRiskCheck('tor', event.target.checked)}
+                              />
+                              <span>Tor 出口 — 判断 IP 是否出现在公开 Tor 出口目录</span>
+                            </label>
+                            <label className={`risk-sub-option ${activeNodeRisk.privacy ? 'on' : ''}`}>
+                              <input
+                                checked={activeNodeRisk.privacy}
+                                disabled={!helperServiceAvailable || !activeSupportsNodeInspection}
+                                type="checkbox"
+                                onChange={(event) => draftActiveNodeRiskCheck('privacy', event.target.checked)}
+                              />
+                              <span>代理特征 — 查询 VPN、代理、托管或匿名网络标签</span>
+                            </label>
+                            <label className={`risk-sub-option ${activeNodeRisk.abuse ? 'on' : ''}`}>
+                              <input
+                                checked={activeNodeRisk.abuse}
+                                disabled={!helperServiceAvailable || !activeSupportsNodeInspection}
+                                type="checkbox"
+                                onChange={(event) => draftActiveNodeRiskCheck('abuse', event.target.checked)}
+                              />
+                              <span>滥用信誉 — 查询垃圾邮件、扫描和攻击举报记录</span>
+                            </label>
+                          </div>
+                        </details>
+                      </div>
+                    </div>
                   </form>
 
                   <div className="inspector-actions">
+                    <button
+                      className="ghost-action inspector-inspection-action"
+                      disabled={!activeCanRunInspection}
+                      onClick={runActiveGroupInspection}
+                      title={
+                        activeHasInspectionSelection
+                          ? '独立运行已勾选的出口与网络类型检测，不执行测速'
+                          : '请先勾选 Gemini 或网络类型检测项'
+                      }
+                      type="button"
+                    >
+                      <Shield size={14} />
+                      {activeGroupInspecting ? 'Inspecting...' : 'Run egress inspection'}
+                    </button>
                     <button
                       className="primary-action inspector-primary-action"
                       disabled={!activeCanRunProbe}
@@ -4000,7 +4471,7 @@ export function App() {
                     onClick={() => setConnectionsViewMode('list')}
                     type="button"
                   >
-                    列表视图
+                    <span>列表视图</span>
                   </button>
                   <button
                     className={connectionsViewMode === 'map' ? 'active' : ''}
@@ -4008,7 +4479,7 @@ export function App() {
                     type="button"
                   >
                     <Globe size={12} />
-                    全球地图
+                    <span>全球地图</span>
                   </button>
                 </div>
                 <span className="panel-stamp">{connections.connections.length} active rows</span>

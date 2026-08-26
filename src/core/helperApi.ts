@@ -29,6 +29,8 @@ export type HelperGroupConfig = {
   autoSwitch: boolean;
   autoProbe: boolean;
   probeIntervalSec: number;
+  geminiLocationProbeEnabled?: boolean;
+  nodeRisk?: HelperNodeRiskChecks;
 };
 
 export type HelperTestingSettings = {
@@ -36,6 +38,7 @@ export type HelperTestingSettings = {
   delayTestTimeoutMs: number;
   minProbeIntervalSec: number;
   probeConcurrency: number;
+  geminiLocationGroup?: string;
 };
 
 export type HelperTrafficSettings = {
@@ -101,6 +104,218 @@ export type HelperScoreWeights = {
   freshness: number;
 };
 
+export type HelperGeminiLocationStatus =
+  | 'success'
+  | 'anti_abuse_challenge'
+  | 'auth_error'
+  | 'routing_error'
+  | 'transport_error'
+  | 'http_error'
+  | 'parse_error';
+
+export type HelperGeminiAuthMode = 'anonymous' | 'chrome';
+
+export type HelperGeminiLocationResult = {
+  status: HelperGeminiLocationStatus;
+  label: string | null;
+  source: string | null;
+  authMode: HelperGeminiAuthMode;
+  testedAt: string;
+  error: string | null;
+};
+
+export type HelperRiskCheckStatus = 'success' | 'not_configured' | 'unavailable' | 'error';
+export type HelperAddressFamily = 'ipv4' | 'ipv6';
+
+export type HelperNodeRiskChecks = {
+  exitIp: boolean;
+  addressScope: boolean;
+  networkIdentity: boolean;
+  networkClass: boolean;
+  routeSecurity: boolean;
+  tor: boolean;
+  privacy: boolean;
+  abuse: boolean;
+};
+
+export type HelperNodeRiskRequest = Partial<HelperNodeRiskChecks>;
+
+export type HelperProbeRequest = {
+  concurrency?: number;
+};
+
+export type HelperInspectionRequest = {
+  geminiLocation?: boolean;
+  nodeRisk?: HelperNodeRiskRequest;
+};
+
+export type HelperExitIpResult = {
+  status: HelperRiskCheckStatus;
+  ip: string | null;
+  port: number | null;
+  family: HelperAddressFamily | null;
+  source: string;
+  checkedAt: string;
+  error: string | null;
+};
+
+export type HelperAddressScopeKind =
+  | 'global_unicast'
+  | 'unspecified'
+  | 'private'
+  | 'shared'
+  | 'loopback'
+  | 'link_local'
+  | 'documentation'
+  | 'benchmark'
+  | 'multicast'
+  | 'reserved'
+  | 'broadcast'
+  | 'unique_local'
+  | 'ipv4_mapped'
+  | 'nat64'
+  | 'other_special';
+
+export type HelperAddressScopeResult = {
+  status: HelperRiskCheckStatus;
+  classification: HelperAddressScopeKind | null;
+  globallyReachable: boolean | null;
+  source: string;
+  checkedAt: string;
+  error: string | null;
+};
+
+export type HelperNetworkIdentityResult = {
+  status: HelperRiskCheckStatus;
+  prefix: string | null;
+  originAsns: number[];
+  source: string;
+  checkedAt: string;
+  error: string | null;
+};
+
+export type HelperRpkiValidity =
+  | 'valid'
+  | 'invalid_asn'
+  | 'invalid_length'
+  | 'unknown'
+  | 'unrouted'
+  | 'mixed';
+
+export type HelperRpkiOriginResult = {
+  asn: number;
+  checkStatus: HelperRiskCheckStatus;
+  validity: HelperRpkiValidity;
+  description: string | null;
+  error: string | null;
+};
+
+export type HelperRpkiResult = {
+  status: HelperRiskCheckStatus;
+  validity: HelperRpkiValidity | null;
+  prefix: string | null;
+  origins: HelperRpkiOriginResult[];
+  source: string;
+  checkedAt: string;
+  error: string | null;
+};
+
+export type HelperTorVerdict = 'exit' | 'relay' | 'not_detected' | 'unknown';
+
+export type HelperTorRelayEvidence = {
+  fingerprint: string;
+  nickname: string | null;
+  exitAddressMatch: boolean;
+  exitFlag: boolean;
+};
+
+export type HelperTorResult = {
+  status: HelperRiskCheckStatus;
+  verdict: HelperTorVerdict;
+  relays: HelperTorRelayEvidence[];
+  source: string;
+  checkedAt: string;
+  error: string | null;
+};
+
+export type HelperPrivacySignal =
+  | 'anonymous'
+  | 'vpn'
+  | 'proxy'
+  | 'tor'
+  | 'relay'
+  | 'hosting'
+  | 'residential_proxy';
+
+export type HelperIpPrivacyResult = {
+  status: HelperRiskCheckStatus;
+  signals: HelperPrivacySignal[];
+  service: string | null;
+  confidence: number | null;
+  firstSeen: string | null;
+  lastSeen: string | null;
+  source: string;
+  checkedAt: string;
+  error: string | null;
+};
+
+export type HelperNetworkClassVerdict =
+  | 'residential'
+  | 'data_center'
+  | 'mobile'
+  | 'business'
+  | 'other'
+  | 'mixed'
+  | 'unknown';
+
+export type HelperNetworkClassResult = {
+  status: HelperRiskCheckStatus;
+  verdict: HelperNetworkClassVerdict;
+  userType: string | null;
+  isHostingProvider: boolean | null;
+  connectionType: string | null;
+  isp: string | null;
+  organization: string | null;
+  autonomousSystemNumber: number | null;
+  network: string | null;
+  userCount: number | null;
+  source: string;
+  checkedAt: string;
+  error: string | null;
+};
+
+export type HelperAbuseVerdict = 'no_reports' | 'reported' | 'high_confidence' | 'unknown';
+
+export type HelperAbuseReputationResult = {
+  status: HelperRiskCheckStatus;
+  verdict: HelperAbuseVerdict;
+  abuseConfidenceScore: number | null;
+  totalReports: number | null;
+  distinctReporters: number | null;
+  lastReportedAt: string | null;
+  isTor: boolean | null;
+  isWhitelisted: boolean | null;
+  usageType: string | null;
+  isp: string | null;
+  countryCode: string | null;
+  source: string;
+  checkedAt: string;
+  error: string | null;
+};
+
+export type HelperNodeRiskReport = {
+  checks: HelperNodeRiskChecks;
+  exitIp: HelperExitIpResult | null;
+  addressScope: HelperAddressScopeResult | null;
+  networkIdentity: HelperNetworkIdentityResult | null;
+  networkClass: HelperNetworkClassResult | null;
+  routeSecurity: HelperRpkiResult | null;
+  tor: HelperTorResult | null;
+  privacy: HelperIpPrivacyResult | null;
+  abuse: HelperAbuseReputationResult | null;
+  assessedAt: string;
+};
+
 export type HelperNodeScoreRaw = {
   success: boolean;
   delayMs: number | null;
@@ -123,6 +338,8 @@ export type HelperNodeScoreRaw = {
   mode?: ScoreMode;
   scheme?: ScoreScheme;
   weights?: HelperScoreWeights | null;
+  geminiLocation?: HelperGeminiLocationResult | null;
+  nodeRisk?: HelperNodeRiskReport | null;
 };
 
 export type HelperNodeScore = {

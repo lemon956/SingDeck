@@ -9,6 +9,7 @@ import {
   type HelperGroupConfig,
   type HelperGroupsResponse,
   type HelperHealth,
+  type HelperInspectionRequest,
   type HelperNodeSource,
   type HelperNodeSourcesResponse,
   type HelperNetworkUsageConnections,
@@ -20,6 +21,7 @@ import {
   type HelperNetworkUsageWindow,
   type HelperNetworkUsageWindowRequest,
   type HelperProbeStatusResponse,
+  type HelperProbeRequest,
   type HelperScoresResponse,
   type HelperTestingSettings,
   type HelperTrafficSettings,
@@ -67,6 +69,7 @@ type HelperState = {
   eventStreamConnected: boolean;
   loading: boolean;
   probingGroups: string[];
+  inspectingGroups: string[];
   applyingGroups: string[];
   error: string | null;
   lastCheckedAt: string | null;
@@ -80,6 +83,8 @@ type HelperState = {
   saveDefaultTestUrl: (defaultTestUrl: string) => Promise<void>;
   saveDelayTestTimeout: (delayTestTimeoutMs: number) => Promise<void>;
   saveMinProbeInterval: (minProbeIntervalSec: number) => Promise<void>;
+  saveTestingSettings: (patch: Partial<HelperTestingSettings>) => Promise<void>;
+  saveGeminiLocationGroup: (group: string) => Promise<void>;
   saveConfigPath: () => Promise<void>;
   saveTrafficSettings: (settings: HelperTrafficSettings) => Promise<void>;
   saveNetworkUsageSettings: (settings: HelperNetworkUsageSettings) => Promise<void>;
@@ -89,6 +94,7 @@ type HelperState = {
   setEventStreamConnected: (connected: boolean) => void;
   saveGroupConfig: (group: string, config: HelperGroupConfig) => Promise<void>;
   probeGroup: (group: string, concurrency: number) => Promise<void>;
+  inspectGroup: (group: string, inspection: HelperInspectionRequest) => Promise<void>;
   loadScores: (group: string) => Promise<void>;
   applyNode: (group: string, node?: string) => Promise<void>;
   loadHelperConfigContent: () => Promise<HelperConfigResponse>;
@@ -133,6 +139,7 @@ export const useHelperStore = create<HelperState>()(
       eventStreamConnected: false,
       loading: false,
       probingGroups: [],
+      inspectingGroups: [],
       applyingGroups: [],
       error: null,
       lastCheckedAt: null,
@@ -151,6 +158,7 @@ export const useHelperStore = create<HelperState>()(
             eventStreamConnected: connectionChanged ? false : state.eventStreamConnected,
             activeProbeGroups: connectionChanged ? [] : state.activeProbeGroups,
             activeProbeNodesByGroup: connectionChanged ? {} : state.activeProbeNodesByGroup,
+            inspectingGroups: connectionChanged ? [] : state.inspectingGroups,
             nodeSources: connectionChanged ? [] : state.nodeSources,
             error: connectionChanged ? null : state.error,
             lastCheckedAt: connectionChanged ? null : state.lastCheckedAt,
@@ -251,6 +259,36 @@ export const useHelperStore = create<HelperState>()(
           set({ error: formatHelperError(error) });
         }
       },
+      saveTestingSettings: async (patch: Partial<HelperTestingSettings>) => {
+        try {
+          const current = get().testingSettings;
+          const { config } = useControllerStore.getState();
+          const defaultTestUrl = patch.defaultTestUrl ?? current?.defaultTestUrl ?? config.defaultTestUrl;
+          const delayTestTimeoutMs =
+            patch.delayTestTimeoutMs ?? current?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? 5000;
+          const minProbeIntervalSec =
+            patch.minProbeIntervalSec ?? current?.minProbeIntervalSec ?? DEFAULT_MIN_PROBE_INTERVAL_SEC;
+          const probeConcurrency =
+            patch.probeConcurrency ?? config.delayTestConcurrency ?? current?.probeConcurrency ?? DEFAULT_PROBE_CONCURRENCY;
+          const payload: HelperTestingSettings = {
+            defaultTestUrl,
+            delayTestTimeoutMs,
+            minProbeIntervalSec,
+            probeConcurrency
+          };
+          const geminiLocationGroup = patch.geminiLocationGroup ?? current?.geminiLocationGroup;
+          if (geminiLocationGroup !== undefined) {
+            payload.geminiLocationGroup = geminiLocationGroup;
+          }
+          const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', payload);
+          set({ testingSettings, error: null });
+        } catch (error) {
+          set({ error: formatHelperError(error) });
+        }
+      },
+      saveGeminiLocationGroup: async (geminiLocationGroup: string) => {
+        await get().saveTestingSettings({ geminiLocationGroup });
+      },
       saveDefaultTestUrl: async (defaultTestUrl) => {
         try {
           const { config } = useControllerStore.getState();
@@ -259,12 +297,16 @@ export const useHelperStore = create<HelperState>()(
           const minProbeIntervalSec = get().testingSettings?.minProbeIntervalSec ?? DEFAULT_MIN_PROBE_INTERVAL_SEC;
           const probeConcurrency =
             config.delayTestConcurrency ?? get().testingSettings?.probeConcurrency ?? DEFAULT_PROBE_CONCURRENCY;
-          const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', {
+          const payload: HelperTestingSettings = {
             defaultTestUrl,
             delayTestTimeoutMs,
             minProbeIntervalSec,
             probeConcurrency
-          });
+          };
+          if (get().testingSettings?.geminiLocationGroup !== undefined) {
+            payload.geminiLocationGroup = get().testingSettings?.geminiLocationGroup;
+          }
+          const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', payload);
           set({ testingSettings, error: null });
           await get().loadGroups();
         } catch (error) {
@@ -278,12 +320,16 @@ export const useHelperStore = create<HelperState>()(
           const minProbeIntervalSec = get().testingSettings?.minProbeIntervalSec ?? DEFAULT_MIN_PROBE_INTERVAL_SEC;
           const probeConcurrency =
             config.delayTestConcurrency ?? get().testingSettings?.probeConcurrency ?? DEFAULT_PROBE_CONCURRENCY;
-          const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', {
+          const payload: HelperTestingSettings = {
             defaultTestUrl,
             delayTestTimeoutMs,
             minProbeIntervalSec,
             probeConcurrency
-          });
+          };
+          if (get().testingSettings?.geminiLocationGroup !== undefined) {
+            payload.geminiLocationGroup = get().testingSettings?.geminiLocationGroup;
+          }
+          const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', payload);
           set({ testingSettings, error: null });
         } catch (error) {
           set({ error: formatHelperError(error) });
@@ -297,12 +343,16 @@ export const useHelperStore = create<HelperState>()(
             get().testingSettings?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? 5000;
           const probeConcurrency =
             config.delayTestConcurrency ?? get().testingSettings?.probeConcurrency ?? DEFAULT_PROBE_CONCURRENCY;
-          const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', {
+          const payload: HelperTestingSettings = {
             defaultTestUrl,
             delayTestTimeoutMs,
             minProbeIntervalSec,
             probeConcurrency
-          });
+          };
+          if (get().testingSettings?.geminiLocationGroup !== undefined) {
+            payload.geminiLocationGroup = get().testingSettings?.geminiLocationGroup;
+          }
+          const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', payload);
           set({ testingSettings, error: null });
           await get().loadGroups();
         } catch (error) {
@@ -468,9 +518,10 @@ export const useHelperStore = create<HelperState>()(
           startActiveProbePolling();
         }
         try {
+          const request: HelperProbeRequest = { concurrency };
           const response = await client().postJson<HelperScoresResponse>(
             `/api/v1/groups/${encodeURIComponent(group)}/probe`,
-            { concurrency }
+            request
           );
           if (useHttpProbePolling) {
             await stopActiveProbePolling();
@@ -495,6 +546,28 @@ export const useHelperStore = create<HelperState>()(
             clearInterval(activeProbeTimer);
             activeProbeTimer = null;
           }
+        }
+      },
+      inspectGroup: async (group, inspection) => {
+        set((state) => ({
+          error: null,
+          inspectingGroups: Array.from(new Set([...state.inspectingGroups, group]))
+        }));
+        try {
+          const response = await client().postJson<HelperScoresResponse>(
+            `/api/v1/groups/${encodeURIComponent(group)}/inspection`,
+            inspection
+          );
+          set((state) => ({
+            scoresByGroup: { ...state.scoresByGroup, [group]: response },
+            inspectingGroups: state.inspectingGroups.filter((item) => item !== group),
+            error: response.applyError
+          }));
+        } catch (error) {
+          set((state) => ({
+            inspectingGroups: state.inspectingGroups.filter((item) => item !== group),
+            error: formatHelperError(error)
+          }));
         }
       },
       loadScores: async (group) => {
@@ -691,6 +764,7 @@ function helperUnavailablePatch(error: string): Partial<HelperState> {
     activeProbeGroups: [],
     activeProbeNodesByGroup: {},
     probingGroups: [],
+    inspectingGroups: [],
     error,
     lastCheckedAt: new Date().toISOString()
   };

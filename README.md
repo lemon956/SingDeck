@@ -192,12 +192,59 @@ The packaged systemd units run as root by default so the helper can read root-ow
 | `SINGDECK_HELPER_BIND` | `0.0.0.0:9531` | Address and port for the helper HTTP API. Use `127.0.0.1:9531` for local-only access. |
 | `SINGDECK_HELPER_DB` | `singdeck-helper.db` | SQLite state database path. Store it outside the git checkout in deployed environments. |
 | `SINGDECK_HELPER_PUBLIC_URL` | unset | Public base URL used to build `/api/v1/config/raw` links for remote profile import. |
+| `SINGDECK_PROXYCHECK_KEY` | unset | Optional proxycheck.io key. Residential/data-center detection works without it; a free key raises the provider request allowance. |
+| `SINGDECK_IPINFO_TOKEN` | unset | Optional IPinfo Privacy Detection API token. An unset token is reported as `not_configured`, never as a clean result. |
+| `SINGDECK_ABUSEIPDB_KEY` | unset | Optional AbuseIPDB API key. An unset key is reported as `not_configured`, never as a no-reports result. |
 
 The helper database stores controller settings, secrets, group settings, scheduled probe timestamps, and probe samples. Do not commit it and do not share it as a deployment artifact.
 
+### Gemini Location and Node Inspection Parameters
+
+Choose the one Selector group allowed to run the Gemini location probe with `geminiLocationGroup` in Settings. The selected group's sidebar stores `geminiLocationProbeEnabled`; Gemini controls and results are hidden from every other group. No group name is built into this behavior.
+
+Gemini location probes always use the Google login stored in the Chrome profile selected by `Chrome profile (Gemini / Provider)` in Settings. There is no anonymous first request and no Chrome fallback switch. Provider Traffic does not need to be enabled for this profile to be used. After selecting each node, the helper loads `https://gemini.google.com/app` with the Chrome cookies and UA, extracts the fresh `at`, `f.sid`, and `bl` values, then calls `K4WWud` through the same node and temporary cookie session. Dynamic session values are neither persisted nor logged and are never reused across nodes.
+
+An unconfigured profile, missing or undecryptable Google account cookies, or an expired login produces `auth_error`. The helper never falls back to an anonymous location request, and one optional inspection failure does not stop the other selected inspections. Legacy anonymous Gemini results are hidden until an authenticated inspection replaces them.
+
+Speed probes and egress inspections are separate operations. `POST /api/v1/groups/<group>/probe` accepts only the speed-probe concurrency and never reads saved inspection switches or runs Gemini, exit-IP, or network-class detection:
+
+```json
+{
+  "concurrency": 4
+}
+```
+
+The sidebar's “Run egress inspection” button calls `POST /api/v1/groups/<group>/inspection`. Only this endpoint invokes the explicitly selected detector modules:
+
+```json
+{
+  "geminiLocation": true,
+  "nodeRisk": {
+    "exitIp": true,
+    "addressScope": false,
+    "networkIdentity": false,
+    "networkClass": true,
+    "routeSecurity": false,
+    "tor": false,
+    "privacy": false,
+    "abuse": false
+  }
+}
+```
+
+`geminiLocation: true` is accepted only for the group selected in Settings. Every IP-dependent node check requires `exitIp: true`; invalid combinations return HTTP 400 instead of silently enabling another detector. Unselected results are `null` under `nodes[].raw.nodeRisk`, while the report's `checks` object records the exact selection. Scheduled and failure-triggered probes remain speed-only and never invoke an inspection implicitly.
+
+The helper logs `inspection start/complete` for each run and emits one `Gemini location result` or `node risk result` JSON line per node. These lines contain statuses, results, and sanitized error context, but never Cookie values or the dynamic `at`, `f.sid`, and `bl` session parameters. Follow them with `journalctl -u singdeck-helper.service -f`.
+
+Exit IP observation uses Google STUN. The helper switches the Selector before each node probe, but sing-box routing must still send `stun.l.google.com:19302` through that Selector. If another route captures STUN, the observed address belongs to that route and must not be treated as an authoritative classification of the selected node.
+
+`networkClass` first asks proxycheck.io and falls back to ipquery.io without requiring a key. It reports `residential` only from proxycheck.io's explicit `Residential` network type. Explicit hosting, wireless, and business evidence maps to `data_center`, `mobile`, and `business`; conflicting residential and hosting evidence is `mixed`. ipquery.io can confirm data-center or mobile evidence, but a negative result remains `unknown` and is never promoted to residential. This detector does not reuse privacy, reputation, BGP, or Tor results.
+
+If Gemini redirects the Chrome-authenticated request to `/sorry/`, SingDeck reports `anti_abuse_challenge`. This proves that Google applied an anti-abuse challenge to that request, not that SingDeck has classified the node as malicious. Google does not expose the exact matched rule; shared-exit request volume, automation characteristics, account-session/IP mismatch, or IP reputation can all contribute.
+
 ## Provider Traffic
 
-Provider Traffic is optional and is disabled by default. Enable it in Settings, then set the Chrome profile directory used for provider sessions, for example:
+Provider Traffic is optional and is disabled by default. The Chrome profile in Settings is shared by authenticated Gemini probes and Provider Traffic, and remains usable by Gemini while Provider Traffic is disabled. Enable Provider Traffic only when provider usage synchronization is wanted, for example:
 
 ```text
 /home/alice/.config/google-chrome/Default
@@ -246,6 +293,7 @@ Expected response fields include `ok`, `sqlite`, `controllerConfigured`, and `co
 - Controller is configured but unreachable: confirm the URL is reachable from the browser for frontend-only features, and from the helper host for helper features.
 - Config workspace cannot read the file: set the config path in Settings and make sure the helper process user can read it.
 - Scores do not appear: sync the controller to the helper, then load groups or manually probe a group.
+- Gemini reports that the Chrome Google login is unavailable: point Settings at the Chrome profile currently signed in to Google/Gemini, open Gemini with that same profile to refresh the login, and make sure the helper can read the Cookies database and the unlocked system keyring.
 - Provider Traffic is hidden: enable it in Settings.
 - Traffic workspace shows provider errors: check the Chrome profile path in Settings and make sure WD Gold and XNYun sessions exist in that Chrome profile.
 - WD Gold shows stale data: the WD login session or Cloudflare verification is usually expired. Open WD Gold with the same Chrome profile, log in or pass verification again, then click Sync in Overview.

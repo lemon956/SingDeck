@@ -30,7 +30,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
+mod gemini_location;
 mod network_usage;
+mod node_risk;
 mod traffic;
 
 const DEFAULT_BIND: &str = "0.0.0.0:9531";
@@ -66,6 +68,11 @@ const NODE_SOURCE_RESYNC_INTERVAL_SECS: u64 = 30 * 60;
 // are retried promptly (at startup and each periodic cycle).
 const NODE_SOURCE_SUCCESS_TTL_MS: i64 = 6 * 60 * 60 * 1000;
 const NODE_SOURCE_FETCH_USER_AGENT: &str = "SingDeck-helper/0.1.0";
+const SELECTOR_RESTORE_ATTEMPTS: usize = 3;
+const SELECTOR_RESTORE_RETRY_MS: u64 = 100;
+const NODE_RISK_PROVIDER_TIMEOUT_MS: u64 = 8_000;
+
+static SELECTOR_SWEEP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone)]
 struct AppState {
@@ -283,6 +290,10 @@ struct GroupConfig {
     auto_switch: bool,
     auto_probe: bool,
     probe_interval_sec: i64,
+    #[serde(default)]
+    gemini_location_probe_enabled: bool,
+    #[serde(default)]
+    node_risk: node_risk::types::NodeRiskChecks,
 }
 
 impl Default for GroupConfig {
@@ -295,6 +306,8 @@ impl Default for GroupConfig {
             auto_switch: false,
             auto_probe: true,
             probe_interval_sec: DEFAULT_PROBE_INTERVAL_SEC,
+            gemini_location_probe_enabled: false,
+            node_risk: node_risk::types::NodeRiskChecks::default(),
         }
     }
 }
@@ -309,6 +322,8 @@ impl GroupConfig {
             auto_switch: false,
             auto_probe: true,
             probe_interval_sec: DEFAULT_PROBE_INTERVAL_SEC,
+            gemini_location_probe_enabled: false,
+            node_risk: node_risk::types::NodeRiskChecks::default(),
         }
     }
 }
@@ -327,9 +342,17 @@ enum ScoreScheme {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProbeRequest {
     concurrency: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InspectionRequest {
+    #[serde(default)]
+    gemini_location: Option<bool>,
+    node_risk: Option<node_risk::types::NodeRiskChecks>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -348,6 +371,8 @@ struct TestingSettings {
     min_probe_interval_sec: i64,
     #[serde(default = "default_probe_concurrency")]
     probe_concurrency: usize,
+    #[serde(default)]
+    gemini_location_group: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,6 +382,7 @@ struct TestingSettingsInput {
     delay_test_timeout_ms: Option<i64>,
     min_probe_interval_sec: Option<i64>,
     probe_concurrency: Option<usize>,
+    gemini_location_group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -576,6 +602,10 @@ struct NodeScoreRaw {
     scheme: Option<String>,
     #[serde(default)]
     weights: Option<ScoreWeights>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gemini_location: Option<gemini_location::GeminiLocationResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node_risk: Option<node_risk::types::NodeRiskReport>,
 }
 
 fn default_node_score_raw() -> NodeScoreRaw {
@@ -724,6 +754,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/probes", get(active_probes))
         .route("/api/v1/groups/:group/config", put(save_group_config))
         .route("/api/v1/groups/:group/probe", post(probe_group))
+        .route("/api/v1/groups/:group/inspection", post(inspect_group))
         .route("/api/v1/groups/:group/scores", get(group_scores))
         .route("/api/v1/groups/:group/apply", post(apply_group))
         .route("/api/v1/config", get(read_config))
@@ -798,6 +829,20 @@ fn init_db(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_probe_group_node_time
           ON probe_samples(group_name, node_name, tested_at_ms);
+        CREATE TABLE IF NOT EXISTS gemini_location_results (
+          group_name TEXT NOT NULL,
+          node_name TEXT NOT NULL,
+          result_json TEXT NOT NULL,
+          tested_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (group_name, node_name)
+        );
+        CREATE TABLE IF NOT EXISTS node_risk_results (
+          group_name TEXT NOT NULL,
+          node_name TEXT NOT NULL,
+          result_json TEXT NOT NULL,
+          assessed_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (group_name, node_name)
+        );
         CREATE TABLE IF NOT EXISTS node_sources (
           name TEXT PRIMARY KEY,
           url TEXT NOT NULL,
@@ -831,6 +876,18 @@ fn init_db(conn: &Connection) -> Result<()> {
         "group_configs",
         "probe_interval_sec",
         "ALTER TABLE group_configs ADD COLUMN probe_interval_sec INTEGER NOT NULL DEFAULT 900",
+    )?;
+    add_column_if_missing(
+        conn,
+        "group_configs",
+        "gemini_location_probe_enabled",
+        "ALTER TABLE group_configs ADD COLUMN gemini_location_probe_enabled INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
+        "group_configs",
+        "node_risk_json",
+        "ALTER TABLE group_configs ADD COLUMN node_risk_json TEXT NOT NULL DEFAULT '{}'",
     )?;
     Ok(())
 }
@@ -907,6 +964,7 @@ async fn testing_settings(
         delay_test_timeout_ms: load_delay_test_timeout_ms(&state)?,
         min_probe_interval_sec: load_min_probe_interval_sec(&state)?,
         probe_concurrency: load_probe_concurrency(&state)?,
+        gemini_location_group: load_gemini_location_group(&state)?,
     }))
 }
 
@@ -931,6 +989,10 @@ async fn save_testing_settings(
             .probe_concurrency
             .unwrap_or_else(|| load_probe_concurrency(&state).unwrap_or(DEFAULT_PROBE_CONCURRENCY)),
     );
+    let gemini_location_group = input
+        .gemini_location_group
+        .map(|value| value.trim().to_string())
+        .unwrap_or_else(|| load_gemini_location_group(&state).unwrap_or_default());
     save_string_kv(&state, "default_test_url", default_test_url)?;
     save_string_kv(
         &state,
@@ -947,11 +1009,17 @@ async fn save_testing_settings(
         "probe_concurrency",
         &probe_concurrency.to_string(),
     )?;
+    save_string_kv(
+        &state,
+        "gemini_location_group",
+        &gemini_location_group,
+    )?;
     Ok(Json(TestingSettings {
         default_test_url: default_test_url.to_string(),
         delay_test_timeout_ms,
         min_probe_interval_sec,
         probe_concurrency,
+        gemini_location_group,
     }))
 }
 
@@ -1222,6 +1290,7 @@ async fn save_group_config(
     Json(config): Json<GroupConfig>,
 ) -> Result<Json<GroupConfig>, AppError> {
     let mut normalized = config;
+    validate_node_risk_checks(normalized.node_risk)?;
     normalized.probe_interval_sec = normalize_probe_interval_with_min(
         normalized.probe_interval_sec,
         load_min_probe_interval_sec(&state)?,
@@ -1235,10 +1304,101 @@ async fn probe_group(
     AxumPath(group): AxumPath<String>,
     Json(request): Json<ProbeRequest>,
 ) -> Result<Json<ScoresResponse>, AppError> {
-    let concurrency = normalize_probe_concurrency(request.concurrency.unwrap_or(DEFAULT_PROBE_CONCURRENCY));
+    let concurrency =
+        normalize_probe_concurrency(request.concurrency.unwrap_or(DEFAULT_PROBE_CONCURRENCY));
     Ok(Json(
         probe_group_internal(&state, &group, concurrency, true).await?,
     ))
+}
+
+async fn inspect_group(
+    State(state): State<AppState>,
+    AxumPath(group): AxumPath<String>,
+    Json(request): Json<InspectionRequest>,
+) -> Result<Json<ScoresResponse>, AppError> {
+    let gemini_location = request.gemini_location.unwrap_or(false);
+    let node_risk = request.node_risk.unwrap_or_default();
+    if !gemini_location && !node_risk.any() {
+        return Err(AppError::bad_request(
+            "inspection must enable geminiLocation or at least one nodeRisk check",
+        ));
+    }
+    if gemini_location && load_gemini_location_group(&state)? != group {
+        return Err(AppError::bad_request(
+            "geminiLocation is only allowed for the strategy group selected in Settings",
+        ));
+    }
+    validate_node_risk_checks(node_risk)?;
+
+    let controller = load_controller(&state)?;
+    let proxies = fetch_proxies(&state, &controller).await?;
+    let proxy_map = proxy_map(&proxies);
+    let group_proxy = proxy_map
+        .get(&group)
+        .ok_or_else(|| AppError::bad_request(format!("group not found: {group}")))?;
+    if !is_switchable_kind(&group_proxy.kind) {
+        return Err(AppError::bad_request(format!(
+            "{} is {}, but inspection requires a Selector group",
+            group_proxy.name, group_proxy.kind
+        )));
+    }
+
+    let timeout_ms = load_delay_test_timeout_ms(&state)?;
+    let checks_json = serde_json::to_string(&node_risk).unwrap_or_else(|_| "{}".to_string());
+    eprintln!(
+        "singdeck-helper: inspection start group={group:?} nodes={} gemini_location={gemini_location} node_risk={checks_json}",
+        group_proxy.all.len()
+    );
+    if gemini_location {
+        probe_and_save_gemini_locations(&state, &controller, &group, &group_proxy.all, timeout_ms)
+            .await;
+    }
+    if node_risk.any() {
+        probe_and_save_node_risks(
+            &state,
+            &controller,
+            &group,
+            &group_proxy.all,
+            timeout_ms,
+            node_risk,
+        )
+        .await;
+    }
+
+    let config = load_group_config(&state, &group)?;
+    let mut scores = compute_scores_for_group(&state, &group, &group_proxy.all, &config)?;
+    if gemini_location {
+        for score in &mut scores {
+            score.raw.gemini_location = load_gemini_location_result(&state, &group, &score.name)?;
+        }
+    }
+    let response = ScoresResponse {
+        group: group.clone(),
+        mode: config.mode,
+        scheme: config.scheme,
+        test_url: config.test_url,
+        recommended: recommended_node(&scores),
+        apply_error: None,
+        nodes: scores,
+    };
+    publish_helper_event(
+        &state,
+        HelperEvent::ProbeScores {
+            scores: response.clone(),
+            partial: false,
+        },
+    );
+    eprintln!("singdeck-helper: inspection complete group={group:?}");
+    Ok(Json(response))
+}
+
+fn validate_node_risk_checks(checks: node_risk::types::NodeRiskChecks) -> Result<(), AppError> {
+    if checks.any_ip_dependent() && !checks.exit_ip {
+        return Err(AppError::bad_request(
+            "nodeRisk.exitIp must be true when any IP-dependent nodeRisk check is enabled",
+        ));
+    }
+    Ok(())
 }
 
 async fn group_scores(
@@ -1973,8 +2133,16 @@ async fn probe_group_internal(
         return Ok(response);
     }
 
-    let run_status =
-        probe_group_nodes(state, &controller, group, group_proxy, &config, concurrency, &proxy_map).await?;
+    let run_status = probe_group_nodes(
+        state,
+        &controller,
+        group,
+        group_proxy,
+        &config,
+        concurrency,
+        &proxy_map,
+    )
+    .await?;
     if run_status == ProbeRunStatus::Skipped {
         let scores = compute_scores_for_group(state, group, &group_proxy.all, &config)?;
         return Ok(ScoresResponse {
@@ -2135,6 +2303,436 @@ fn spawn_probe_workers(
 enum ProbeRunStatus {
     Ran,
     Skipped,
+}
+
+#[derive(Debug)]
+struct GeminiLocationSweep {
+    results: Vec<(String, gemini_location::GeminiLocationResult)>,
+    restore_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct NodeRiskSweep {
+    results: Vec<(String, node_risk::types::NodeRiskReport)>,
+    restore_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct GeminiChromeCredentials {
+    cookie_header: String,
+    user_agent: String,
+}
+
+async fn run_gemini_location_sweep(
+    state: &AppState,
+    controller: &ControllerConfig,
+    group: &str,
+    nodes: &[String],
+    timeout_ms: i64,
+) -> Result<GeminiLocationSweep> {
+    run_gemini_location_sweep_at_urls(
+        state,
+        controller,
+        group,
+        nodes,
+        timeout_ms,
+        gemini_location::GEMINI_APP_URL,
+        gemini_location::GEMINI_BATCH_URL,
+    )
+    .await
+}
+
+async fn run_gemini_location_sweep_at_urls(
+    state: &AppState,
+    controller: &ControllerConfig,
+    group: &str,
+    nodes: &[String],
+    timeout_ms: i64,
+    app_url: &str,
+    batch_url: &str,
+) -> Result<GeminiLocationSweep> {
+    let chrome_credentials = match load_gemini_chrome_credentials(state) {
+        Ok(credentials) => credentials,
+        Err(error) => return Ok(gemini_auth_error_sweep(nodes, error.to_string())),
+    };
+    if let Err(error) = gemini_location::validate_chrome_session(
+        &chrome_credentials.cookie_header,
+        &chrome_credentials.user_agent,
+    ) {
+        return Ok(gemini_auth_error_sweep(nodes, error.to_string()));
+    }
+
+    let _sweep_guard = SELECTOR_SWEEP_LOCK.lock().await;
+    let group_proxy = load_proxy_view(state, controller, group).await?;
+    if !is_switchable_kind(&group_proxy.kind) {
+        return Err(anyhow!(
+            "{} is {}, but Gemini location probing requires a Selector group",
+            group_proxy.name,
+            group_proxy.kind
+        ));
+    }
+    if group_proxy.now.trim().is_empty() {
+        return Err(anyhow!("{} has no selected node to restore", group_proxy.name));
+    }
+    let original_node = group_proxy.now;
+    let mut results = Vec::with_capacity(nodes.len());
+
+    for node in nodes {
+        let selected = select_proxy_node(state, controller, group, node).await;
+        if let Err(error) = selected {
+            results.push((
+                node.clone(),
+                gemini_location::GeminiLocationResult::failure(
+                    gemini_location::GeminiLocationStatus::RoutingError,
+                    gemini_location::GeminiAuthMode::Chrome,
+                    format!("select Gemini node: {error}"),
+                ),
+            ));
+            continue;
+        }
+
+        let result = gemini_location::query_authenticated_location_at_urls(
+            timeout_ms,
+            &chrome_credentials.cookie_header,
+            &chrome_credentials.user_agent,
+            app_url,
+            batch_url,
+        )
+        .await;
+        results.push((node.clone(), result));
+    }
+
+    let restore_error =
+        restore_proxy_node_with_retries(state, controller, group, &original_node).await;
+    Ok(GeminiLocationSweep {
+        results,
+        restore_error,
+    })
+}
+
+fn gemini_auth_error_sweep(nodes: &[String], error: String) -> GeminiLocationSweep {
+    GeminiLocationSweep {
+        results: nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.clone(),
+                    gemini_location::GeminiLocationResult::failure(
+                        gemini_location::GeminiLocationStatus::AuthError,
+                        gemini_location::GeminiAuthMode::Chrome,
+                        error.clone(),
+                    ),
+                )
+            })
+            .collect(),
+        restore_error: None,
+    }
+}
+
+async fn restore_proxy_node_with_retries(
+    state: &AppState,
+    controller: &ControllerConfig,
+    group: &str,
+    original_node: &str,
+) -> Option<String> {
+    let mut restore_error = None;
+    for attempt in 1..=SELECTOR_RESTORE_ATTEMPTS {
+        match select_proxy_node(state, controller, group, original_node).await {
+            Ok(()) => return None,
+            Err(error) => {
+                restore_error = Some(error.to_string());
+                if attempt < SELECTOR_RESTORE_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(SELECTOR_RESTORE_RETRY_MS)).await;
+                }
+            }
+        }
+    }
+    restore_error
+}
+
+async fn run_node_risk_sweep(
+    state: &AppState,
+    controller: &ControllerConfig,
+    group: &str,
+    nodes: &[String],
+    timeout_ms: i64,
+    checks: node_risk::types::NodeRiskChecks,
+    provider_config: &node_risk::ProviderConfig,
+) -> Result<NodeRiskSweep> {
+    let _sweep_guard = SELECTOR_SWEEP_LOCK.lock().await;
+    let group_proxy = load_proxy_view(state, controller, group).await?;
+    if !is_switchable_kind(&group_proxy.kind) {
+        return Err(anyhow!(
+            "{} is {}, but node risk probing requires a Selector group",
+            group_proxy.name,
+            group_proxy.kind
+        ));
+    }
+    if group_proxy.now.trim().is_empty() {
+        return Err(anyhow!("{} has no selected node to restore", group_proxy.name));
+    }
+
+    let original_node = group_proxy.now;
+    let mut results = Vec::with_capacity(nodes.len());
+    let stun_timeout = Duration::from_millis(normalize_delay_test_timeout(timeout_ms) as u64);
+    let provider_timeout = Duration::from_millis(NODE_RISK_PROVIDER_TIMEOUT_MS);
+    for node in nodes {
+        match select_proxy_node(state, controller, group, node).await {
+            Ok(()) => {
+                let report = node_risk::assess_selected_node(
+                    &state.http,
+                    stun_timeout,
+                    provider_timeout,
+                    checks,
+                    provider_config,
+                )
+                .await;
+                results.push((node.clone(), report));
+            }
+            Err(error) => results.push((
+                node.clone(),
+                node_risk::routing_error_report(
+                    format!("select node for risk probe: {error}"),
+                    checks,
+                    provider_config,
+                ),
+            )),
+        }
+    }
+
+    let restore_error =
+        restore_proxy_node_with_retries(state, controller, group, &original_node).await;
+    Ok(NodeRiskSweep {
+        results,
+        restore_error,
+    })
+}
+
+async fn probe_and_save_node_risks(
+    state: &AppState,
+    controller: &ControllerConfig,
+    group: &str,
+    nodes: &[String],
+    timeout_ms: i64,
+    checks: node_risk::types::NodeRiskChecks,
+) {
+    if !checks.any() {
+        return;
+    }
+    let provider_config = node_risk::ProviderConfig::from_env();
+    match run_node_risk_sweep(
+        state,
+        controller,
+        group,
+        nodes,
+        timeout_ms,
+        checks,
+        &provider_config,
+    )
+    .await
+    {
+        Ok(sweep) => {
+            for (node, result) in sweep.results {
+                log_node_risk_result(group, &node, &result);
+                if let Err(error) = save_node_risk_result(state, group, &node, &result, now_ms()) {
+                    report_node_risk_error(
+                        state,
+                        format!("save {node} risk result: {error}"),
+                    );
+                }
+            }
+            if let Some(error) = sweep.restore_error {
+                report_node_risk_error(
+                    state,
+                    format!("restore original {group} node: {error}"),
+                );
+            }
+        }
+        Err(error) => {
+            let error = format!("run {group} risk sweep: {error}");
+            report_node_risk_error(state, error.clone());
+            for node in nodes {
+                let result = node_risk::routing_error_report(
+                    error.clone(),
+                    checks,
+                    &provider_config,
+                );
+                log_node_risk_result(group, node, &result);
+                if let Err(save_error) =
+                    save_node_risk_result(state, group, node, &result, now_ms())
+                {
+                    report_node_risk_error(
+                        state,
+                        format!("save {node} routing error: {save_error}"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn log_node_risk_result(group: &str, node: &str, result: &node_risk::types::NodeRiskReport) {
+    match serde_json::to_string(result) {
+        Ok(result_json) => eprintln!(
+            "singdeck-helper: node risk result group={group:?} node={node:?} result={result_json}"
+        ),
+        Err(error) => eprintln!(
+            "singdeck-helper: node risk result group={group:?} node={node:?} serialization_error={error:?}"
+        ),
+    }
+}
+
+fn report_node_risk_error(state: &AppState, message: String) {
+    eprintln!("singdeck-helper: node risk probe: {message}");
+    publish_helper_event(
+        state,
+        HelperEvent::Error {
+            scope: "node_risk".to_string(),
+            message,
+        },
+    );
+}
+
+async fn probe_and_save_gemini_locations(
+    state: &AppState,
+    controller: &ControllerConfig,
+    group: &str,
+    nodes: &[String],
+    timeout_ms: i64,
+) {
+    match load_gemini_location_group(state) {
+        Ok(configured_group) if configured_group == group => {}
+        Ok(_) => return,
+        Err(error) => {
+            report_gemini_location_error(state, format!("load configured group: {error}"));
+            return;
+        }
+    }
+
+    match run_gemini_location_sweep(state, controller, group, nodes, timeout_ms).await {
+        Ok(sweep) => {
+            for (node, result) in sweep.results {
+                log_gemini_location_result(group, &node, &result);
+                if let Err(error) =
+                    save_gemini_location_result(state, group, &node, &result, now_ms())
+                {
+                    report_gemini_location_error(
+                        state,
+                        format!("save {node} location result: {error}"),
+                    );
+                }
+            }
+            if let Some(error) = sweep.restore_error {
+                report_gemini_location_error(
+                    state,
+                    format!("restore original {group} node: {error}"),
+                );
+            }
+        }
+        Err(error) => {
+            let error = format!("run {group} location sweep: {error}");
+            report_gemini_location_error(state, error.clone());
+            for node in nodes {
+                let result = gemini_location::GeminiLocationResult::failure(
+                    gemini_location::GeminiLocationStatus::RoutingError,
+                    gemini_location::GeminiAuthMode::Chrome,
+                    error.clone(),
+                );
+                log_gemini_location_result(group, node, &result);
+                if let Err(save_error) =
+                    save_gemini_location_result(state, group, node, &result, now_ms())
+                {
+                    report_gemini_location_error(
+                        state,
+                        format!("save {node} routing error: {save_error}"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn log_gemini_location_result(
+    group: &str,
+    node: &str,
+    result: &gemini_location::GeminiLocationResult,
+) {
+    match serde_json::to_string(result) {
+        Ok(result_json) => eprintln!(
+            "singdeck-helper: Gemini location result group={group:?} node={node:?} result={result_json}"
+        ),
+        Err(error) => eprintln!(
+            "singdeck-helper: Gemini location result group={group:?} node={node:?} serialization_error={error:?}"
+        ),
+    }
+}
+
+fn report_gemini_location_error(state: &AppState, message: String) {
+    eprintln!("singdeck-helper: Gemini location probe: {message}");
+    publish_helper_event(
+        state,
+        HelperEvent::Error {
+            scope: "gemini_location".to_string(),
+            message,
+        },
+    );
+}
+
+fn load_gemini_chrome_credentials(state: &AppState) -> Result<GeminiChromeCredentials> {
+    let settings = load_traffic_settings(state)?;
+    let profile = traffic::chrome_profile_path(&settings.browser_profile);
+    if profile.as_os_str().is_empty() {
+        return Err(anyhow!("Chrome profile is not configured in Settings"));
+    }
+    let cookie_header = traffic::read_chrome_cookie_header(&profile, gemini_location::GEMINI_HOST)?;
+    let user_agent = traffic::chrome_profile_user_agent(&profile);
+    Ok(GeminiChromeCredentials {
+        cookie_header,
+        user_agent,
+    })
+}
+
+async fn load_proxy_view(
+    state: &AppState,
+    controller: &ControllerConfig,
+    group: &str,
+) -> Result<ProxyView> {
+    let proxies = fetch_proxies(state, controller).await?;
+    proxy_map(&proxies)
+        .remove(group)
+        .ok_or_else(|| anyhow!("group not found: {group}"))
+}
+
+async fn select_proxy_node(
+    state: &AppState,
+    controller: &ControllerConfig,
+    group: &str,
+    target: &str,
+) -> Result<()> {
+    let current = load_proxy_view(state, controller, group).await?;
+    if !is_switchable_kind(&current.kind) {
+        return Err(anyhow!("{group} is {}, not Selector", current.kind));
+    }
+    if current.now != target {
+        controller_put(
+            state,
+            controller,
+            &format!("/proxies/{}", url_encode(group)),
+            &serde_json::json!({ "name": target }),
+        )
+        .await?;
+    }
+
+    for attempt in 0..3 {
+        let selected = load_proxy_view(state, controller, group).await?.now;
+        if selected == target {
+            return Ok(());
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    Err(anyhow!("{group} did not select {target}"))
 }
 
 async fn apply_recommended_node(
@@ -2517,7 +3115,9 @@ async fn observe_failed_request_logs(
 
         save_string_kv(state, &last_key, &now.to_string())?;
         let probe_concurrency = load_probe_concurrency(state)?;
-        if let Err(error) = probe_group_internal(state, &group.name, probe_concurrency, true).await {
+        if let Err(error) =
+            probe_group_internal(state, &group.name, probe_concurrency, true).await
+        {
             eprintln!("request-failure probe failed for {}: {error}", group.name);
         }
     }
@@ -3089,6 +3689,12 @@ fn load_probe_concurrency(state: &AppState) -> Result<usize> {
         .unwrap_or(DEFAULT_PROBE_CONCURRENCY))
 }
 
+fn load_gemini_location_group(state: &AppState) -> Result<String> {
+    Ok(load_string_kv(state, "gemini_location_group")?
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default())
+}
+
 fn default_traffic_settings() -> TrafficSettings {
     TrafficSettings {
         enabled: false,
@@ -3129,13 +3735,14 @@ fn load_group_config(state: &AppState, group: &str) -> Result<GroupConfig> {
         .map_err(|_| anyhow!("database lock poisoned"))?;
     let row = db
         .query_row(
-            "SELECT test_url, test_url_overridden, mode, scheme, auto_switch, auto_probe, probe_interval_sec FROM group_configs WHERE group_name = ?1",
+            "SELECT test_url, test_url_overridden, mode, scheme, auto_switch, auto_probe, probe_interval_sec, gemini_location_probe_enabled, node_risk_json FROM group_configs WHERE group_name = ?1",
             params![group],
             |row| {
                 let raw_test_url: String = row.get(0)?;
                 let test_url_overridden = row.get::<_, i64>(1)? != 0;
                 let probe_interval_sec =
                     normalize_probe_interval_with_min(row.get::<_, i64>(6)?, min_probe_interval_sec);
+                let node_risk_json = row.get::<_, String>(8)?;
                 Ok(GroupConfig {
                     test_url: if test_url_overridden {
                         raw_test_url
@@ -3148,6 +3755,8 @@ fn load_group_config(state: &AppState, group: &str) -> Result<GroupConfig> {
                     auto_switch: row.get::<_, i64>(4)? != 0,
                     auto_probe: row.get::<_, i64>(5)? != 0,
                     probe_interval_sec,
+                    gemini_location_probe_enabled: row.get::<_, i64>(7)? != 0,
+                    node_risk: serde_json::from_str(&node_risk_json).unwrap_or_default(),
                 })
             },
         )
@@ -3157,14 +3766,15 @@ fn load_group_config(state: &AppState, group: &str) -> Result<GroupConfig> {
 
 fn save_group_config_row(state: &AppState, group: &str, config: &GroupConfig) -> Result<()> {
     let min_probe_interval_sec = load_min_probe_interval_sec(state)?;
+    let node_risk_json = serde_json::to_string(&config.node_risk)?;
     let db = state
         .db
         .lock()
         .map_err(|_| anyhow!("database lock poisoned"))?;
     db.execute(
         r#"
-        INSERT INTO group_configs(group_name, test_url, test_url_overridden, mode, scheme, auto_switch, auto_probe, probe_interval_sec)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        INSERT INTO group_configs(group_name, test_url, test_url_overridden, mode, scheme, auto_switch, auto_probe, probe_interval_sec, gemini_location_probe_enabled, node_risk_json)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ON CONFLICT(group_name) DO UPDATE SET
           test_url = excluded.test_url,
           test_url_overridden = excluded.test_url_overridden,
@@ -3172,7 +3782,9 @@ fn save_group_config_row(state: &AppState, group: &str, config: &GroupConfig) ->
           scheme = excluded.scheme,
           auto_switch = excluded.auto_switch,
           auto_probe = excluded.auto_probe,
-          probe_interval_sec = excluded.probe_interval_sec
+          probe_interval_sec = excluded.probe_interval_sec,
+          gemini_location_probe_enabled = excluded.gemini_location_probe_enabled,
+          node_risk_json = excluded.node_risk_json
         "#,
         params![
             group,
@@ -3182,7 +3794,9 @@ fn save_group_config_row(state: &AppState, group: &str, config: &GroupConfig) ->
             scheme_name(config.scheme),
             if config.auto_switch { 1 } else { 0 },
             if config.auto_probe { 1 } else { 0 },
-            normalize_probe_interval_with_min(config.probe_interval_sec, min_probe_interval_sec)
+            normalize_probe_interval_with_min(config.probe_interval_sec, min_probe_interval_sec),
+            if config.gemini_location_probe_enabled { 1 } else { 0 },
+            node_risk_json
         ],
     )?;
     Ok(())
@@ -3220,12 +3834,118 @@ fn save_probe_sample(
     Ok(())
 }
 
+fn save_gemini_location_result(
+    state: &AppState,
+    group: &str,
+    node: &str,
+    result: &gemini_location::GeminiLocationResult,
+    tested_at_ms: i64,
+) -> Result<()> {
+    let result_json = serde_json::to_string(result)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| anyhow!("database lock poisoned"))?;
+    db.execute(
+        r#"
+        INSERT INTO gemini_location_results(group_name, node_name, result_json, tested_at_ms)
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(group_name, node_name) DO UPDATE SET
+          result_json = excluded.result_json,
+          tested_at_ms = excluded.tested_at_ms
+        "#,
+        params![group, node, result_json, tested_at_ms],
+    )?;
+    Ok(())
+}
+
+fn load_gemini_location_result(
+    state: &AppState,
+    group: &str,
+    node: &str,
+) -> Result<Option<gemini_location::GeminiLocationResult>> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| anyhow!("database lock poisoned"))?;
+    let result_json = db
+        .query_row(
+            r#"
+            SELECT result_json
+            FROM gemini_location_results
+            WHERE group_name = ?1 AND node_name = ?2
+            "#,
+            params![group, node],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let result = result_json
+        .map(|value| {
+            serde_json::from_str::<gemini_location::GeminiLocationResult>(&value)
+                .context("decode saved Gemini location result")
+        })
+        .transpose()?;
+    Ok(result.filter(|result| result.auth_mode == gemini_location::GeminiAuthMode::Chrome))
+}
+
+fn save_node_risk_result(
+    state: &AppState,
+    group: &str,
+    node: &str,
+    result: &node_risk::types::NodeRiskReport,
+    assessed_at_ms: i64,
+) -> Result<()> {
+    let result_json = serde_json::to_string(result)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| anyhow!("database lock poisoned"))?;
+    db.execute(
+        r#"
+        INSERT INTO node_risk_results(group_name, node_name, result_json, assessed_at_ms)
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(group_name, node_name) DO UPDATE SET
+          result_json = excluded.result_json,
+          assessed_at_ms = excluded.assessed_at_ms
+        "#,
+        params![group, node, result_json, assessed_at_ms],
+    )?;
+    Ok(())
+}
+
+fn load_node_risk_result(
+    state: &AppState,
+    group: &str,
+    node: &str,
+) -> Result<Option<node_risk::types::NodeRiskReport>> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| anyhow!("database lock poisoned"))?;
+    let result_json = db
+        .query_row(
+            r#"
+            SELECT result_json
+            FROM node_risk_results
+            WHERE group_name = ?1 AND node_name = ?2
+            "#,
+            params![group, node],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    result_json
+        .map(|value| serde_json::from_str(&value).context("decode saved node risk result"))
+        .transpose()
+}
+
 fn compute_scores_for_group(
     state: &AppState,
     group: &str,
     nodes: &[String],
     config: &GroupConfig,
 ) -> Result<Vec<NodeScore>> {
+    let include_gemini_location = config.gemini_location_probe_enabled
+        && load_gemini_location_group(state)? == group;
     let mut scores = nodes
         .iter()
         .map(|node| {
@@ -3236,7 +3956,14 @@ fn compute_scores_for_group(
                 &config.test_url,
                 score_sample_window_ms(config),
             )?;
-            Ok(score_node(node, &samples, config))
+            let mut score = score_node(node, &samples, config);
+            score.raw.gemini_location = if include_gemini_location {
+                load_gemini_location_result(state, group, node)?
+            } else {
+                None
+            };
+            score.raw.node_risk = load_node_risk_result(state, group, node)?;
+            Ok(score)
         })
         .collect::<Result<Vec<_>>>()?;
     sort_node_scores(&mut scores, config);
@@ -3504,6 +4231,8 @@ fn score_raw_from_samples(samples: &[Sample], config: &GroupConfig, now: i64) ->
         mode: Some(mode_name(config.mode).to_string()),
         scheme: Some(scheme_name(config.scheme).to_string()),
         weights: Some(weights),
+        gemini_location: None,
+        node_risk: None,
     }
 }
 
@@ -4013,6 +4742,240 @@ mod tests {
         net::TcpListener,
     };
 
+    #[derive(Clone)]
+    struct FakeGeminiControllerState {
+        selected: Arc<Mutex<String>>,
+        nodes: Arc<Vec<String>>,
+        switches: Arc<Mutex<Vec<String>>>,
+        restore_failures_remaining: Arc<AtomicUsize>,
+    }
+
+    #[derive(Deserialize)]
+    struct FakeSelectorRequest {
+        name: String,
+    }
+
+    fn test_app_state() -> AppState {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        AppState {
+            db: Arc::new(Mutex::new(conn)),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        }
+    }
+
+    fn test_node_risk_report(ip: &str) -> node_risk::types::NodeRiskReport {
+        let parsed_ip = ip.parse::<IpAddr>().unwrap();
+        node_risk::types::NodeRiskReport {
+            checks: node_risk::types::NodeRiskChecks {
+                exit_ip: true,
+                address_scope: true,
+                network_identity: true,
+                network_class: true,
+                route_security: true,
+                tor: true,
+                privacy: true,
+                abuse: true,
+            },
+            exit_ip: Some(node_risk::types::ExitIpResult {
+                status: node_risk::types::CheckStatus::Success,
+                ip: Some(ip.to_string()),
+                port: Some(443),
+                family: Some(match parsed_ip {
+                    IpAddr::V4(_) => node_risk::types::AddressFamily::Ipv4,
+                    IpAddr::V6(_) => node_risk::types::AddressFamily::Ipv6,
+                }),
+                source: "test STUN".to_string(),
+                checked_at: "2026-08-26T00:00:00Z".to_string(),
+                error: None,
+            }),
+            address_scope: Some(node_risk::address_scope::classify(parsed_ip)),
+            network_identity: Some(node_risk::network_identity::unavailable("test fixture")),
+            network_class: Some(node_risk::network_class::unavailable("test fixture")),
+            route_security: Some(node_risk::rpki::unavailable("test fixture")),
+            tor: Some(node_risk::tor_exit::unavailable("test fixture")),
+            privacy: Some(node_risk::ip_privacy::unavailable("test fixture")),
+            abuse: Some(node_risk::abuse_reputation::unavailable("test fixture")),
+            assessed_at: "2026-08-26T00:00:00Z".to_string(),
+        }
+    }
+
+    async fn fake_gemini_proxies(
+        State(state): State<FakeGeminiControllerState>,
+    ) -> Json<serde_json::Value> {
+        let selected = state.selected.lock().unwrap().clone();
+        Json(serde_json::json!({
+            "proxies": {
+                gemini_location::GEMINI_GROUP_NAME: {
+                    "name": gemini_location::GEMINI_GROUP_NAME,
+                    "type": "Selector",
+                    "now": selected,
+                    "all": state.nodes.as_ref()
+                },
+                "custom-policy": {
+                    "name": "custom-policy",
+                    "type": "Selector",
+                    "now": selected,
+                    "all": state.nodes.as_ref()
+                }
+            }
+        }))
+    }
+
+    async fn fake_gemini_select(
+        AxumPath(group): AxumPath<String>,
+        State(state): State<FakeGeminiControllerState>,
+        Json(request): Json<FakeSelectorRequest>,
+    ) -> StatusCode {
+        if (group != gemini_location::GEMINI_GROUP_NAME && group != "custom-policy")
+            || !state.nodes.iter().any(|node| node == &request.name)
+        {
+            return StatusCode::BAD_REQUEST;
+        }
+        let restoring_original = request.name == state.nodes[0]
+            && *state.selected.lock().unwrap() != request.name;
+        if restoring_original
+            && state
+                .restore_failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    if remaining > 0 {
+                        Some(remaining - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+        {
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+        *state.selected.lock().unwrap() = request.name.clone();
+        state.switches.lock().unwrap().push(request.name);
+        StatusCode::NO_CONTENT
+    }
+
+    async fn spawn_fake_gemini_controller(
+        state: FakeGeminiControllerState,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/proxies", get(fake_gemini_proxies))
+            .route("/proxies/:group", put(fake_gemini_select))
+            .with_state(state);
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[derive(Clone)]
+    struct FakeGeminiLocationState {
+        bootstrap_count: Arc<AtomicUsize>,
+        batch_count: Arc<AtomicUsize>,
+        fail_first_batch: bool,
+    }
+
+    async fn fake_gemini_bootstrap(
+        State(state): State<FakeGeminiLocationState>,
+    ) -> Response {
+        state.bootstrap_count.fetch_add(1, Ordering::SeqCst);
+        (
+            StatusCode::OK,
+            [(header::SET_COOKIE, "COMPASS=test-bootstrap; Path=/")],
+            r#"<!doctype html><script>window.WIZ_global_data = {"SNlM0e":"test-at","FdrFJe":"-12345","cfb2h":"test-build"};</script>"#,
+        )
+            .into_response()
+    }
+
+    async fn fake_gemini_location(
+        State(state): State<FakeGeminiLocationState>,
+    ) -> Response {
+        let index = state.batch_count.fetch_add(1, Ordering::SeqCst);
+        if state.fail_first_batch && index == 0 {
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        } else {
+            test_gemini_location_response(if index == 0 {
+                "美国加利福尼亚洛杉矶"
+            } else {
+                "美国"
+            })
+            .into_response()
+        }
+    }
+
+    async fn spawn_fake_gemini_location_server(
+        state: FakeGeminiLocationState,
+    ) -> (String, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/app", get(fake_gemini_bootstrap))
+            .route("/rpc", post(fake_gemini_location))
+            .with_state(state);
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/app"), format!("http://{addr}/rpc"))
+    }
+
+    fn configure_test_gemini_chrome_profile(state: &AppState) -> tempfile::TempDir {
+        let browser_root = tempfile::tempdir().unwrap();
+        let profile = browser_root.path().join("Default");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(browser_root.path().join("Last Version"), "151.0.7922.169").unwrap();
+        let cookie_db = Connection::open(profile.join("Cookies")).unwrap();
+        cookie_db
+            .execute_batch(
+                "CREATE TABLE cookies(host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB);",
+            )
+            .unwrap();
+        cookie_db
+            .execute(
+                "INSERT INTO cookies(host_key, name, value, encrypted_value) VALUES (?1, ?2, ?3, ?4)",
+                params![".google.com", "SID", "test-account-session", Vec::<u8>::new()],
+            )
+            .unwrap();
+        drop(cookie_db);
+        save_traffic_settings_row(
+            state,
+            &TrafficSettings {
+                enabled: false,
+                browser_profile: profile.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap();
+        browser_root
+    }
+
+    fn test_gemini_location_response(label: &str) -> String {
+        let nested = serde_json::json!([[
+            label,
+            gemini_location::GEMINI_LOCATION_SOURCE,
+            false,
+            null,
+            "//maps.test/token"
+        ]]);
+        let frame = serde_json::json!([[
+            "wrb.fr",
+            "K4WWud",
+            nested.to_string(),
+            null,
+            null,
+            null,
+            "generic"
+        ]])
+        .to_string();
+        format!(
+            ")]}}'\n\n{}\n{}\n25\n[[\"e\",4,null,null,473]]\n",
+            frame.chars().count() + 2,
+            frame
+        )
+    }
+
     #[test]
     fn token_from_request_reads_header_and_query() {
         use axum::body::Body;
@@ -4034,6 +4997,706 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(token_from_request(&none_req), None);
+    }
+
+    #[test]
+    fn node_risk_request_requires_explicit_exit_ip_dependency() {
+        assert!(validate_node_risk_checks(node_risk::types::NodeRiskChecks::default()).is_ok());
+        assert!(validate_node_risk_checks(node_risk::types::NodeRiskChecks {
+            exit_ip: true,
+            ..node_risk::types::NodeRiskChecks::default()
+        })
+        .is_ok());
+
+        let error = validate_node_risk_checks(node_risk::types::NodeRiskChecks {
+            address_scope: true,
+            ..node_risk::types::NodeRiskChecks::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("nodeRisk.exitIp"));
+    }
+
+    #[test]
+    fn speed_and_inspection_requests_have_separate_contracts() {
+        let probe_error = serde_json::from_value::<ProbeRequest>(serde_json::json!({
+            "concurrency": 2,
+            "geminiLocation": true,
+            "nodeRisk": {"exitIp": true, "networkClass": true, "tor": true}
+        }))
+        .unwrap_err();
+        assert!(probe_error.to_string().contains("unknown field"));
+
+        let probe: ProbeRequest = serde_json::from_value(serde_json::json!({
+            "concurrency": 2
+        }))
+        .unwrap();
+        assert_eq!(probe.concurrency, Some(2));
+
+        let inspection: InspectionRequest = serde_json::from_value(serde_json::json!({
+            "geminiLocation": true,
+            "nodeRisk": {"exitIp": true, "networkClass": true, "tor": true}
+        }))
+        .unwrap();
+        assert_eq!(inspection.gemini_location, Some(true));
+        let checks = inspection.node_risk.unwrap();
+        assert!(checks.exit_ip);
+        assert!(checks.network_class);
+        assert!(checks.tor);
+        assert!(!checks.address_scope);
+        assert!(!checks.network_identity);
+        assert!(!checks.route_security);
+        assert!(!checks.privacy);
+        assert!(!checks.abuse);
+
+        let inspection_error = serde_json::from_value::<InspectionRequest>(serde_json::json!({
+            "concurrency": 2,
+            "nodeRisk": {"exitIp": true}
+        }))
+        .unwrap_err();
+        assert!(inspection_error.to_string().contains("unknown field"));
+    }
+
+    #[tokio::test]
+    async fn inspection_rejects_an_empty_selection_before_network_access() {
+        let error = inspect_group(
+            State(test_app_state()),
+            AxumPath("custom-policy".to_string()),
+            Json(InspectionRequest {
+                gemini_location: None,
+                node_risk: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("inspection must enable"));
+    }
+
+    #[tokio::test]
+    async fn inspection_rejects_gemini_for_a_non_designated_group() {
+        let state = test_app_state();
+        save_string_kv(&state, "gemini_location_group", "designated-policy").unwrap();
+
+        let error = inspect_group(
+            State(state),
+            AxumPath("custom-policy".to_string()),
+            Json(InspectionRequest {
+                gemini_location: Some(true),
+                node_risk: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("selected in Settings"));
+    }
+
+    #[tokio::test]
+    async fn speed_probe_does_not_run_configured_inspections() {
+        let state = test_app_state();
+        let nodes = vec!["node-a".to_string(), "node-b".to_string()];
+        let switches = Arc::new(Mutex::new(Vec::new()));
+        let controller_url = spawn_fake_gemini_controller(FakeGeminiControllerState {
+            selected: Arc::new(Mutex::new(nodes[0].clone())),
+            nodes: Arc::new(nodes),
+            switches: switches.clone(),
+            restore_failures_remaining: Arc::new(AtomicUsize::new(0)),
+        })
+        .await;
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+        save_string_kv(
+            &state,
+            "gemini_location_group",
+            gemini_location::GEMINI_GROUP_NAME,
+        )
+        .unwrap();
+        save_group_config_row(
+            &state,
+            gemini_location::GEMINI_GROUP_NAME,
+            &GroupConfig {
+                gemini_location_probe_enabled: true,
+                node_risk: node_risk::types::NodeRiskChecks {
+                    exit_ip: true,
+                    network_class: true,
+                    ..node_risk::types::NodeRiskChecks::default()
+                },
+                ..GroupConfig::default()
+            },
+        )
+        .unwrap();
+
+        probe_group_internal(&state, gemini_location::GEMINI_GROUP_NAME, 2, false)
+            .await
+            .unwrap();
+
+        let count: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM node_risk_results", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+        let gemini_count: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM gemini_location_results",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(gemini_count, 0);
+        assert!(switches.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn testing_settings_preserves_group_and_ignores_legacy_fallback_field() {
+        let state = test_app_state();
+        assert_eq!(load_gemini_location_group(&state).unwrap(), "");
+        save_string_kv(&state, "gemini_location_group", "custom-policy").unwrap();
+        save_string_kv(
+            &state,
+            "gemini_chrome_cookie_fallback_enabled",
+            "true",
+        )
+        .unwrap();
+        let input = serde_json::from_value::<TestingSettingsInput>(serde_json::json!({
+            "defaultTestUrl": "https://latency.test/generate_204",
+            "geminiChromeCookieFallbackEnabled": true
+        }))
+        .unwrap();
+
+        let Json(settings) = save_testing_settings(
+            State(state),
+            Json(input),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(settings.gemini_location_group, "custom-policy");
+        assert!(serde_json::to_value(settings)
+            .unwrap()
+            .get("geminiChromeCookieFallbackEnabled")
+            .is_none());
+    }
+
+    #[test]
+    fn group_config_persists_inspection_selection() {
+        let state = test_app_state();
+        let config = GroupConfig {
+            gemini_location_probe_enabled: true,
+            node_risk: node_risk::types::NodeRiskChecks {
+                exit_ip: true,
+                network_class: true,
+                tor: true,
+                ..node_risk::types::NodeRiskChecks::default()
+            },
+            ..GroupConfig::default()
+        };
+
+        save_group_config_row(&state, "custom-policy", &config).unwrap();
+        let loaded = load_group_config(&state, "custom-policy").unwrap();
+
+        assert!(loaded.gemini_location_probe_enabled);
+        assert!(loaded.node_risk.exit_ip);
+        assert!(loaded.node_risk.network_class);
+        assert!(loaded.node_risk.tor);
+        assert!(!loaded.node_risk.abuse);
+    }
+
+    #[test]
+    fn gemini_location_persistence_overwrites_latest_result() {
+        let state = test_app_state();
+        let failure = gemini_location::GeminiLocationResult::failure(
+            gemini_location::GeminiLocationStatus::AntiAbuseChallenge,
+            gemini_location::GeminiAuthMode::Anonymous,
+            "challenge",
+        );
+        let success = gemini_location::GeminiLocationResult::success(
+            gemini_location::GeminiLocationPayload {
+                label: "美国加利福尼亚".to_string(),
+                source: gemini_location::GEMINI_LOCATION_SOURCE.to_string(),
+            },
+            gemini_location::GeminiAuthMode::Chrome,
+        );
+
+        save_gemini_location_result(
+            &state,
+            gemini_location::GEMINI_GROUP_NAME,
+            "node-a",
+            &failure,
+            1,
+        )
+        .unwrap();
+        save_gemini_location_result(
+            &state,
+            gemini_location::GEMINI_GROUP_NAME,
+            "node-a",
+            &success,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_gemini_location_result(
+                &state,
+                gemini_location::GEMINI_GROUP_NAME,
+                "node-a"
+            )
+            .unwrap(),
+            Some(success)
+        );
+        let count: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM gemini_location_results", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn legacy_anonymous_gemini_result_is_not_exposed() {
+        let state = test_app_state();
+        let legacy = gemini_location::GeminiLocationResult::success(
+            gemini_location::GeminiLocationPayload {
+                label: "美国".to_string(),
+                source: gemini_location::GEMINI_LOCATION_SOURCE.to_string(),
+            },
+            gemini_location::GeminiAuthMode::Anonymous,
+        );
+        save_gemini_location_result(
+            &state,
+            gemini_location::GEMINI_GROUP_NAME,
+            "node-a",
+            &legacy,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_gemini_location_result(
+                &state,
+                gemini_location::GEMINI_GROUP_NAME,
+                "node-a"
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn node_risk_persistence_overwrites_latest_result() {
+        let state = test_app_state();
+        let first = test_node_risk_report("203.0.113.10");
+        let latest = test_node_risk_report("198.51.100.20");
+
+        save_node_risk_result(
+            &state,
+            gemini_location::GEMINI_GROUP_NAME,
+            "node-a",
+            &first,
+            1,
+        )
+        .unwrap();
+        save_node_risk_result(
+            &state,
+            gemini_location::GEMINI_GROUP_NAME,
+            "node-a",
+            &latest,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(
+            load_node_risk_result(
+                &state,
+                gemini_location::GEMINI_GROUP_NAME,
+                "node-a"
+            )
+            .unwrap(),
+            Some(latest)
+        );
+        let count: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM node_risk_results", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn gemini_location_failure_does_not_change_delay_score() {
+        let state = test_app_state();
+        let config = GroupConfig {
+            gemini_location_probe_enabled: true,
+            ..GroupConfig::default()
+        };
+        save_string_kv(
+            &state,
+            "gemini_location_group",
+            gemini_location::GEMINI_GROUP_NAME,
+        )
+        .unwrap();
+        let tested_at = now_ms();
+        save_probe_sample(
+            &state,
+            gemini_location::GEMINI_GROUP_NAME,
+            "node-a",
+            &config.test_url,
+            Some(80),
+            true,
+            None,
+            tested_at,
+        )
+        .unwrap();
+        let location_failure = gemini_location::GeminiLocationResult::failure(
+            gemini_location::GeminiLocationStatus::TransportError,
+            gemini_location::GeminiAuthMode::Chrome,
+            "TLS failed",
+        );
+        save_gemini_location_result(
+            &state,
+            gemini_location::GEMINI_GROUP_NAME,
+            "node-a",
+            &location_failure,
+            tested_at,
+        )
+        .unwrap();
+
+        let scores = compute_scores_for_group(
+            &state,
+            gemini_location::GEMINI_GROUP_NAME,
+            &["node-a".to_string()],
+            &config,
+        )
+        .unwrap();
+
+        assert_eq!(scores[0].delay_ms, Some(80));
+        assert!(scores[0].raw.success);
+        assert!(scores[0].score > 0.0);
+        assert_eq!(
+            scores[0]
+                .raw
+                .gemini_location
+                .as_ref()
+                .map(|result| result.status),
+            Some(gemini_location::GeminiLocationStatus::TransportError)
+        );
+    }
+
+    #[test]
+    fn gemini_location_result_is_hidden_outside_configured_group() {
+        let state = test_app_state();
+        let config = GroupConfig {
+            gemini_location_probe_enabled: true,
+            ..GroupConfig::default()
+        };
+        save_string_kv(&state, "gemini_location_group", "configured-group").unwrap();
+        let result = gemini_location::GeminiLocationResult::success(
+            gemini_location::GeminiLocationPayload {
+                label: "美国加利福尼亚洛杉矶".to_string(),
+                source: gemini_location::GEMINI_LOCATION_SOURCE.to_string(),
+            },
+            gemini_location::GeminiAuthMode::Anonymous,
+        );
+        save_gemini_location_result(&state, "other-group", "node-a", &result, now_ms())
+            .unwrap();
+
+        let scores = compute_scores_for_group(
+            &state,
+            "other-group",
+            &["node-a".to_string()],
+            &config,
+        )
+        .unwrap();
+
+        assert!(scores[0].raw.gemini_location.is_none());
+    }
+
+    #[tokio::test]
+    async fn gemini_sweep_visits_every_node_and_restores_original_selector() {
+        let state = test_app_state();
+        let _browser_root = configure_test_gemini_chrome_profile(&state);
+        let nodes = vec!["node-a".to_string(), "node-b".to_string()];
+        let selected = Arc::new(Mutex::new(nodes[0].clone()));
+        let switches = Arc::new(Mutex::new(Vec::new()));
+        let controller_url = spawn_fake_gemini_controller(FakeGeminiControllerState {
+            selected: selected.clone(),
+            nodes: Arc::new(nodes.clone()),
+            switches: switches.clone(),
+            restore_failures_remaining: Arc::new(AtomicUsize::new(0)),
+        })
+        .await;
+        let bootstrap_count = Arc::new(AtomicUsize::new(0));
+        let batch_count = Arc::new(AtomicUsize::new(0));
+        let (app_url, batch_url) = spawn_fake_gemini_location_server(
+            FakeGeminiLocationState {
+                bootstrap_count: bootstrap_count.clone(),
+                batch_count: batch_count.clone(),
+                fail_first_batch: false,
+            },
+        )
+        .await;
+        let controller = ControllerConfig {
+            controller_url,
+            secret: String::new(),
+        };
+
+        let sweep = run_gemini_location_sweep_at_urls(
+            &state,
+            &controller,
+            gemini_location::GEMINI_GROUP_NAME,
+            &nodes,
+            2_000,
+            &app_url,
+            &batch_url,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sweep.results.len(), nodes.len());
+        assert!(sweep
+            .results
+            .iter()
+            .all(|(_, result)| result.status == gemini_location::GeminiLocationStatus::Success));
+        assert_eq!(bootstrap_count.load(Ordering::SeqCst), nodes.len());
+        assert_eq!(batch_count.load(Ordering::SeqCst), nodes.len());
+        assert!(sweep.results.iter().all(|(_, result)| {
+            result.auth_mode == gemini_location::GeminiAuthMode::Chrome
+        }));
+        assert_eq!(*selected.lock().unwrap(), "node-a");
+        assert_eq!(
+            switches.lock().unwrap().as_slice(),
+            &["node-b".to_string(), "node-a".to_string()]
+        );
+        assert_eq!(sweep.restore_error, None);
+    }
+
+    #[tokio::test]
+    async fn gemini_sweep_retries_transient_restore_failure() {
+        let state = test_app_state();
+        let _browser_root = configure_test_gemini_chrome_profile(&state);
+        let nodes = vec!["node-a".to_string(), "node-b".to_string()];
+        let selected = Arc::new(Mutex::new(nodes[0].clone()));
+        let switches = Arc::new(Mutex::new(Vec::new()));
+        let restore_failures_remaining = Arc::new(AtomicUsize::new(1));
+        let controller_url = spawn_fake_gemini_controller(FakeGeminiControllerState {
+            selected: selected.clone(),
+            nodes: Arc::new(nodes.clone()),
+            switches: switches.clone(),
+            restore_failures_remaining: restore_failures_remaining.clone(),
+        })
+        .await;
+        let bootstrap_count = Arc::new(AtomicUsize::new(0));
+        let batch_count = Arc::new(AtomicUsize::new(0));
+        let (app_url, batch_url) = spawn_fake_gemini_location_server(
+            FakeGeminiLocationState {
+                bootstrap_count: bootstrap_count.clone(),
+                batch_count: batch_count.clone(),
+                fail_first_batch: false,
+            },
+        )
+        .await;
+        let controller = ControllerConfig {
+            controller_url,
+            secret: String::new(),
+        };
+
+        let sweep = run_gemini_location_sweep_at_urls(
+            &state,
+            &controller,
+            gemini_location::GEMINI_GROUP_NAME,
+            &nodes,
+            2_000,
+            &app_url,
+            &batch_url,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(bootstrap_count.load(Ordering::SeqCst), nodes.len());
+        assert_eq!(batch_count.load(Ordering::SeqCst), nodes.len());
+        assert_eq!(restore_failures_remaining.load(Ordering::SeqCst), 0);
+        assert_eq!(*selected.lock().unwrap(), "node-a");
+        assert_eq!(
+            switches.lock().unwrap().as_slice(),
+            &["node-b".to_string(), "node-a".to_string()]
+        );
+        assert_eq!(sweep.restore_error, None);
+    }
+
+    #[tokio::test]
+    async fn node_risk_sweep_supports_custom_group_and_records_selection_failure() {
+        let state = test_app_state();
+        let controller_nodes = vec!["node-a".to_string(), "node-b".to_string()];
+        let selected = Arc::new(Mutex::new(controller_nodes[0].clone()));
+        let switches = Arc::new(Mutex::new(Vec::new()));
+        let controller_url = spawn_fake_gemini_controller(FakeGeminiControllerState {
+            selected: selected.clone(),
+            nodes: Arc::new(controller_nodes),
+            switches: switches.clone(),
+            restore_failures_remaining: Arc::new(AtomicUsize::new(0)),
+        })
+        .await;
+        let controller = ControllerConfig {
+            controller_url,
+            secret: String::new(),
+        };
+
+        let sweep = run_node_risk_sweep(
+            &state,
+            &controller,
+            "custom-policy",
+            &["missing-node".to_string()],
+            2_000,
+            node_risk::types::NodeRiskChecks {
+                exit_ip: true,
+                address_scope: true,
+                ..node_risk::types::NodeRiskChecks::default()
+            },
+            &node_risk::ProviderConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sweep.results.len(), 1);
+        let report = &sweep.results[0].1;
+        assert_eq!(
+            report.exit_ip.as_ref().unwrap().status,
+            node_risk::types::CheckStatus::Unavailable
+        );
+        assert_eq!(
+            report.address_scope.as_ref().unwrap().status,
+            node_risk::types::CheckStatus::Unavailable
+        );
+        assert!(report.network_identity.is_none());
+        assert!(report.route_security.is_none());
+        assert!(report.tor.is_none());
+        assert!(report.privacy.is_none());
+        assert!(report.abuse.is_none());
+        assert_eq!(sweep.restore_error, None);
+        assert_eq!(*selected.lock().unwrap(), "node-a");
+        assert!(switches.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn gemini_sweep_records_auth_error_without_switching_or_requesting() {
+        let state = test_app_state();
+        let nodes = vec!["node-a".to_string(), "node-b".to_string()];
+        let selected = Arc::new(Mutex::new(nodes[0].clone()));
+        let switches = Arc::new(Mutex::new(Vec::new()));
+        let controller_url = spawn_fake_gemini_controller(FakeGeminiControllerState {
+            selected: selected.clone(),
+            nodes: Arc::new(nodes.clone()),
+            switches: switches.clone(),
+            restore_failures_remaining: Arc::new(AtomicUsize::new(0)),
+        })
+        .await;
+        let bootstrap_count = Arc::new(AtomicUsize::new(0));
+        let batch_count = Arc::new(AtomicUsize::new(0));
+        let (app_url, batch_url) = spawn_fake_gemini_location_server(
+            FakeGeminiLocationState {
+                bootstrap_count: bootstrap_count.clone(),
+                batch_count: batch_count.clone(),
+                fail_first_batch: false,
+            },
+        )
+        .await;
+        let controller = ControllerConfig {
+            controller_url,
+            secret: String::new(),
+        };
+
+        let sweep = run_gemini_location_sweep_at_urls(
+            &state,
+            &controller,
+            gemini_location::GEMINI_GROUP_NAME,
+            &nodes,
+            2_000,
+            &app_url,
+            &batch_url,
+        )
+        .await
+        .unwrap();
+
+        assert!(sweep.results.iter().all(|(_, result)| {
+            result.status == gemini_location::GeminiLocationStatus::AuthError
+                && result.auth_mode == gemini_location::GeminiAuthMode::Chrome
+        }));
+        assert_eq!(bootstrap_count.load(Ordering::SeqCst), 0);
+        assert_eq!(batch_count.load(Ordering::SeqCst), 0);
+        assert!(switches.lock().unwrap().is_empty());
+        assert_eq!(*selected.lock().unwrap(), "node-a");
+        assert_eq!(sweep.restore_error, None);
+    }
+
+    #[tokio::test]
+    async fn gemini_sweep_continues_after_node_http_failure_and_restores_selector() {
+        let state = test_app_state();
+        let _browser_root = configure_test_gemini_chrome_profile(&state);
+        let nodes = vec!["node-a".to_string(), "node-b".to_string()];
+        let selected = Arc::new(Mutex::new(nodes[0].clone()));
+        let switches = Arc::new(Mutex::new(Vec::new()));
+        let controller_url = spawn_fake_gemini_controller(FakeGeminiControllerState {
+            selected: selected.clone(),
+            nodes: Arc::new(nodes.clone()),
+            switches,
+            restore_failures_remaining: Arc::new(AtomicUsize::new(0)),
+        })
+        .await;
+        let bootstrap_count = Arc::new(AtomicUsize::new(0));
+        let batch_count = Arc::new(AtomicUsize::new(0));
+        let (app_url, batch_url) = spawn_fake_gemini_location_server(
+            FakeGeminiLocationState {
+                bootstrap_count: bootstrap_count.clone(),
+                batch_count: batch_count.clone(),
+                fail_first_batch: true,
+            },
+        )
+        .await;
+        let controller = ControllerConfig {
+            controller_url,
+            secret: String::new(),
+        };
+
+        let sweep = run_gemini_location_sweep_at_urls(
+            &state,
+            &controller,
+            gemini_location::GEMINI_GROUP_NAME,
+            &nodes,
+            2_000,
+            &app_url,
+            &batch_url,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sweep.results[0].1.status, gemini_location::GeminiLocationStatus::HttpError);
+        assert_eq!(sweep.results[1].1.status, gemini_location::GeminiLocationStatus::Success);
+        assert_eq!(bootstrap_count.load(Ordering::SeqCst), nodes.len());
+        assert_eq!(batch_count.load(Ordering::SeqCst), nodes.len());
+        assert_eq!(*selected.lock().unwrap(), "node-a");
+        assert_eq!(sweep.restore_error, None);
     }
 
     #[test]
@@ -5108,8 +6771,14 @@ mod tests {
             },
         )
         .unwrap();
+        save_string_kv(&state, "gemini_location_group", "").unwrap();
 
-        let response = probe_group_internal(&state, "select", 4, false)
+        let response = probe_group_internal(
+            &state,
+            "select",
+            4,
+            false,
+        )
             .await
             .unwrap();
 
@@ -5144,7 +6813,15 @@ mod tests {
         .unwrap();
 
         let probe_state = state.clone();
-        let probe = tokio::spawn(async move { probe_group_internal(&probe_state, "select", 2, false).await });
+        let probe = tokio::spawn(async move {
+            probe_group_internal(
+                &probe_state,
+                "select",
+                2,
+                false,
+            )
+            .await
+        });
 
         let started_before_slow_finished = wait_for_atomic_bool(&next_started, Duration::from_millis(300)).await;
         release_slow.notify_waiters();

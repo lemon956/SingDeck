@@ -177,6 +177,7 @@ function setupProxyWorkspace() {
     activeProbeNodesByGroup: {},
     eventStreamConnected: false,
     probingGroups: [],
+    inspectingGroups: [],
     applyingGroups: [],
     error: null,
     lastCheckedAt: null,
@@ -238,6 +239,359 @@ describe('App proxy workspace', () => {
     expect(nodeCards.some((node) => within(node as HTMLElement).queryByText('standby'))).toBe(false);
   });
 
+  it('shows only the risk checks enabled in the current group configuration', () => {
+    useHelperStore.setState((state) => ({
+      groups: state.groups.map((group) => ({
+        ...group,
+        config: {
+          ...group.config,
+          nodeRisk: {
+            exitIp: true,
+            addressScope: false,
+            networkIdentity: false,
+            networkClass: true,
+            routeSecurity: false,
+            tor: false,
+            privacy: false,
+            abuse: false
+          }
+        }
+      })),
+      scoresByGroup: {
+        ...state.scoresByGroup,
+        select: {
+          ...state.scoresByGroup.select,
+          nodes: state.scoresByGroup.select.nodes.map((node) =>
+            node.name === 'hk-1'
+              ? {
+                  ...node,
+                  raw: {
+                    ...node.raw,
+                    success: node.raw?.success ?? true,
+                    delayMs: node.raw?.delayMs ?? node.delayMs,
+                    error: node.raw?.error ?? null,
+                    testedAt: node.raw?.testedAt ?? node.lastTestedAt,
+                    nodeRisk: {
+                      checks: {
+                        exitIp: true,
+                        addressScope: true,
+                        networkIdentity: true,
+                        networkClass: true,
+                        routeSecurity: true,
+                        tor: true,
+                        privacy: true,
+                        abuse: true
+                      },
+                      exitIp: null,
+                      addressScope: null,
+                      networkIdentity: null,
+                      networkClass: {
+                        status: 'unavailable',
+                        verdict: 'unknown',
+                        userType: null,
+                        isHostingProvider: null,
+                        connectionType: null,
+                        isp: null,
+                        organization: null,
+                        autonomousSystemNumber: null,
+                        network: null,
+                        userCount: null,
+                        source: 'proxycheck.io v3 API with ipquery.io fallback',
+                        checkedAt: '2026-08-26T03:33:15.000Z',
+                        error: 'network classification providers unavailable'
+                      },
+                      routeSecurity: null,
+                      tor: {
+                        status: 'unavailable',
+                        verdict: 'unknown',
+                        relays: [],
+                        source: 'Tor Project Onionoo relay details',
+                        checkedAt: '2026-08-26T03:33:15.000Z',
+                        error: 'Tor Onionoo request timed out'
+                      },
+                      privacy: {
+                        status: 'not_configured',
+                        signals: [],
+                        service: null,
+                        confidence: null,
+                        firstSeen: null,
+                        lastSeen: null,
+                        source: 'IPinfo Privacy Detection API',
+                        checkedAt: '2026-08-26T03:33:15.000Z',
+                        error: 'SINGDECK_IPINFO_TOKEN is not configured'
+                      },
+                      abuse: {
+                        status: 'not_configured',
+                        verdict: 'unknown',
+                        abuseConfidenceScore: null,
+                        totalReports: null,
+                        distinctReporters: null,
+                        lastReportedAt: null,
+                        isTor: null,
+                        isWhitelisted: null,
+                        usageType: null,
+                        isp: null,
+                        countryCode: null,
+                        source: 'AbuseIPDB API v2 CHECK (90 day window)',
+                        checkedAt: '2026-08-26T03:33:15.000Z',
+                        error: 'SINGDECK_ABUSEIPDB_KEY is not configured'
+                      },
+                      assessedAt: '2026-08-26T03:33:15.000Z'
+                    }
+                  }
+                }
+              : node
+          )
+        }
+      }
+    }));
+
+    const { container } = render(<App />);
+    expandStrategyWall();
+    const nodeCards = Array.from(container.querySelectorAll('.strategy-node-card')) as HTMLElement[];
+    const hkNode = nodeCards.find((node) => within(node).queryByText('hk-1')) as HTMLElement;
+
+    expect(hkNode.title).toContain('网络类型: 暂不可用 (network classification providers unavailable)');
+    expect(hkNode.title).not.toContain('Tor 洋葱路由');
+    expect(hkNode.title).not.toContain('IP 隐私特征');
+    expect(hkNode.title).not.toContain('滥用信誉');
+  });
+
+  it('explains a Gemini Sorry response without declaring the node malicious', () => {
+    useHelperStore.setState((state) => ({
+      testingSettings: {
+        defaultTestUrl: groupConfig.testUrl,
+        delayTestTimeoutMs: 5000,
+        minProbeIntervalSec: 60,
+        probeConcurrency: 4,
+        geminiLocationGroup: 'select'
+      },
+      groups: state.groups.map((group) => ({
+        ...group,
+        config: { ...group.config, geminiLocationProbeEnabled: true }
+      })),
+      scoresByGroup: {
+        ...state.scoresByGroup,
+        select: {
+          ...state.scoresByGroup.select,
+          nodes: state.scoresByGroup.select.nodes.map((node) =>
+            node.name === 'hk-1'
+              ? {
+                  ...node,
+                  raw: {
+                    ...node.raw,
+                    success: node.raw?.success ?? true,
+                    delayMs: node.raw?.delayMs ?? node.delayMs,
+                    error: node.raw?.error ?? null,
+                    testedAt: node.raw?.testedAt ?? node.lastTestedAt,
+                    geminiLocation: {
+                      status: 'anti_abuse_challenge',
+                      label: null,
+                      source: null,
+                      authMode: 'chrome',
+                      testedAt: '2026-08-26T03:33:15.000Z',
+                      error: 'Google /sorry/ anti-abuse challenge'
+                    }
+                  }
+                }
+              : node
+          )
+        }
+      }
+    }));
+
+    const { container } = render(<App />);
+    expandStrategyWall();
+    const hkNode = Array.from(container.querySelectorAll('.strategy-node-card')).find((node) =>
+      within(node as HTMLElement).queryByText('hk-1')
+    ) as HTMLElement;
+
+    expect(hkNode.title).toContain('Google Sorry 反滥用挑战');
+    expect(hkNode.title).toContain('上游未公开具体命中规则');
+    expect(hkNode.title).toContain('不等于节点已被判定为恶意');
+    expect(hkNode.title).toContain('认证模式: Chrome Google 登录态');
+  });
+
+  it('shows a dedicated error when the Chrome Google login is unavailable', () => {
+    useHelperStore.setState((state) => ({
+      testingSettings: {
+        defaultTestUrl: groupConfig.testUrl,
+        delayTestTimeoutMs: 5000,
+        minProbeIntervalSec: 60,
+        probeConcurrency: 4,
+        geminiLocationGroup: 'select'
+      },
+      groups: state.groups.map((group) => ({
+        ...group,
+        config: { ...group.config, geminiLocationProbeEnabled: true }
+      })),
+      scoresByGroup: {
+        ...state.scoresByGroup,
+        select: {
+          ...state.scoresByGroup.select,
+          nodes: state.scoresByGroup.select.nodes.map((node) =>
+            node.name === 'hk-1'
+              ? {
+                  ...node,
+                  raw: {
+                    ...node.raw,
+                    success: node.raw?.success ?? true,
+                    delayMs: node.raw?.delayMs ?? node.delayMs,
+                    error: node.raw?.error ?? null,
+                    testedAt: node.raw?.testedAt ?? node.lastTestedAt,
+                    geminiLocation: {
+                      status: 'auth_error',
+                      label: null,
+                      source: null,
+                      authMode: 'chrome',
+                      testedAt: '2026-08-26T03:33:15.000Z',
+                      error: 'Chrome Google account session cookies are missing'
+                    }
+                  }
+                }
+              : node
+          )
+        }
+      }
+    }));
+
+    const { container } = render(<App />);
+    expandStrategyWall();
+    const hkNode = Array.from(container.querySelectorAll('.strategy-node-card')).find((node) =>
+      within(node as HTMLElement).queryByText('hk-1')
+    ) as HTMLElement;
+
+    expect(hkNode.title).toContain('Chrome Google 登录态不可用');
+    expect(hkNode.title).toContain('Chrome Google account session cookies are missing');
+  });
+
+  it('runs residential classification through inspection without adding it to speed probes', async () => {
+    let speedRequestBody: unknown = null;
+    let inspectionRequestBody: unknown = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/groups/select/probe')) {
+          speedRequestBody = init?.body ? JSON.parse(String(init.body)) : null;
+          return new Response(
+            JSON.stringify({
+              group: 'select',
+              mode: 'score',
+              scheme: 'Balanced',
+              testUrl: groupConfig.testUrl,
+              recommended: null,
+              applyError: null,
+              nodes: []
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        if (url.endsWith('/api/v1/groups/select/inspection')) {
+          inspectionRequestBody = init?.body ? JSON.parse(String(init.body)) : null;
+          return new Response(
+            JSON.stringify({
+              group: 'select',
+              mode: 'score',
+              scheme: 'Balanced',
+              testUrl: groupConfig.testUrl,
+              recommended: null,
+              applyError: null,
+              nodes: []
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        if (url.endsWith('/api/v1/probes')) {
+          return new Response(JSON.stringify({ groups: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' }
+          });
+        }
+        return new Response(JSON.stringify({ nodes: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      })
+    );
+    render(<App />);
+    const networkClassCheck = screen.getByRole('checkbox', { name: '家宽 / 机房检测' });
+    expect(networkClassCheck).not.toBeChecked();
+    fireEvent.click(networkClassCheck);
+    fireEvent.click(screen.getByRole('button', { name: 'Run egress inspection' }));
+
+    await waitFor(() =>
+      expect(inspectionRequestBody).toEqual({
+        nodeRisk: {
+          exitIp: true,
+          addressScope: false,
+          networkIdentity: false,
+          networkClass: true,
+          routeSecurity: false,
+          tor: false,
+          privacy: false,
+          abuse: false
+        }
+      })
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run score' }));
+
+    await waitFor(() => expect(speedRequestBody).toEqual({ concurrency: 4 }));
+  });
+
+  it('shows the Gemini switch only for the group selected in Settings', () => {
+    useHelperStore.setState({
+      testingSettings: {
+        defaultTestUrl: groupConfig.testUrl,
+        delayTestTimeoutMs: 5000,
+        minProbeIntervalSec: 60,
+        probeConcurrency: 4,
+        geminiLocationGroup: 'select'
+      }
+    });
+
+    const { rerender } = render(<App />);
+    expect(screen.getByText('Gemini 出口与解锁检测')).toBeInTheDocument();
+    expect(screen.getByText(/使用 Settings 中 Chrome profile/)).toBeInTheDocument();
+    expect(screen.queryByText('Chrome 会话兜底')).not.toBeInTheDocument();
+
+    useHelperStore.setState((state) => ({
+      testingSettings: state.testingSettings
+        ? { ...state.testingSettings, geminiLocationGroup: 'another-policy' }
+        : null
+    }));
+    rerender(<App />);
+
+    expect(screen.queryByText('Gemini 出口与解锁检测')).not.toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: '家宽 / 机房检测' })).toBeInTheDocument();
+  });
+
+  it('saves the designated group Gemini switch with the sidebar configuration', async () => {
+    const saveGroupConfig = vi.fn(async () => {});
+    useHelperStore.setState({
+      testingSettings: {
+        defaultTestUrl: groupConfig.testUrl,
+        delayTestTimeoutMs: 5000,
+        minProbeIntervalSec: 60,
+        probeConcurrency: 4,
+        geminiLocationGroup: 'select'
+      },
+      saveGroupConfig
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Gemini 出口与解锁检测' }));
+    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }));
+
+    await waitFor(() =>
+      expect(saveGroupConfig).toHaveBeenCalledWith(
+        'select',
+        expect.objectContaining({ geminiLocationProbeEnabled: true })
+      )
+    );
+  });
+
   it('starts with strategy groups collapsed and supports expanding or collapsing all groups', () => {
     const { container } = render(<App />);
 
@@ -272,6 +626,7 @@ describe('App proxy workspace', () => {
     fireEvent.change(screen.getByLabelText('Test URL'), {
       target: { value: 'https://api.example.test/generate_204' }
     });
+    fireEvent.click(screen.getByRole('checkbox', { name: '家宽 / 机房检测' }));
     fireEvent.click(screen.getByRole('button', { name: /Save settings/i }));
 
     await waitFor(() =>
@@ -279,7 +634,11 @@ describe('App proxy workspace', () => {
         'select',
         expect.objectContaining({
           testUrl: 'https://api.example.test/generate_204',
-          probeIntervalSec: 600
+          probeIntervalSec: 600,
+          nodeRisk: expect.objectContaining({
+            exitIp: true,
+            networkClass: true
+          })
         })
       )
     );
@@ -1154,6 +1513,30 @@ describe('App proxy workspace', () => {
     fireEvent.click(checkbox);
 
     expect(saveNetworkUsageSettings).toHaveBeenCalledWith({ enabled: true, retentionDays: 7, sampleIntervalSec: 5 });
+  });
+
+  it('configures the Gemini inspection group from Settings without a name convention', async () => {
+    window.location.hash = '#/controller';
+    const saveGeminiLocationGroup = vi.fn(async () => {});
+    useHelperStore.setState({
+      testingSettings: {
+        defaultTestUrl: groupConfig.testUrl,
+        delayTestTimeoutMs: 5000,
+        minProbeIntervalSec: 60,
+        probeConcurrency: 4,
+        geminiLocationGroup: 'select'
+      },
+      saveGeminiLocationGroup
+    });
+
+    render(<App />);
+
+    const select = screen.getByRole('combobox', { name: 'Gemini 检测策略组' }) as HTMLSelectElement;
+    expect(select.value).toBe('select');
+    expect(within(select).getByRole('option', { name: 'select' })).toBeInTheDocument();
+    fireEvent.change(select, { target: { value: '' } });
+
+    await waitFor(() => expect(saveGeminiLocationGroup).toHaveBeenCalledWith(''));
   });
 
   it('saves the network usage sample interval from settings', async () => {
