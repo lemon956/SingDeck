@@ -796,7 +796,10 @@ async fn main() -> Result<()> {
         .route("/api/v1/groups/:group/apply", post(apply_group))
         .route("/api/v1/config", get(read_config))
         .route("/api/v1/config/raw", get(read_config_raw))
-        .route("/api/v1/config/source", put(save_config_source))
+        .route(
+            "/api/v1/config/source",
+            get(config_source).put(save_config_source),
+        )
         .route("/api/v1/traffic", get(read_traffic))
         .route("/api/v1/network-usage/summary", get(network_usage_summary))
         .route("/api/v1/network-usage/window", get(network_usage_window))
@@ -1793,6 +1796,14 @@ async fn save_config_source(
     save_string_kv(&state, "config_path", path)?;
     Ok(Json(ConfigSourceRequest {
         path: path.to_string(),
+    }))
+}
+
+async fn config_source(
+    State(state): State<AppState>,
+) -> Result<Json<ConfigSourceRequest>, AppError> {
+    Ok(Json(ConfigSourceRequest {
+        path: load_string_kv(&state, "config_path")?.unwrap_or_default(),
     }))
 }
 
@@ -8203,6 +8214,22 @@ mod tests {
         );
         assert!(config_path_candidates(None).is_empty());
         assert!(config_path_candidates(Some("  ".to_string())).is_empty());
+    }
+
+    #[tokio::test]
+    async fn config_source_returns_the_saved_path() {
+        let state = test_app_state();
+        let _ = save_config_source(
+            State(state.clone()),
+            Json(ConfigSourceRequest {
+                path: " /etc/sing-box/config.json ".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(source) = config_source(State(state)).await.unwrap();
+        assert_eq!(source.path, "/etc/sing-box/config.json");
     }
 
     #[test]

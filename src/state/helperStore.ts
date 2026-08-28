@@ -82,20 +82,20 @@ type HelperState = {
   loadTestingSettings: () => Promise<void>;
   loadTrafficSettings: () => Promise<void>;
   loadNetworkUsageSettings: () => Promise<void>;
-  saveDefaultTestUrl: (defaultTestUrl: string) => Promise<void>;
-  saveDelayTestTimeout: (delayTestTimeoutMs: number) => Promise<void>;
-  saveMinProbeInterval: (minProbeIntervalSec: number) => Promise<void>;
-  saveTestingSettings: (patch: Partial<HelperTestingSettings>) => Promise<void>;
-  saveGeminiLocationGroup: (group: string) => Promise<void>;
-  saveConfigPath: () => Promise<void>;
-  saveTrafficSettings: (settings: HelperTrafficSettings) => Promise<void>;
-  saveNetworkUsageSettings: (settings: HelperNetworkUsageSettings) => Promise<void>;
+  saveDefaultTestUrl: (defaultTestUrl: string) => Promise<boolean>;
+  saveDelayTestTimeout: (delayTestTimeoutMs: number) => Promise<boolean>;
+  saveMinProbeInterval: (minProbeIntervalSec: number) => Promise<boolean>;
+  saveTestingSettings: (patch: Partial<HelperTestingSettings>) => Promise<boolean>;
+  saveGeminiLocationGroup: (group: string) => Promise<boolean>;
+  saveConfigPath: () => Promise<boolean>;
+  saveTrafficSettings: (settings: HelperTrafficSettings) => Promise<boolean>;
+  saveNetworkUsageSettings: (settings: HelperNetworkUsageSettings) => Promise<boolean>;
   loadGroups: () => Promise<void>;
   loadNodeSources: () => Promise<void>;
   refreshNodeSources: () => Promise<void>;
   loadActiveProbes: () => Promise<void>;
   setEventStreamConnected: (connected: boolean) => void;
-  saveGroupConfig: (group: string, config: HelperGroupConfig) => Promise<void>;
+  saveGroupConfig: (group: string, config: HelperGroupConfig) => Promise<boolean>;
   probeGroup: (group: string, concurrency: number) => Promise<void>;
   inspectGroup: (group: string, inspection: HelperInspectionRequest) => Promise<void>;
   loadScores: (group: string) => Promise<void>;
@@ -289,12 +289,14 @@ export const useHelperStore = create<HelperState>()(
           }
           const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', payload);
           set({ testingSettings, error: null });
+          return true;
         } catch (error) {
           set({ error: formatHelperError(error) });
+          return false;
         }
       },
       saveGeminiLocationGroup: async (geminiLocationGroup: string) => {
-        await get().saveTestingSettings({ geminiLocationGroup });
+        return get().saveTestingSettings({ geminiLocationGroup });
       },
       saveDefaultTestUrl: async (defaultTestUrl) => {
         try {
@@ -316,8 +318,10 @@ export const useHelperStore = create<HelperState>()(
           const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', payload);
           set({ testingSettings, error: null });
           await get().loadGroups();
+          return true;
         } catch (error) {
           set({ error: formatHelperError(error) });
+          return false;
         }
       },
       saveDelayTestTimeout: async (delayTestTimeoutMs) => {
@@ -338,8 +342,10 @@ export const useHelperStore = create<HelperState>()(
           }
           const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', payload);
           set({ testingSettings, error: null });
+          return true;
         } catch (error) {
           set({ error: formatHelperError(error) });
+          return false;
         }
       },
       saveMinProbeInterval: async (minProbeIntervalSec) => {
@@ -362,8 +368,10 @@ export const useHelperStore = create<HelperState>()(
           const testingSettings = await client().putJson<HelperTestingSettings>('/api/v1/settings/testing', payload);
           set({ testingSettings, error: null });
           await get().loadGroups();
+          return true;
         } catch (error) {
           set({ error: formatHelperError(error) });
+          return false;
         }
       },
       saveConfigPath: async () => {
@@ -372,8 +380,10 @@ export const useHelperStore = create<HelperState>()(
             path: get().configPath.trim()
           });
           set({ configPath: response.path, error: null });
+          return true;
         } catch (error) {
           set({ error: formatHelperError(error) });
+          return false;
         }
       },
       saveTrafficSettings: async (settings) => {
@@ -389,8 +399,10 @@ export const useHelperStore = create<HelperState>()(
           if (trafficSettings.enabled) {
             await get().loadTraffic();
           }
+          return true;
         } catch (error) {
           set({ error: formatHelperError(error) });
+          return false;
         }
       },
       saveNetworkUsageSettings: async (settings) => {
@@ -409,8 +421,10 @@ export const useHelperStore = create<HelperState>()(
             networkUsageError: null,
             error: null
           });
+          return true;
         } catch (error) {
           set({ error: formatHelperError(error) });
+          return false;
         }
       },
       loadGroups: async () => {
@@ -512,8 +526,10 @@ export const useHelperStore = create<HelperState>()(
             groups: state.groups.map((item) => (item.name === group ? { ...item, config: saved } : item)),
             error: null
           }));
+          return true;
         } catch (error) {
           set({ error: formatHelperError(error) });
+          return false;
         }
       },
       probeGroup: async (group, concurrency) => {

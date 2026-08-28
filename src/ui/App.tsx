@@ -41,15 +41,22 @@ import {
   selectVisibleStrategyWallMembers
 } from '../core/strategyWallLayout';
 import {
+  HelperApiClient,
   buildSingBoxRemoteProfileUri,
+  type HelperConfigSource,
   type HelperGroupConfig,
+  type HelperGroupsResponse,
   type HelperInspectionRequest,
   type HelperNetworkUsageConnection,
+  type HelperNetworkUsageSettings,
   type HelperNetworkUsageSourceTrendBucketMode,
   type HelperNetworkUsageSourceTrendSource,
+  type HelperNodeSourcesResponse,
   type HelperNodeRiskChecks,
   type HelperNodeScore,
   type HelperRiskCheckStatus,
+  type HelperTestingSettings,
+  type HelperTrafficSettings,
   type ScoreScheme
 } from '../core/helperApi';
 import { getHelperAvailability } from '../core/helperStatus';
@@ -62,7 +69,7 @@ import {
   type ProxyRecord
 } from '../core/proxies';
 import { mergeImportedSecret, parseSettingsBackup, serializeSettingsBackup } from '../core/settingsBackup';
-import { stripSecretFromHash } from '../core/controller';
+import { stripSecretFromHash, validateNecessaryConfig } from '../core/controller';
 import { useControllerStore } from '../state/controllerStore';
 import { useConnectionStore } from '../state/connectionStore';
 import { useConfigStore } from '../state/configStore';
@@ -117,6 +124,18 @@ type InlineStatus = {
   tone: 'ok' | 'warn' | 'neutral';
   text: string;
 };
+
+type SettingsTransferStatus = {
+  tone: 'ok' | 'warn' | 'bad' | 'neutral';
+  text: string;
+};
+
+function formatSettingsImportError(error: unknown): string {
+  if (error instanceof Response) {
+    return `Helper HTTP ${error.status}`;
+  }
+  return error instanceof Error ? error.message : 'Import failed.';
+}
 
 
 const sections = [
@@ -1171,7 +1190,7 @@ export function App() {
   const [helperPendingAction, setHelperPendingAction] = useState<string | null>(null);
   const [helperStatusAction, setHelperStatusAction] = useState<string | null>(null);
   const [localBehaviorStatus, setLocalBehaviorStatus] = useState<InlineStatus | null>(null);
-  const [settingsTransferMessage, setSettingsTransferMessage] = useState('');
+  const [settingsTransferStatus, setSettingsTransferStatus] = useState<SettingsTransferStatus | null>(null);
   const [logScrollPaused, setLogScrollPaused] = useState(false);
   const [logsCopied, setLogsCopied] = useState(false);
   const [pendingConfirm, setPendingConfirm] = useState<{
@@ -2648,6 +2667,7 @@ export function App() {
         configPath: helper.configPath,
         testingSettings: helper.testingSettings,
         trafficSettings: helper.trafficSettings,
+        networkUsageSettings: helper.networkUsageSettings,
         groupConfigs: helper.groups.map((group) => ({ name: group.name, config: group.config }))
       },
       proxies: {
@@ -2667,7 +2687,10 @@ export function App() {
       }
     });
     downloadTextFile(`singdeck-settings-${new Date().toISOString().slice(0, 10)}.json`, content);
-    setSettingsTransferMessage('Exported current settings.');
+    setSettingsTransferStatus({
+      tone: 'ok',
+      text: 'Exported settings without credentials or runtime configuration content.'
+    });
   };
 
   const importSettingsFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -2678,58 +2701,239 @@ export function App() {
       return;
     }
 
+    setSettingsTransferStatus({ tone: 'neutral', text: 'Validating and importing settings...' });
     try {
       const backup = parseSettingsBackup(await file.text());
-      updateConfig({
+      const helperStateBeforeImport = useHelperStore.getState();
+      const requiresHelperWrite = Boolean(
+        backup.helper.configPath.trim() ||
+          backup.helper.testingSettings ||
+          backup.helper.trafficSettings ||
+          backup.helper.networkUsageSettings ||
+          backup.helper.groupConfigs.length > 0
+      );
+
+      if (requiresHelperWrite) {
+        const importedGeminiGroup = backup.helper.testingSettings?.geminiLocationGroup?.trim() ?? '';
+        const targetClient = new HelperApiClient({
+          baseUrl: backup.helper.helperUrl,
+          token: helperStateBeforeImport.helperToken
+        });
+        let targetConfigSource: HelperConfigSource;
+        let targetTestingSettings: HelperTestingSettings | null;
+        let targetTrafficSettings: HelperTrafficSettings | null;
+        let targetNetworkUsageSettings: HelperNetworkUsageSettings | null;
+        let targetGroups: HelperGroupsResponse | null;
+        let targetNodeSources: HelperNodeSourcesResponse | null;
+
+        try {
+          [
+            targetConfigSource,
+            targetTestingSettings,
+            targetTrafficSettings,
+            targetNetworkUsageSettings,
+            targetGroups,
+            targetNodeSources
+          ] = await Promise.all([
+            targetClient.getJson<HelperConfigSource>('/api/v1/config/source'),
+            backup.helper.testingSettings
+              ? targetClient.getJson<HelperTestingSettings>('/api/v1/settings/testing')
+              : Promise.resolve(null),
+            backup.helper.trafficSettings
+              ? targetClient.getJson<HelperTrafficSettings>('/api/v1/settings/traffic')
+              : Promise.resolve(null),
+            backup.helper.networkUsageSettings
+              ? targetClient.getJson<HelperNetworkUsageSettings>('/api/v1/settings/network-usage')
+              : Promise.resolve(null),
+            backup.helper.groupConfigs.length > 0 || importedGeminiGroup
+              ? targetClient.getJson<HelperGroupsResponse>('/api/v1/groups')
+              : Promise.resolve(null),
+            backup.helper.groupConfigs.some((group) => group.config.sourceRestrictionEnabled)
+              ? targetClient.getJson<HelperNodeSourcesResponse>('/api/v1/node-sources')
+              : Promise.resolve(null)
+          ]);
+        } catch (error) {
+          throw new Error(`Could not read target Helper settings: ${formatSettingsImportError(error)}`);
+        }
+
+        const targetGroupsByName = new Map((targetGroups?.groups ?? []).map((group) => [group.name, group]));
+        const missingGroups = backup.helper.groupConfigs
+          .map((group) => group.name)
+          .filter((name) => !targetGroupsByName.has(name));
+        if (missingGroups.length > 0) {
+          throw new Error(`Target Helper is missing strategy groups: ${missingGroups.join(', ')}.`);
+        }
+        if (importedGeminiGroup && !targetGroupsByName.has(importedGeminiGroup)) {
+          throw new Error(`Target Helper is missing Gemini strategy group: ${importedGeminiGroup}.`);
+        }
+
+        const targetSourceNames = new Set((targetNodeSources?.sources ?? []).map((source) => source.name));
+        const unknownSources = Array.from(
+          new Set(
+            backup.helper.groupConfigs.flatMap((group) =>
+              group.config.sourceRestrictionEnabled
+                ? (group.config.allowedNodeSources ?? []).filter((source) => !targetSourceNames.has(source))
+                : []
+            )
+          )
+        );
+        if (unknownSources.length > 0) {
+          throw new Error(`Target Helper is missing node sources: ${unknownSources.join(', ')}.`);
+        }
+
+        const invalidSourceRestrictionGroups = backup.helper.groupConfigs
+          .filter((group) => group.config.sourceRestrictionEnabled)
+          .filter((group) => targetGroupsByName.get(group.name)?.kind.toLowerCase() !== 'selector')
+          .map((group) => group.name);
+        if (invalidSourceRestrictionGroups.length > 0) {
+          throw new Error(
+            `Source restrictions require Selector groups: ${invalidSourceRestrictionGroups.join(', ')}.`
+          );
+        }
+
+        const rollbackSteps: Array<{ label: string; run: () => Promise<boolean> }> = [];
+        const saveOrThrow = async (label: string, save: () => Promise<boolean>) => {
+          if (!(await save())) {
+            throw new Error(`${label}: ${useHelperStore.getState().error ?? 'Helper rejected the setting.'}`);
+          }
+        };
+
+        try {
+          useHelperStore.getState().updateSettings({
+            helperUrl: backup.helper.helperUrl,
+            configPath: backup.helper.configPath
+          });
+          await saveOrThrow('Config path import failed', () => useHelperStore.getState().saveConfigPath());
+          rollbackSteps.push({
+            label: 'config path',
+            run: async () => {
+              useHelperStore.getState().updateSettings({ configPath: targetConfigSource.path });
+              return useHelperStore.getState().saveConfigPath();
+            }
+          });
+
+          if (backup.helper.testingSettings && targetTestingSettings) {
+            await saveOrThrow('Testing settings import failed', () =>
+              useHelperStore.getState().saveTestingSettings(backup.helper.testingSettings ?? {})
+            );
+            rollbackSteps.push({
+              label: 'testing settings',
+              run: () => useHelperStore.getState().saveTestingSettings(targetTestingSettings)
+            });
+          }
+          if (backup.helper.trafficSettings && targetTrafficSettings) {
+            await saveOrThrow('Traffic settings import failed', () =>
+              useHelperStore.getState().saveTrafficSettings(backup.helper.trafficSettings as HelperTrafficSettings)
+            );
+            rollbackSteps.push({
+              label: 'traffic settings',
+              run: () => useHelperStore.getState().saveTrafficSettings(targetTrafficSettings)
+            });
+          }
+          if (backup.helper.networkUsageSettings && targetNetworkUsageSettings) {
+            await saveOrThrow('Network usage settings import failed', () =>
+              useHelperStore
+                .getState()
+                .saveNetworkUsageSettings(backup.helper.networkUsageSettings as HelperNetworkUsageSettings)
+            );
+            rollbackSteps.push({
+              label: 'network usage settings',
+              run: () => useHelperStore.getState().saveNetworkUsageSettings(targetNetworkUsageSettings)
+            });
+          }
+          for (const group of backup.helper.groupConfigs) {
+            const targetGroup = targetGroupsByName.get(group.name);
+            if (!targetGroup) {
+              throw new Error(`Target Helper is missing strategy group ${group.name}.`);
+            }
+            await saveOrThrow(`Group ${group.name} import failed`, () =>
+              useHelperStore.getState().saveGroupConfig(group.name, group.config)
+            );
+            rollbackSteps.push({
+              label: `group ${group.name}`,
+              run: () => useHelperStore.getState().saveGroupConfig(group.name, targetGroup.config)
+            });
+          }
+        } catch (error) {
+          const rollbackFailures: string[] = [];
+          for (const step of [...rollbackSteps].reverse()) {
+            if (!(await step.run())) {
+              rollbackFailures.push(step.label);
+            }
+          }
+          useHelperStore.setState(helperStateBeforeImport);
+          const rollbackDetail =
+            rollbackFailures.length > 0
+              ? ` Rollback also failed for: ${rollbackFailures.join(', ')}.`
+              : rollbackSteps.length > 0
+                ? ' Previous Helper settings were restored.'
+                : '';
+          throw new Error(`${formatSettingsImportError(error)}${rollbackDetail}`);
+        }
+      } else {
+        useHelperStore.getState().updateSettings({
+          helperUrl: backup.helper.helperUrl,
+          configPath: backup.helper.configPath
+        });
+      }
+
+      const importedControllerConfig = {
         ...backup.controller.config,
-        secret: mergeImportedSecret(backup.controller.config.secret, config.secret)
+        secret: mergeImportedSecret(backup.controller.config.secret, config.secret),
+        delayTestConcurrency:
+          backup.helper.testingSettings?.probeConcurrency ?? backup.controller.config.delayTestConcurrency,
+        delayTestTimeoutMs:
+          backup.helper.testingSettings?.delayTestTimeoutMs ?? backup.controller.config.delayTestTimeoutMs
+      };
+      updateConfig(importedControllerConfig);
+      useControllerStore.setState({
+        urlSecretWarning: backup.controller.config.secret.trim() ? backup.controller.urlSecretWarning : urlSecretWarning
       });
-      useControllerStore.setState({ urlSecretWarning: backup.controller.urlSecretWarning });
-      helper.updateSettings({
-        helperUrl: backup.helper.helperUrl,
-        configPath: backup.helper.configPath
-      });
-      if (backup.helper.testingSettings?.defaultTestUrl) {
-        if (backup.helper.testingSettings.probeConcurrency) {
-          updateConfig({ delayTestConcurrency: backup.helper.testingSettings.probeConcurrency });
-        }
+      if (backup.helper.testingSettings) {
         setTestingDefaultUrlDraft(backup.helper.testingSettings.defaultTestUrl);
-        await helper.saveDefaultTestUrl(backup.helper.testingSettings.defaultTestUrl);
-        if (backup.helper.testingSettings.delayTestTimeoutMs) {
-          await helper.saveDelayTestTimeout(backup.helper.testingSettings.delayTestTimeoutMs);
-        }
-        if (backup.helper.testingSettings.minProbeIntervalSec) {
-          await helper.saveMinProbeInterval(backup.helper.testingSettings.minProbeIntervalSec);
-        }
+        setDelayConcurrencyDraft(String(backup.helper.testingSettings.probeConcurrency));
+        setDelayTimeoutDraft(String(backup.helper.testingSettings.delayTestTimeoutMs));
+        setMinProbeIntervalDraft(String(Math.round(backup.helper.testingSettings.minProbeIntervalSec / 60)));
       }
       if (backup.helper.trafficSettings) {
         setTrafficProfileDraft(backup.helper.trafficSettings.browserProfile);
-        await helper.saveTrafficSettings(backup.helper.trafficSettings);
       }
-      for (const [group, url] of Object.entries(backup.proxies.groupTestUrls)) {
-        proxies.setGroupTestUrl(group, url);
+      if (backup.helper.networkUsageSettings?.sampleIntervalSec) {
+        setNetworkUsageSampleIntervalDraft(String(backup.helper.networkUsageSettings.sampleIntervalSec));
       }
-      for (const [node, url] of Object.entries(backup.proxies.nodeTestUrls)) {
-        proxies.setNodeTestUrl(node, url);
+      useProxyStore
+        .getState()
+        .replaceTestUrls(backup.proxies.groupTestUrls, backup.proxies.nodeTestUrls);
+      if (backup.configWorkspace.contentRedacted !== true) {
+        useConfigStore.setState({
+          content: backup.configWorkspace.content,
+          issues: validateNecessaryConfig(backup.configWorkspace.content),
+          snapshots: backup.configWorkspace.snapshots.map((snapshot) => ({
+            ...snapshot,
+            issues: validateNecessaryConfig(snapshot.content)
+          })),
+          sourceEndpoint: backup.configWorkspace.sourceEndpoint,
+          lastLoadedAt: backup.configWorkspace.lastLoadedAt,
+          error: null
+        });
       }
-      for (const group of backup.helper.groupConfigs) {
-        await helper.saveGroupConfig(group.name, group.config);
-      }
-      useConfigStore.setState({
-        content: backup.configWorkspace.content,
-        issues: backup.configWorkspace.issues,
-        snapshots: backup.configWorkspace.snapshots,
-        sourceEndpoint: backup.configWorkspace.sourceEndpoint,
-        lastLoadedAt: backup.configWorkspace.lastLoadedAt,
-        error: null
-      });
       setRailExpanded(backup.ui.railExpanded);
       setStrategyGroupOrder(backup.ui.strategyGroupOrder ?? []);
-      setSettingsTransferMessage(`Imported ${backup.helper.groupConfigs.length} group configs.`);
-      void helper.loadGroups();
-      void proxies.refresh();
+      setSettingsTransferStatus({
+        tone: 'ok',
+        text: `Imported settings and ${backup.helper.groupConfigs.length} group configs. ${
+          backup.configWorkspace.contentRedacted === true
+            ? 'Credentials and current runtime workspace were kept.'
+            : 'Legacy runtime workspace data was restored.'
+        }`
+      });
+      if (requiresHelperWrite) {
+        void useHelperStore.getState().loadGroups();
+        void useHelperStore.getState().loadNodeSources();
+      }
+      void useProxyStore.getState().refresh();
     } catch (error) {
-      setSettingsTransferMessage(error instanceof Error ? error.message : 'Import failed.');
+      setSettingsTransferStatus({ tone: 'bad', text: formatSettingsImportError(error) });
     }
   };
 
@@ -3676,6 +3880,10 @@ export function App() {
                     Import settings
                   </button>
                 </div>
+                <div className="settings-scope-note">
+                  Controller/helper credentials and runtime configuration content are excluded. Existing credentials stay in
+                  this browser when importing.
+                </div>
                 <input
                   accept="application/json,.json"
                   hidden
@@ -3683,8 +3891,10 @@ export function App() {
                   ref={settingsImportInputRef}
                   type="file"
                 />
-                {settingsTransferMessage ? (
-                  <div className="settings-inline-status ok">{settingsTransferMessage}</div>
+                {settingsTransferStatus ? (
+                  <div className={`settings-inline-status ${settingsTransferStatus.tone}`}>
+                    {settingsTransferStatus.text}
+                  </div>
                 ) : null}
               </article>
             </div>
@@ -4233,18 +4443,33 @@ export function App() {
                           </span>
                         </div>
                         <div className="strategy-card-current">
-                          <span>Current</span>
+                          <span className="current-label">Current</span>
+                          <span className={`node-status-dot current-status-dot ${selectedDelayTone}`} aria-hidden="true" />
                           <strong
-                            className={rowSourceRestrictionEnabled && !rowCurrentSourceAllowed ? 'source-violation' : ''}
+                            className={`current-name ${rowSourceRestrictionEnabled && !rowCurrentSourceAllowed ? 'source-violation' : ''}`}
                             title={
                               rowSourceRestrictionEnabled && !rowCurrentSourceAllowed
                                 ? '当前节点不在允许来源内'
-                                : undefined
+                                : proxy.now || undefined
                             }
                           >
                             {proxy.now || '--'}
                           </strong>
-                          <small>{selectedProxy?.type ?? 'unknown'}</small>
+                          <span className="current-type">{selectedProxy?.type ?? 'unknown'}</span>
+                          {rowSourceRestrictionEnabled && !rowCurrentSourceAllowed ? (
+                            <button
+                              className="current-violation-badge"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void fixActiveSourceViolation(fullStrategyGroup);
+                              }}
+                              title="当前节点不在允许来源内，点击一键切回允许来源的最佳节点"
+                              type="button"
+                            >
+                              <Zap size={9} />
+                              <span>修复</span>
+                            </button>
+                          ) : null}
                         </div>
                         <div className="strategy-card-meta">
                           <span className={`mode-chip ${rowConfig.mode === 'delay' ? 'delay' : ''}`}>{rowConfig.mode}</span>
@@ -4289,20 +4514,6 @@ export function App() {
                               title={`${rowSourceEligibleCount} / ${fullStrategyGroup.all.length} 个节点符合来源限制`}
                             >
                               {rowCurrentSourceAllowed ? 'sources' : 'source violation'} {rowSourceEligibleCount}/{fullStrategyGroup.all.length}
-                              {!rowCurrentSourceAllowed ? (
-                                <button
-                                  className="source-violation-action"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    void fixActiveSourceViolation(fullStrategyGroup);
-                                  }}
-                                  title="一键切回允许来源的最佳节点"
-                                  type="button"
-                                >
-                                  <Zap size={9} />
-                                  <span>修复</span>
-                                </button>
-                              ) : null}
                             </span>
                           ) : null}
                           <span className="status-chip neutral">{Math.round(rowConfig.probeIntervalSec / 60)} min</span>

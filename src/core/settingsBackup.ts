@@ -1,6 +1,12 @@
 import type { ControllerConfig, ValidationIssue } from './controller';
 import type { ConfigSnapshot } from './configWorkspace';
-import type { HelperGroupConfig, HelperTestingSettings, HelperTrafficSettings } from './helperApi';
+import type {
+  HelperGroupConfig,
+  HelperNetworkUsageSettings,
+  HelperNodeRiskChecks,
+  HelperTestingSettings,
+  HelperTrafficSettings
+} from './helperApi';
 
 export const SETTINGS_BACKUP_SCHEMA = 'singdeck.settings.v1';
 
@@ -16,6 +22,7 @@ export type SettingsBackup = {
     configPath: string;
     testingSettings: HelperTestingSettings | null;
     trafficSettings?: HelperTrafficSettings | null;
+    networkUsageSettings?: HelperNetworkUsageSettings | null;
     groupConfigs: Array<{ name: string; config: HelperGroupConfig }>;
   };
   proxies: {
@@ -28,6 +35,7 @@ export type SettingsBackup = {
     snapshots: ConfigSnapshot[];
     sourceEndpoint: string | null;
     lastLoadedAt: string | null;
+    contentRedacted?: boolean;
   };
   ui: {
     railExpanded: boolean;
@@ -53,6 +61,17 @@ export function createSettingsBackup(input: SettingsBackupInput): SettingsBackup
       groupConfigs: input.helper.groupConfigs
         .filter((item) => item.name.trim())
         .sort((left, right) => left.name.localeCompare(right.name))
+    },
+    // Runtime configuration content can carry outbound passwords, UUIDs,
+    // private keys, and tokens. Settings backups intentionally keep only its
+    // non-sensitive source metadata; importing this backup leaves the current
+    // workspace untouched.
+    configWorkspace: {
+      ...input.configWorkspace,
+      content: '',
+      issues: [],
+      snapshots: [],
+      contentRedacted: true
     }
   };
 }
@@ -96,10 +115,13 @@ function assertSettingsBackup(value: unknown): asserts value is SettingsBackup {
   if (helper.trafficSettings !== undefined && helper.trafficSettings !== null) {
     validateTrafficSettings(helper.trafficSettings, 'helper.trafficSettings');
   }
+  if (helper.networkUsageSettings !== undefined && helper.networkUsageSettings !== null) {
+    validateNetworkUsageSettings(helper.networkUsageSettings, 'helper.networkUsageSettings');
+  }
   const groupConfigs = requireArray(helper.groupConfigs, 'helper.groupConfigs');
   groupConfigs.forEach((item, index) => {
     const group = requireRecord(item, `helper.groupConfigs[${index}]`);
-    requireString(group.name, `helper.groupConfigs[${index}].name`);
+    requireNonEmptyString(group.name, `helper.groupConfigs[${index}].name`);
     validateGroupConfig(group.config, `helper.groupConfigs[${index}].config`);
   });
 
@@ -109,10 +131,18 @@ function assertSettingsBackup(value: unknown): asserts value is SettingsBackup {
 
   const configWorkspace = requireRecord(backup.configWorkspace, 'configWorkspace');
   requireString(configWorkspace.content, 'configWorkspace.content');
-  requireArray(configWorkspace.issues, 'configWorkspace.issues');
-  requireArray(configWorkspace.snapshots, 'configWorkspace.snapshots');
+  validateIssues(configWorkspace.issues, 'configWorkspace.issues');
+  validateSnapshots(configWorkspace.snapshots, 'configWorkspace.snapshots');
   requireNullableString(configWorkspace.sourceEndpoint, 'configWorkspace.sourceEndpoint');
   requireNullableString(configWorkspace.lastLoadedAt, 'configWorkspace.lastLoadedAt');
+  if (configWorkspace.contentRedacted !== undefined) {
+    requireBoolean(configWorkspace.contentRedacted, 'configWorkspace.contentRedacted');
+  }
+  if (configWorkspace.contentRedacted === true) {
+    if (configWorkspace.content !== '' || requireArray(configWorkspace.snapshots, 'configWorkspace.snapshots').length > 0) {
+      throw new Error('Invalid SingDeck settings backup: redacted config workspace must not contain content or snapshots.');
+    }
+  }
 
   const ui = requireRecord(backup.ui, 'ui');
   requireBoolean(ui.railExpanded, 'ui.railExpanded');
@@ -128,24 +158,36 @@ function validateControllerConfig(value: unknown, path: string): void {
   requireString(config.controllerUrl, `${path}.controllerUrl`);
   requireString(config.secret, `${path}.secret`);
   if (config.note !== undefined) requireString(config.note, `${path}.note`);
-  requireString(config.defaultTestUrl, `${path}.defaultTestUrl`);
-  requireNumber(config.delayTestConcurrency, `${path}.delayTestConcurrency`);
-  requireNumber(config.delayTestTimeoutMs, `${path}.delayTestTimeoutMs`);
+  requireNonEmptyString(config.defaultTestUrl, `${path}.defaultTestUrl`);
+  requireIntegerInRange(config.delayTestConcurrency, 1, 64, `${path}.delayTestConcurrency`);
+  requireIntegerInRange(config.delayTestTimeoutMs, 500, 60_000, `${path}.delayTestTimeoutMs`);
   if (config.updatedAt !== undefined) requireString(config.updatedAt, `${path}.updatedAt`);
 }
 
 function validateTestingSettings(value: unknown, path: string): void {
   const settings = requireRecord(value, path);
-  requireString(settings.defaultTestUrl, `${path}.defaultTestUrl`);
-  requireNumber(settings.delayTestTimeoutMs, `${path}.delayTestTimeoutMs`);
-  requireNumber(settings.minProbeIntervalSec, `${path}.minProbeIntervalSec`);
-  requireNumber(settings.probeConcurrency, `${path}.probeConcurrency`);
+  requireNonEmptyString(settings.defaultTestUrl, `${path}.defaultTestUrl`);
+  requireIntegerInRange(settings.delayTestTimeoutMs, 500, 60_000, `${path}.delayTestTimeoutMs`);
+  requireIntegerInRange(settings.minProbeIntervalSec, 60, 86_400, `${path}.minProbeIntervalSec`);
+  requireIntegerInRange(settings.probeConcurrency, 1, 64, `${path}.probeConcurrency`);
+  if (settings.geminiLocationGroup !== undefined) {
+    requireString(settings.geminiLocationGroup, `${path}.geminiLocationGroup`);
+  }
 }
 
 function validateTrafficSettings(value: unknown, path: string): void {
   const settings = requireRecord(value, path);
   requireBoolean(settings.enabled, `${path}.enabled`);
   requireString(settings.browserProfile, `${path}.browserProfile`);
+}
+
+function validateNetworkUsageSettings(value: unknown, path: string): void {
+  const settings = requireRecord(value, path);
+  requireBoolean(settings.enabled, `${path}.enabled`);
+  requireIntegerInRange(settings.retentionDays, 1, 90, `${path}.retentionDays`);
+  if (settings.sampleIntervalSec !== undefined) {
+    requireIntegerInRange(settings.sampleIntervalSec, 2, 3600, `${path}.sampleIntervalSec`);
+  }
 }
 
 function validateGroupConfig(value: unknown, path: string): void {
@@ -156,18 +198,62 @@ function validateGroupConfig(value: unknown, path: string): void {
   requireEnum(config.scheme, ['LatencyFirst', 'Balanced'], `${path}.scheme`);
   requireBoolean(config.autoSwitch, `${path}.autoSwitch`);
   requireBoolean(config.autoProbe, `${path}.autoProbe`);
-  requireNumber(config.probeIntervalSec, `${path}.probeIntervalSec`);
+  requireIntegerInRange(config.probeIntervalSec, 1, 86_400, `${path}.probeIntervalSec`);
+  if (config.geminiLocationProbeEnabled !== undefined) {
+    requireBoolean(config.geminiLocationProbeEnabled, `${path}.geminiLocationProbeEnabled`);
+  }
+  if (config.nodeRisk !== undefined) {
+    validateNodeRiskChecks(config.nodeRisk, `${path}.nodeRisk`);
+  }
   if (config.sourceRestrictionEnabled !== undefined) {
     requireBoolean(config.sourceRestrictionEnabled, `${path}.sourceRestrictionEnabled`);
   }
   if (config.allowedNodeSources !== undefined) {
     requireArray(config.allowedNodeSources, `${path}.allowedNodeSources`).forEach((source, index) =>
-      requireString(source, `${path}.allowedNodeSources[${index}]`)
+      requireNonEmptyString(source, `${path}.allowedNodeSources[${index}]`)
     );
   }
   if (config.allowUnlabeledNodes !== undefined) {
     requireBoolean(config.allowUnlabeledNodes, `${path}.allowUnlabeledNodes`);
   }
+  if (
+    config.sourceRestrictionEnabled === true &&
+    (!Array.isArray(config.allowedNodeSources) || config.allowedNodeSources.length === 0) &&
+    config.allowUnlabeledNodes !== true
+  ) {
+    throw new Error(
+      `Invalid SingDeck settings backup: ${path} must allow at least one node source or unlabeled nodes when source restriction is enabled.`
+    );
+  }
+}
+
+function validateNodeRiskChecks(value: unknown, path: string): asserts value is HelperNodeRiskChecks {
+  const checks = requireRecord(value, path);
+  (['exitIp', 'addressScope', 'networkIdentity', 'networkClass', 'routeSecurity', 'tor', 'privacy', 'abuse'] as const)
+    .forEach((key) => requireBoolean(checks[key], `${path}.${key}`));
+}
+
+function validateIssues(value: unknown, path: string): void {
+  requireArray(value, path).forEach((item, index) => {
+    const issue = requireRecord(item, `${path}[${index}]`);
+    requireEnum(issue.severity, ['error', 'info'], `${path}[${index}].severity`);
+    requireString(issue.path, `${path}[${index}].path`);
+    requireString(issue.message, `${path}[${index}].message`);
+    if (issue.suggestion !== undefined) {
+      requireString(issue.suggestion, `${path}[${index}].suggestion`);
+    }
+  });
+}
+
+function validateSnapshots(value: unknown, path: string): void {
+  requireArray(value, path).forEach((item, index) => {
+    const snapshot = requireRecord(item, `${path}[${index}]`);
+    requireNonEmptyString(snapshot.id, `${path}[${index}].id`);
+    requireNonEmptyString(snapshot.name, `${path}[${index}].name`);
+    requireString(snapshot.content, `${path}[${index}].content`);
+    validateIssues(snapshot.issues, `${path}[${index}].issues`);
+    requireString(snapshot.createdAt, `${path}[${index}].createdAt`);
+  });
 }
 
 function validateStringRecord(value: unknown, path: string): void {
@@ -195,6 +281,13 @@ function requireString(value: unknown, path: string): void {
   }
 }
 
+function requireNonEmptyString(value: unknown, path: string): void {
+  requireString(value, path);
+  if (!(value as string).trim()) {
+    throw new Error(`Invalid SingDeck settings backup: ${path} must not be empty.`);
+  }
+}
+
 function requireNullableString(value: unknown, path: string): void {
   if (value !== null && typeof value !== 'string') {
     throw new Error(`Invalid SingDeck settings backup: ${path} must be a string or null.`);
@@ -204,6 +297,13 @@ function requireNullableString(value: unknown, path: string): void {
 function requireNumber(value: unknown, path: string): void {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     throw new Error(`Invalid SingDeck settings backup: ${path} must be a finite number.`);
+  }
+}
+
+function requireIntegerInRange(value: unknown, min: number, max: number, path: string): void {
+  requireNumber(value, path);
+  if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) {
+    throw new Error(`Invalid SingDeck settings backup: ${path} must be an integer from ${min} to ${max}.`);
   }
 }
 

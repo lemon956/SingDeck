@@ -1782,24 +1782,80 @@ input::placeholder, textarea::placeholder {
 .strategy-card-current {
   grid-area: current;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
+  min-width: 0;
   font-size: 11.5px;
 }
 
-.strategy-card-current span {
+.strategy-card-current .current-label {
   color: var(--quiet);
-  font-size: 10.5px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
 }
 
-.strategy-card-current strong {
+.strategy-card-current .current-status-dot {
+  width: 6.5px;
+  height: 6.5px;
+  border-radius: var(--radius-pill);
+  flex-shrink: 0;
+}
+
+.strategy-card-current .current-name {
   color: var(--cyan);
   font-weight: 600;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.strategy-card-current small {
+.strategy-card-current .current-name.source-violation {
+  color: #f87171;
+}
+
+.strategy-card-current .current-type {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 0 4px;
+  border-radius: 3px;
+  line-height: 13px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+
+.strategy-card-current .current-violation-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
+  height: 18px;
+  border-radius: var(--radius-xs);
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+  font-size: 9.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: all 150ms ease;
+}
+
+.strategy-card-current .current-violation-badge:hover {
+  background: rgba(239, 68, 68, 0.28);
+  border-color: #ef4444;
+  color: #ffffff;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.35);
 }
 
 .strategy-card-meta {
@@ -1808,6 +1864,108 @@ input::placeholder, textarea::placeholder {
   align-items: center;
   justify-content: flex-end;
   gap: 5px;
+}
+
+.strategy-card-meta .status-chip,
+.strategy-card-meta .mode-chip,
+.strategy-card-meta .execution-chip,
+.strategy-card-meta .delay-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3.5px;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  white-space: nowrap;
+  box-sizing: border-box;
+  text-transform: lowercase;
+  line-height: 18px;
+  letter-spacing: 0.02em;
+  font-family: var(--font-sans);
+  transition: all var(--transition-fast);
+}
+
+.strategy-card-meta .mode-chip {
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  font-size: 9.5px;
+}
+
+.strategy-card-meta .mode-chip.delay {
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.1);
+}
+
+.strategy-card-meta .mode-chip:not(.delay) {
+  color: #c084fc;
+  border-color: rgba(192, 132, 252, 0.35);
+  background: rgba(192, 132, 252, 0.1);
+}
+
+.strategy-card-meta .execution-chip {
+  color: var(--quiet);
+  border-color: var(--line-subtle);
+  background: rgba(0, 0, 0, 0.25);
+  font-size: 9.5px;
+  font-family: var(--font-mono);
+}
+
+.strategy-card-meta .delay-pill {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: none;
+  cursor: pointer;
+}
+
+.strategy-card-meta .delay-pill:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.strategy-card-meta .status-chip.ok {
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.12);
+}
+
+.strategy-card-meta .status-chip.warn {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.12);
+}
+
+.strategy-card-meta .status-chip.bad,
+.strategy-card-meta .status-chip.error {
+  color: #f87171;
+  border-color: rgba(248, 113, 113, 0.35);
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.strategy-card-meta .status-chip.blue,
+.strategy-card-meta .status-chip.info {
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.strategy-card-meta .status-chip.neutral {
+  color: var(--quiet);
+  border-color: var(--line-subtle);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.strategy-card-meta .status-chip.source-limit {
+  font-family: var(--font-mono);
+  letter-spacing: 0.01em;
 }
 
 .strategy-card-actions {
@@ -3498,6 +3656,21 @@ details.risk-cluster-container[open] > summary::before {
 .settings-inline-status.ok {
   background: var(--green-bg);
   color: var(--green);
+}
+
+.settings-inline-status.warn {
+  background: var(--amber-bg);
+  color: var(--amber);
+}
+
+.settings-inline-status.bad {
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.settings-inline-status.neutral {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--muted);
 }
 
 .settings-scope-note {

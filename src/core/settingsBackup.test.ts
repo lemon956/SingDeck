@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { createSettingsBackup, mergeImportedSecret, parseSettingsBackup } from './settingsBackup';
+import {
+  createSettingsBackup,
+  mergeImportedSecret,
+  parseSettingsBackup,
+  serializeSettingsBackup
+} from './settingsBackup';
 
 function controllerInput(secret: string) {
   return {
@@ -54,11 +59,17 @@ describe('settings backup', () => {
           defaultTestUrl: 'https://github.com',
           delayTestTimeoutMs: 5000,
           minProbeIntervalSec: 60,
-          probeConcurrency: 4
+          probeConcurrency: 4,
+          geminiLocationGroup: 'openai-us'
         },
         trafficSettings: {
           enabled: true,
           browserProfile: '/home/alice/.config/google-chrome/Default'
+        },
+        networkUsageSettings: {
+          enabled: true,
+          retentionDays: 14,
+          sampleIntervalSec: 30
         },
         groupConfigs: [
           {
@@ -99,8 +110,66 @@ describe('settings backup', () => {
       'self-hosted'
     ]);
     expect(backup.helper.trafficSettings?.browserProfile).toBe('/home/alice/.config/google-chrome/Default');
+    expect(backup.helper.testingSettings?.geminiLocationGroup).toBe('openai-us');
+    expect(backup.helper.networkUsageSettings).toEqual({
+      enabled: true,
+      retentionDays: 14,
+      sampleIntervalSec: 30
+    });
     expect(backup.proxies.groupTestUrls['openai-us']).toBe('https://api.openai.com');
     expect(backup.ui.strategyGroupOrder).toEqual(['openai-us']);
+  });
+
+  it('removes runtime configuration content and snapshots from serialized backups', () => {
+    const text = serializeSettingsBackup({
+      ...controllerInput('controller-secret'),
+      configWorkspace: {
+        content: '{"outbounds":[{"password":"node-password"}]}',
+        issues: [{ severity: 'error', path: 'outbounds.0', message: 'synthetic issue' }],
+        snapshots: [
+          {
+            id: 'snapshot-1',
+            name: 'before import',
+            content: '{"private_key":"private-key-value"}',
+            issues: [],
+            createdAt: '2026-08-28T09:00:00.000Z'
+          }
+        ],
+        sourceEndpoint: 'helper:/api/v1/config',
+        lastLoadedAt: '2026-08-28T09:00:00.000Z'
+      }
+    });
+
+    expect(text).not.toContain('controller-secret');
+    expect(text).not.toContain('node-password');
+    expect(text).not.toContain('private-key-value');
+    const backup = parseSettingsBackup(text);
+    expect(backup.configWorkspace).toMatchObject({
+      content: '',
+      issues: [],
+      snapshots: [],
+      contentRedacted: true
+    });
+  });
+
+  it('accepts a deeply valid legacy workspace backup without the redaction marker', () => {
+    const legacy = createSettingsBackup(controllerInput(''));
+    delete legacy.configWorkspace.contentRedacted;
+    legacy.configWorkspace.content = '{}';
+    legacy.configWorkspace.issues = [
+      { severity: 'info', path: 'experimental.clash_api', message: 'legacy diagnostic' }
+    ];
+    legacy.configWorkspace.snapshots = [
+      {
+        id: 'legacy-1',
+        name: 'legacy snapshot',
+        content: '{}',
+        issues: [],
+        createdAt: '2026-08-28T09:00:00.000Z'
+      }
+    ];
+
+    expect(parseSettingsBackup(JSON.stringify(legacy)).configWorkspace.content).toBe('{}');
   });
 
   it('rejects JSON that is not a SingDeck settings backup', () => {
@@ -135,5 +204,92 @@ describe('settings backup', () => {
         })
       )
     ).toThrow(/delayTestConcurrency must be a finite number/);
+  });
+
+  it('rejects malformed workspace diagnostics and snapshots', () => {
+    const malformedIssue = JSON.parse(JSON.stringify(createSettingsBackup(controllerInput(''))));
+    malformedIssue.configWorkspace.contentRedacted = false;
+    malformedIssue.configWorkspace.issues = [{ severity: 'fatal', path: 1, message: false }];
+    expect(() => parseSettingsBackup(JSON.stringify(malformedIssue))).toThrow(/severity has an unsupported value/);
+
+    const malformedSnapshot = JSON.parse(JSON.stringify(createSettingsBackup(controllerInput(''))));
+    malformedSnapshot.configWorkspace.contentRedacted = false;
+    malformedSnapshot.configWorkspace.snapshots = [{ id: '', name: 'snapshot' }];
+    expect(() => parseSettingsBackup(JSON.stringify(malformedSnapshot))).toThrow(/snapshots\[0\]\.id must not be empty/);
+  });
+
+  it('rejects out-of-range network usage and testing settings', () => {
+    const invalidNetworkUsage = JSON.parse(JSON.stringify(createSettingsBackup(controllerInput(''))));
+    invalidNetworkUsage.helper.networkUsageSettings = {
+      enabled: true,
+      retentionDays: 91,
+      sampleIntervalSec: 1
+    };
+    expect(() => parseSettingsBackup(JSON.stringify(invalidNetworkUsage))).toThrow(
+      /retentionDays must be an integer from 1 to 90/
+    );
+
+    const invalidTesting = JSON.parse(JSON.stringify(createSettingsBackup(controllerInput(''))));
+    invalidTesting.helper.testingSettings = {
+      defaultTestUrl: 'https://example.com',
+      delayTestTimeoutMs: 5000,
+      minProbeIntervalSec: 60,
+      probeConcurrency: 4,
+      geminiLocationGroup: 42
+    };
+    expect(() => parseSettingsBackup(JSON.stringify(invalidTesting))).toThrow(/geminiLocationGroup must be a string/);
+  });
+
+  it('rejects incomplete node risk settings and redacted backups carrying snapshots', () => {
+    const invalidRisk = JSON.parse(JSON.stringify(createSettingsBackup(controllerInput(''))));
+    invalidRisk.helper.groupConfigs = [
+      {
+        name: 'select',
+        config: {
+          testUrl: 'https://example.com',
+          testUrlOverridden: true,
+          mode: 'score',
+          scheme: 'Balanced',
+          autoSwitch: true,
+          autoProbe: false,
+          probeIntervalSec: 900,
+          nodeRisk: { exitIp: true }
+        }
+      }
+    ];
+    expect(() => parseSettingsBackup(JSON.stringify(invalidRisk))).toThrow(/nodeRisk.addressScope must be a boolean/);
+
+    const invalidRedacted = JSON.parse(JSON.stringify(createSettingsBackup(controllerInput(''))));
+    invalidRedacted.configWorkspace.snapshots = [
+      { id: '1', name: 'unsafe', content: '{}', issues: [], createdAt: '2026-08-28T09:00:00.000Z' }
+    ];
+    expect(() => parseSettingsBackup(JSON.stringify(invalidRedacted))).toThrow(
+      /redacted config workspace must not contain content or snapshots/
+    );
+  });
+
+  it('rejects a source restriction that cannot select any nodes', () => {
+    const invalidRestriction = JSON.parse(JSON.stringify(createSettingsBackup(controllerInput(''))));
+    invalidRestriction.helper.groupConfigs = [
+      {
+        name: 'select',
+        config: {
+          testUrl: 'https://example.com',
+          testUrlOverridden: true,
+          mode: 'score',
+          scheme: 'Balanced',
+          autoSwitch: true,
+          autoProbe: false,
+          probeIntervalSec: 900,
+          sourceRestrictionEnabled: true,
+          allowedNodeSources: [],
+          allowUnlabeledNodes: false
+        }
+      }
+    ];
+
+    expect(() => parseSettingsBackup(JSON.stringify(invalidRestriction))).toThrow(
+      /must allow at least one node source or unlabeled nodes/
+    );
   });
 });

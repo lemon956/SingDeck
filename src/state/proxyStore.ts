@@ -37,6 +37,7 @@ type ProxyState = {
   setQuery: (query: string) => void;
   setGroupTestUrl: (name: string, url: string) => void;
   setNodeTestUrl: (name: string, url: string) => void;
+  replaceTestUrls: (groupTestUrls: Record<string, string>, nodeTestUrls: Record<string, string>) => void;
   refresh: () => Promise<void>;
   switchProxy: (group: string, name: string) => Promise<void>;
   testProxy: (name: string, group?: string, testUrl?: string) => Promise<void>;
@@ -69,6 +70,11 @@ export const useProxyStore = create<ProxyState>()(
         set((state) => ({
           nodeTestUrls: { ...state.nodeTestUrls, [name]: url }
         })),
+      replaceTestUrls: (groupTestUrls, nodeTestUrls) =>
+        set({
+          groupTestUrls: { ...groupTestUrls },
+          nodeTestUrls: { ...nodeTestUrls }
+        }),
       refresh: async () => {
         const { config } = useControllerStore.getState();
         if (!config.controllerUrl) {
@@ -326,7 +332,8 @@ export const useProxyStore = create<ProxyState>()(
     {
       name: 'singdeck-proxy-preferences',
       partialize: (state) => ({
-        groupTestUrls: state.groupTestUrls
+        groupTestUrls: state.groupTestUrls,
+        nodeTestUrls: state.nodeTestUrls
       })
     }
   )

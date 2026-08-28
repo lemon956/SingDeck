@@ -2,10 +2,12 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useControllerStore } from '../state/controllerStore';
 import { useConnectionStore } from '../state/connectionStore';
+import { useConfigStore } from '../state/configStore';
 import { useHelperStore } from '../state/helperStore';
 import { useProxyStore } from '../state/proxyStore';
 import { useRuntimeStore } from '../state/runtimeStore';
 import type { ConnectionRecord } from '../core/connections';
+import { serializeSettingsBackup } from '../core/settingsBackup';
 import { App } from './App';
 
 const groupConfig = {
@@ -17,6 +19,33 @@ const groupConfig = {
   autoProbe: false,
   probeIntervalSec: 600
 };
+
+const originalHelperImportActions = (() => {
+  const state = useHelperStore.getState();
+  return {
+    updateSettings: state.updateSettings,
+    saveConfigPath: state.saveConfigPath,
+    saveTestingSettings: state.saveTestingSettings,
+    saveTrafficSettings: state.saveTrafficSettings,
+    saveNetworkUsageSettings: state.saveNetworkUsageSettings,
+    saveGroupConfig: state.saveGroupConfig,
+    loadGroups: state.loadGroups,
+    loadNodeSources: state.loadNodeSources
+  };
+})();
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' }
+  });
+}
+
+function settingsBackupFile(content: string): File {
+  const file = new File([content], 'singdeck-settings.json', { type: 'application/json' });
+  Object.defineProperty(file, 'text', { value: async () => content });
+  return file;
+}
 
 function localEpochSeconds(year: number, monthIndex: number, day: number): number {
   return new Date(year, monthIndex, day).getTime() / 1000;
@@ -664,7 +693,7 @@ describe('App proxy workspace', () => {
   });
 
   it('saves the designated group Gemini switch with the sidebar configuration', async () => {
-    const saveGroupConfig = vi.fn(async () => {});
+    const saveGroupConfig = vi.fn(async () => true);
     useHelperStore.setState({
       testingSettings: {
         defaultTestUrl: groupConfig.testUrl,
@@ -689,7 +718,7 @@ describe('App proxy workspace', () => {
   });
 
   it('configures a Selector source restriction with a multi-select dropdown', async () => {
-    const saveGroupConfig = vi.fn(async () => {});
+    const saveGroupConfig = vi.fn(async () => true);
     useHelperStore.setState({
       saveGroupConfig,
       nodeSources: [
@@ -755,7 +784,7 @@ describe('App proxy workspace', () => {
   });
 
   it('does not save an enabled source restriction with no selected category', () => {
-    const saveGroupConfig = vi.fn(async () => {});
+    const saveGroupConfig = vi.fn(async () => true);
     useHelperStore.setState({ saveGroupConfig });
 
     render(<App />);
@@ -781,7 +810,7 @@ describe('App proxy workspace', () => {
 
   it('updates the inspector mode immediately while helper config save is pending', () => {
     useHelperStore.setState({
-      saveGroupConfig: vi.fn(() => new Promise<void>(() => {}))
+      saveGroupConfig: vi.fn(() => new Promise<boolean>(() => {}))
     });
 
     render(<App />);
@@ -793,7 +822,7 @@ describe('App proxy workspace', () => {
   });
 
   it('saves the current inspector draft when the save settings button is clicked', async () => {
-    const saveGroupConfig = vi.fn(async () => {});
+    const saveGroupConfig = vi.fn(async () => true);
     useHelperStore.setState({ saveGroupConfig });
 
     render(<App />);
@@ -820,7 +849,7 @@ describe('App proxy workspace', () => {
   });
 
   it('saves the inspector draft only once when an edited field blurs before save is clicked', async () => {
-    const saveGroupConfig = vi.fn(async () => {});
+    const saveGroupConfig = vi.fn(async () => true);
     useHelperStore.setState({ saveGroupConfig });
 
     render(<App />);
@@ -876,7 +905,7 @@ describe('App proxy workspace', () => {
 
   it('opens the config QR dialog immediately while helper refresh is pending', () => {
     useHelperStore.setState({
-      saveConfigPath: vi.fn(() => new Promise<void>(() => {})),
+      saveConfigPath: vi.fn(() => new Promise<boolean>(() => {})),
       checkHealth: vi.fn(async () => {})
     });
 
@@ -1782,6 +1811,7 @@ describe('App proxy workspace', () => {
     window.location.hash = '#/controller';
     const saveNetworkUsageSettings = vi.fn(async (settings) => {
       useHelperStore.setState({ networkUsageSettings: settings });
+      return true;
     });
     useHelperStore.setState({
       networkUsageSettings: { enabled: false, retentionDays: 7 },
@@ -1866,7 +1896,7 @@ describe('App proxy workspace', () => {
 
   it('configures the Gemini inspection group from Settings without a name convention', async () => {
     window.location.hash = '#/controller';
-    const saveGeminiLocationGroup = vi.fn(async () => {});
+    const saveGeminiLocationGroup = vi.fn(async () => true);
     useHelperStore.setState({
       testingSettings: {
         defaultTestUrl: groupConfig.testUrl,
@@ -1892,6 +1922,7 @@ describe('App proxy workspace', () => {
     window.location.hash = '#/controller';
     const saveNetworkUsageSettings = vi.fn(async (settings) => {
       useHelperStore.setState({ networkUsageSettings: settings });
+      return true;
     });
     useHelperStore.setState({
       networkUsageSettings: { enabled: true, retentionDays: 7, sampleIntervalSec: 5 },
@@ -1911,6 +1942,429 @@ describe('App proxy workspace', () => {
         sampleIntervalSec: 30
       })
     );
+  });
+
+  it('imports every backed-up setting only after Helper writes succeed', async () => {
+    window.location.hash = '#/controller';
+    const previousTestingSettings = {
+      defaultTestUrl: groupConfig.testUrl,
+      delayTestTimeoutMs: 5000,
+      minProbeIntervalSec: 60,
+      probeConcurrency: 4,
+      geminiLocationGroup: ''
+    };
+    let currentTargetGroupConfig = groupConfig;
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        const body = init?.body ? JSON.parse(String(init.body)) : null;
+        requests.push({ method, url, body });
+        if (url.endsWith('/api/v1/config/source')) {
+          return jsonResponse(method === 'PUT' ? body : { path: '/before/config.json' });
+        }
+        if (url.endsWith('/api/v1/settings/testing')) {
+          return jsonResponse(method === 'PUT' ? body : previousTestingSettings);
+        }
+        if (url.endsWith('/api/v1/settings/traffic')) {
+          return jsonResponse(method === 'PUT' ? body : { enabled: false, browserProfile: '/before/profile' });
+        }
+        if (url.endsWith('/api/v1/settings/network-usage')) {
+          return jsonResponse(method === 'PUT' ? body : { enabled: false, retentionDays: 7, sampleIntervalSec: 5 });
+        }
+        if (url.endsWith('/api/v1/groups/select/config') && method === 'PUT') {
+          currentTargetGroupConfig = body;
+          return jsonResponse(body);
+        }
+        if (url.endsWith('/api/v1/groups/select/scores')) {
+          return jsonResponse({
+            group: 'select',
+            mode: 'score',
+            scheme: 'Balanced',
+            testUrl: groupConfig.testUrl,
+            recommended: null,
+            applyError: null,
+            nodes: []
+          });
+        }
+        if (url.endsWith('/api/v1/groups')) {
+          return jsonResponse({
+            groups: [
+              {
+                name: 'select',
+                kind: 'Selector',
+                now: 'hk-1',
+                all: ['hk-1', 'jp-1'],
+                config: currentTargetGroupConfig,
+                recommended: null,
+                applyError: null
+              }
+            ]
+          });
+        }
+        if (url.endsWith('/api/v1/node-sources')) {
+          return jsonResponse({ sources: [] });
+        }
+        if (url.endsWith('/api/v1/health')) {
+          return jsonResponse({
+            ok: true,
+            version: 'test',
+            sqlite: true,
+            controllerConfigured: true,
+            controllerReachable: true,
+            mobileConfigUrl: null,
+            error: null
+          });
+        }
+        return jsonResponse({});
+      })
+    );
+    useControllerStore.setState((state) => ({
+      config: { ...state.config, secret: 'kept-browser-secret' },
+      urlSecretWarning: true
+    }));
+    useConfigStore.setState({ content: '{"keep":"workspace"}', issues: [], snapshots: [] });
+    useProxyStore.setState({
+      groupTestUrls: { stale: 'https://stale.example/group' },
+      nodeTestUrls: { stale: 'https://stale.example/node' }
+    });
+    useHelperStore.setState({
+      ...originalHelperImportActions,
+      helperUrl: 'http://helper.local',
+      configPath: '/before/config.json',
+      testingSettings: previousTestingSettings,
+      trafficSettings: { enabled: false, browserProfile: '/before/profile' },
+      networkUsageSettings: { enabled: false, retentionDays: 7, sampleIntervalSec: 5 }
+    });
+    const importedGroupConfig = {
+      ...groupConfig,
+      testUrl: 'https://imported.example/group',
+      testUrlOverridden: true,
+      autoSwitch: true
+    };
+    const backup = serializeSettingsBackup({
+      controller: {
+        config: {
+          controllerUrl: '',
+          secret: 'source-secret',
+          note: 'imported',
+          defaultTestUrl: 'https://imported.example/default',
+          delayTestConcurrency: 7,
+          delayTestTimeoutMs: 4500
+        },
+        urlSecretWarning: false
+      },
+      helper: {
+        helperUrl: 'http://helper.local',
+        configPath: '/imported/config.json',
+        testingSettings: {
+          defaultTestUrl: 'https://imported.example/default',
+          delayTestTimeoutMs: 4500,
+          minProbeIntervalSec: 300,
+          probeConcurrency: 7,
+          geminiLocationGroup: 'select'
+        },
+        trafficSettings: { enabled: false, browserProfile: '/imported/profile' },
+        networkUsageSettings: { enabled: true, retentionDays: 14, sampleIntervalSec: 30 },
+        groupConfigs: [{ name: 'select', config: importedGroupConfig }]
+      },
+      proxies: {
+        groupTestUrls: { select: 'https://imported.example/group' },
+        nodeTestUrls: { 'hk-1': 'https://imported.example/node' }
+      },
+      configWorkspace: {
+        content: '{"password":"must-not-import"}',
+        issues: [],
+        snapshots: [],
+        sourceEndpoint: 'source',
+        lastLoadedAt: null
+      },
+      ui: { railExpanded: true, strategyGroupOrder: ['select'] }
+    });
+
+    render(<App />);
+    const input = document.querySelector('input[type="file"][accept="application/json,.json"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [settingsBackupFile(backup)] } });
+
+    const status = await screen.findByText(/Imported settings and 1 group configs/);
+    expect(status).toHaveClass('ok');
+    expect(useControllerStore.getState().config).toMatchObject({
+      secret: 'kept-browser-secret',
+      note: 'imported',
+      delayTestConcurrency: 7,
+      delayTestTimeoutMs: 4500
+    });
+    expect(useControllerStore.getState().urlSecretWarning).toBe(true);
+    expect(useHelperStore.getState().configPath).toBe('/imported/config.json');
+    expect(useHelperStore.getState().testingSettings?.geminiLocationGroup).toBe('select');
+    expect(useHelperStore.getState().networkUsageSettings).toEqual({
+      enabled: true,
+      retentionDays: 14,
+      sampleIntervalSec: 30
+    });
+    expect(useProxyStore.getState().groupTestUrls).toEqual({ select: 'https://imported.example/group' });
+    expect(useProxyStore.getState().nodeTestUrls).toEqual({ 'hk-1': 'https://imported.example/node' });
+    expect(useConfigStore.getState().content).toBe('{"keep":"workspace"}');
+    expect(
+      requests.filter((request) => request.method === 'PUT').map((request) => new URL(request.url).pathname)
+    ).toEqual(
+      expect.arrayContaining([
+        '/api/v1/config/source',
+        '/api/v1/settings/testing',
+        '/api/v1/settings/traffic',
+        '/api/v1/settings/network-usage',
+        '/api/v1/groups/select/config'
+      ])
+    );
+  });
+
+  it('rolls Helper settings back and leaves local settings untouched when import fails', async () => {
+    window.location.hash = '#/controller';
+    const previousController = { ...useControllerStore.getState().config, secret: 'existing-secret' };
+    const configPathBodies: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        const body = init?.body ? JSON.parse(String(init.body)) : null;
+        if (url.endsWith('/api/v1/config/source')) {
+          if (method === 'PUT') {
+            configPathBodies.push(body.path);
+            return jsonResponse(body);
+          }
+          return jsonResponse({ path: '/before/config.json' });
+        }
+        if (url.endsWith('/api/v1/settings/testing')) {
+          if (method === 'PUT') {
+            return new Response('rejected', { status: 500 });
+          }
+          return jsonResponse({
+            defaultTestUrl: groupConfig.testUrl,
+            delayTestTimeoutMs: 5000,
+            minProbeIntervalSec: 60,
+            probeConcurrency: 4,
+            geminiLocationGroup: ''
+          });
+        }
+        if (url.endsWith('/api/v1/health')) {
+          return jsonResponse({
+            ok: true,
+            version: 'test',
+            sqlite: true,
+            controllerConfigured: true,
+            controllerReachable: true,
+            mobileConfigUrl: null,
+            error: null
+          });
+        }
+        return jsonResponse({});
+      })
+    );
+    useControllerStore.setState({ config: previousController });
+    useProxyStore.setState({
+      groupTestUrls: { keep: 'https://keep.example/group' },
+      nodeTestUrls: { keep: 'https://keep.example/node' }
+    });
+    useHelperStore.setState({
+      ...originalHelperImportActions,
+      helperUrl: 'http://helper.local',
+      configPath: '/before/config.json',
+      testingSettings: {
+        defaultTestUrl: groupConfig.testUrl,
+        delayTestTimeoutMs: 5000,
+        minProbeIntervalSec: 60,
+        probeConcurrency: 4,
+        geminiLocationGroup: ''
+      }
+    });
+    const backup = serializeSettingsBackup({
+      controller: {
+        config: {
+          controllerUrl: 'http://imported-controller.local',
+          secret: '',
+          defaultTestUrl: 'https://imported.example/default',
+          delayTestConcurrency: 8,
+          delayTestTimeoutMs: 6000
+        },
+        urlSecretWarning: false
+      },
+      helper: {
+        helperUrl: 'http://helper.local',
+        configPath: '/imported/config.json',
+        testingSettings: {
+          defaultTestUrl: 'https://imported.example/default',
+          delayTestTimeoutMs: 6000,
+          minProbeIntervalSec: 300,
+          probeConcurrency: 8,
+          geminiLocationGroup: ''
+        },
+        trafficSettings: null,
+        networkUsageSettings: null,
+        groupConfigs: []
+      },
+      proxies: {
+        groupTestUrls: { imported: 'https://imported.example/group' },
+        nodeTestUrls: { imported: 'https://imported.example/node' }
+      },
+      configWorkspace: {
+        content: '{}',
+        issues: [],
+        snapshots: [],
+        sourceEndpoint: null,
+        lastLoadedAt: null
+      },
+      ui: { railExpanded: true }
+    });
+
+    render(<App />);
+    const input = document.querySelector('input[type="file"][accept="application/json,.json"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [settingsBackupFile(backup)] } });
+
+    const status = await screen.findByText(/Testing settings import failed: Helper HTTP 500/);
+    expect(status).toHaveClass('bad');
+    expect(status).toHaveTextContent('Previous Helper settings were restored');
+    expect(configPathBodies.slice(-2)).toEqual(['/imported/config.json', '/before/config.json']);
+    expect(useControllerStore.getState().config).toMatchObject({
+      controllerUrl: previousController.controllerUrl,
+      secret: 'existing-secret',
+      delayTestConcurrency: previousController.delayTestConcurrency,
+      delayTestTimeoutMs: previousController.delayTestTimeoutMs
+    });
+    expect(useControllerStore.getState().config.defaultTestUrl).not.toBe('https://imported.example/default');
+    expect(useHelperStore.getState().configPath).toBe('/before/config.json');
+    expect(useProxyStore.getState().groupTestUrls).toMatchObject({ keep: 'https://keep.example/group' });
+    expect(useProxyStore.getState().groupTestUrls).not.toHaveProperty('imported');
+    expect(useProxyStore.getState().nodeTestUrls).toEqual({ keep: 'https://keep.example/node' });
+  });
+
+  it('rejects a missing Gemini strategy group before writing Helper settings', async () => {
+    window.location.hash = '#/controller';
+    const writes: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (method === 'PUT') {
+          writes.push(new URL(url).pathname);
+        }
+        if (url.endsWith('/api/v1/config/source')) {
+          return jsonResponse({ path: '/before/config.json' });
+        }
+        if (url.endsWith('/api/v1/settings/testing')) {
+          return jsonResponse({
+            defaultTestUrl: groupConfig.testUrl,
+            delayTestTimeoutMs: 5000,
+            minProbeIntervalSec: 60,
+            probeConcurrency: 4,
+            geminiLocationGroup: ''
+          });
+        }
+        if (url.endsWith('/api/v1/groups')) {
+          return jsonResponse({ groups: [] });
+        }
+        return jsonResponse({});
+      })
+    );
+    useHelperStore.setState({
+      ...originalHelperImportActions,
+      helperUrl: 'http://helper.local',
+      configPath: '/before/config.json'
+    });
+    const backup = serializeSettingsBackup({
+      controller: {
+        config: {
+          controllerUrl: '',
+          secret: '',
+          defaultTestUrl: groupConfig.testUrl,
+          delayTestConcurrency: 4,
+          delayTestTimeoutMs: 5000
+        },
+        urlSecretWarning: false
+      },
+      helper: {
+        helperUrl: 'http://helper.local',
+        configPath: '/imported/config.json',
+        testingSettings: {
+          defaultTestUrl: groupConfig.testUrl,
+          delayTestTimeoutMs: 5000,
+          minProbeIntervalSec: 60,
+          probeConcurrency: 4,
+          geminiLocationGroup: 'missing-group'
+        },
+        trafficSettings: null,
+        networkUsageSettings: null,
+        groupConfigs: []
+      },
+      proxies: { groupTestUrls: {}, nodeTestUrls: {} },
+      configWorkspace: { content: '{}', issues: [], snapshots: [], sourceEndpoint: null, lastLoadedAt: null },
+      ui: { railExpanded: true }
+    });
+
+    render(<App />);
+    const input = document.querySelector('input[type="file"][accept="application/json,.json"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [settingsBackupFile(backup)] } });
+
+    const status = await screen.findByText(/Target Helper is missing Gemini strategy group: missing-group/);
+    expect(status).toHaveClass('bad');
+    expect(writes).toEqual([]);
+    expect(useHelperStore.getState().configPath).toBe('/before/config.json');
+  });
+
+  it('revalidates runtime configuration diagnostics from a legacy backup', async () => {
+    window.location.hash = '#/controller';
+    const serialized = serializeSettingsBackup({
+      controller: {
+        config: {
+          controllerUrl: '',
+          secret: '',
+          defaultTestUrl: groupConfig.testUrl,
+          delayTestConcurrency: 4,
+          delayTestTimeoutMs: 5000
+        },
+        urlSecretWarning: false
+      },
+      helper: {
+        helperUrl: '',
+        configPath: '',
+        testingSettings: null,
+        trafficSettings: null,
+        networkUsageSettings: null,
+        groupConfigs: []
+      },
+      proxies: { groupTestUrls: {}, nodeTestUrls: {} },
+      configWorkspace: { content: '{}', issues: [], snapshots: [], sourceEndpoint: null, lastLoadedAt: null },
+      ui: { railExpanded: true }
+    });
+    const legacy = JSON.parse(serialized);
+    delete legacy.configWorkspace.contentRedacted;
+    legacy.configWorkspace.content = '{}';
+    legacy.configWorkspace.issues = [{ severity: 'info', path: '$', message: 'stale imported result' }];
+    legacy.configWorkspace.snapshots = [
+      {
+        id: 'legacy-snapshot',
+        name: 'legacy snapshot',
+        content: 'not-json',
+        issues: [],
+        createdAt: '2026-08-28T09:00:00.000Z'
+      }
+    ];
+
+    render(<App />);
+    const input = document.querySelector('input[type="file"][accept="application/json,.json"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [settingsBackupFile(JSON.stringify(legacy))] } });
+
+    await screen.findByText(/Legacy runtime workspace data was restored/);
+    expect(useConfigStore.getState().issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ path: '$.experimental.clash_api', severity: 'error' })])
+    );
+    expect(useConfigStore.getState().issues).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: 'stale imported result' })])
+    );
+    expect(useConfigStore.getState().snapshots[0].issues[0]).toMatchObject({ path: '$', severity: 'error' });
   });
 
   it('keeps edited timeout visible while helper timeout save is pending', async () => {

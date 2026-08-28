@@ -13,6 +13,7 @@ function jsonResponse(body: unknown): Response {
 
 describe('proxy store latency tests', () => {
   beforeEach(() => {
+    localStorage.clear();
     useControllerStore.setState({
       config: {
         controllerUrl: 'http://controller.local',
@@ -205,6 +206,26 @@ describe('proxy store latency tests', () => {
     expect(useProxyStore.getState().proxies.find((proxy) => proxy.name === 'Auto')?.now).toBe('hk-1');
     expect(useProxyStore.getState().switchingGroups).toEqual([]);
     expect(useProxyStore.getState().error).toMatch(/Switch failed for Auto/);
+  });
+
+  it('replaces stale test URL maps and persists node-specific URLs', () => {
+    useProxyStore.setState({
+      groupTestUrls: { stale: 'https://stale.example/group' },
+      nodeTestUrls: { stale: 'https://stale.example/node' }
+    });
+
+    useProxyStore.getState().replaceTestUrls(
+      { Auto: 'https://fresh.example/group' },
+      { 'hk-1': 'https://fresh.example/node' }
+    );
+
+    expect(useProxyStore.getState().groupTestUrls).toEqual({ Auto: 'https://fresh.example/group' });
+    expect(useProxyStore.getState().nodeTestUrls).toEqual({ 'hk-1': 'https://fresh.example/node' });
+    const persisted = JSON.parse(localStorage.getItem('singdeck-proxy-preferences') ?? '{}');
+    expect(persisted.state).toEqual({
+      groupTestUrls: { Auto: 'https://fresh.example/group' },
+      nodeTestUrls: { 'hk-1': 'https://fresh.example/node' }
+    });
   });
 
 });

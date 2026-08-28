@@ -1243,11 +1243,22 @@ describe('helper store', () => {
 
     useHelperStore.getState().updateSettings({ configPath: ' /opt/sing-box/config.jsonc ' });
 
-    await useHelperStore.getState().saveConfigPath();
+    const saved = await useHelperStore.getState().saveConfigPath();
 
+    expect(saved).toBe(true);
     expect(requests[0].body).toEqual({ path: '/opt/sing-box/config.jsonc' });
     expect(useHelperStore.getState().configPath).toBe('/opt/sing-box/config.jsonc');
     expect(useHelperStore.getState().error).toBeNull();
+  });
+
+  it('returns false when the helper rejects a settings mutation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('rejected', { status: 500 })));
+    useHelperStore.getState().updateSettings({ configPath: '/opt/sing-box/rejected.json' });
+
+    const saved = await useHelperStore.getState().saveConfigPath();
+
+    expect(saved).toBe(false);
+    expect(useHelperStore.getState().error).toBe('Helper HTTP 500');
   });
 
   it('refreshTrafficIfStale silently skips when cached traffic is still fresh', async () => {
