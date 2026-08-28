@@ -639,6 +639,9 @@ export const useHelperStore = create<HelperState>()(
         await get().loadTraffic();
       },
       loadNetworkUsageWindow: async (request) => {
+        if (get().networkUsageLoading) {
+          return;
+        }
         set({ networkUsageLoading: true, networkUsageError: null });
         try {
           const limit = request.limit ?? 10;
@@ -659,6 +662,10 @@ export const useHelperStore = create<HelperState>()(
         }
       },
       loadNetworkUsageSourceTrend: async (request) => {
+        const state = get();
+        if (state.networkUsageSourceTrendLoading || state.networkUsageSourceTrendRefreshing) {
+          return;
+        }
         set({ networkUsageSourceTrendLoading: true, networkUsageSourceTrendError: null });
         try {
           const trend = await client().getJson<HelperNetworkUsageSourceTrend>(
@@ -677,6 +684,10 @@ export const useHelperStore = create<HelperState>()(
         }
       },
       refreshNetworkUsageSourceTrend: async (request) => {
+        const state = get();
+        if (state.networkUsageSourceTrendRefreshing || state.networkUsageSourceTrendLoading) {
+          return;
+        }
         set({ networkUsageSourceTrendRefreshing: true, networkUsageSourceTrendRefreshError: null });
         try {
           const trend = await client().postJson<HelperNetworkUsageSourceTrend>(

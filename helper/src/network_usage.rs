@@ -3,7 +3,10 @@ use chrono::DateTime;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 pub const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const MINUTE_MS: i64 = 60 * 1000;
@@ -19,6 +22,13 @@ const MIN_SAMPLE_INTERVAL_SEC: i64 = 2;
 pub const MAX_SAMPLE_INTERVAL_SEC: i64 = 3600;
 const MAX_QUERY_LIMIT: i64 = 200;
 const CLEANUP_INTERVAL_MS: i64 = HOUR_MS;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CleanupStats {
+    pub buckets: usize,
+    pub connections: usize,
+    pub last_seen: usize,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -295,6 +305,8 @@ pub fn init_db(conn: &Connection) -> Result<()> {
           download_counter INTEGER NOT NULL,
           seen_at_ms INTEGER NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_usage_last_seen_seen_at
+          ON network_usage_last_seen(seen_at_ms);
         CREATE TABLE IF NOT EXISTS network_usage_buckets (
           bucket_start_ms INTEGER NOT NULL,
           connection_id TEXT NOT NULL,
@@ -545,27 +557,36 @@ fn is_new_connection_since_last_sample(
     started_at_ms >= previous_sampled_at_ms && started_at_ms <= sampled_at_ms
 }
 
-pub fn cleanup_old_usage(conn: &Connection, now_ms: i64, retention_days: i64) -> Result<()> {
-    let cutoff = now_ms - normalize_settings(NetworkUsageSettings {
-        enabled: true,
-        retention_days,
-        sample_interval_sec: DEFAULT_SAMPLE_INTERVAL_SEC,
-    })
-    .retention_days
-        * DAY_MS;
-    conn.execute(
+pub fn cleanup_old_usage(
+    conn: &Connection,
+    now_ms: i64,
+    retention_days: i64,
+) -> Result<CleanupStats> {
+    let cutoff = now_ms
+        - normalize_settings(NetworkUsageSettings {
+            enabled: true,
+            retention_days,
+            sample_interval_sec: DEFAULT_SAMPLE_INTERVAL_SEC,
+        })
+        .retention_days
+            * DAY_MS;
+    let buckets = conn.execute(
         "DELETE FROM network_usage_buckets WHERE bucket_start_ms < ?1",
         [cutoff],
     )?;
-    conn.execute(
+    let connections = conn.execute(
         "DELETE FROM network_usage_connections WHERE last_seen_ms < ?1",
         [cutoff],
     )?;
-    conn.execute(
+    let last_seen = conn.execute(
         "DELETE FROM network_usage_last_seen WHERE seen_at_ms < ?1",
         [cutoff],
     )?;
-    Ok(())
+    Ok(CleanupStats {
+        buckets,
+        connections,
+        last_seen,
+    })
 }
 
 pub fn cleanup_old_usage_if_due(
@@ -581,9 +602,38 @@ pub fn cleanup_old_usage_if_due(
         return Ok(false);
     }
 
-    cleanup_old_usage(conn, now_ms, retention_days)?;
-    save_i64_kv(conn, LAST_CLEANUP_AT_KEY, now_ms)?;
-    Ok(true)
+    let started = Instant::now();
+    let normalized_retention_days = normalize_settings(NetworkUsageSettings {
+        enabled: true,
+        retention_days,
+        sample_interval_sec: DEFAULT_SAMPLE_INTERVAL_SEC,
+    })
+    .retention_days;
+    let cutoff_ms = now_ms - normalized_retention_days * DAY_MS;
+    eprintln!(
+        "singdeck-helper: network usage cleanup start cutoff_ms={cutoff_ms} retention_days={normalized_retention_days}"
+    );
+    let result = (|| {
+        let stats = cleanup_old_usage(conn, now_ms, retention_days)?;
+        save_i64_kv(conn, LAST_CLEANUP_AT_KEY, now_ms)?;
+        Ok::<_, anyhow::Error>(stats)
+    })();
+    let elapsed_ms = started.elapsed().as_millis();
+    match result {
+        Ok(stats) => {
+            eprintln!(
+                "singdeck-helper: network usage cleanup complete elapsed_ms={elapsed_ms} buckets_deleted={} connections_deleted={} last_seen_deleted={}",
+                stats.buckets, stats.connections, stats.last_seen
+            );
+            Ok(true)
+        }
+        Err(error) => {
+            eprintln!(
+                "singdeck-helper: network usage cleanup failed elapsed_ms={elapsed_ms} error={error:#}"
+            );
+            Err(error)
+        }
+    }
 }
 
 pub fn query_summary(

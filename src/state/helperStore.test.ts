@@ -24,6 +24,8 @@ describe('helper store', () => {
       activeProbeGroups: [],
       activeProbeNodesByGroup: {},
       inspectingGroups: [],
+      networkUsageLoading: false,
+      networkUsageError: null,
       networkUsageSourceTrend: null,
       networkUsageSourceTrendLoading: false,
       networkUsageSourceTrendError: null,
@@ -995,6 +997,49 @@ describe('helper store', () => {
     expect(useHelperStore.getState().networkUsageConnections?.connections[0]?.host).toBe('example.com');
   });
 
+  it('does not start a second network usage window request while one is in flight', async () => {
+    let resolveWindow!: (response: Response) => void;
+    const fetchMock = vi.fn(
+      async () =>
+        await new Promise<Response>((resolve) => {
+          resolveWindow = resolve;
+        })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const request = {
+      from: 1000,
+      to: 2000,
+      bucket: 'minute' as const,
+      limit: 5
+    };
+    const first = useHelperStore.getState().loadNetworkUsageWindow(request);
+    const second = useHelperStore.getState().loadNetworkUsageWindow(request);
+
+    await second;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveWindow(
+      jsonResponse({
+        summary: {
+          fromMs: 1000,
+          toMs: 2000,
+          uploadBytes: 0,
+          downloadBytes: 0,
+          totalBytes: 0,
+          connectionCount: 0,
+          buckets: []
+        },
+        topHosts: { groupBy: 'host', items: [] },
+        topOutbounds: { groupBy: 'outbound', items: [] },
+        topStrategies: { groupBy: 'strategy', items: [] },
+        connections: { connections: [] }
+      })
+    );
+    await first;
+    expect(useHelperStore.getState().networkUsageLoading).toBe(false);
+  });
+
   it('loads source trend usage with the selected bucket and timezone offset', async () => {
     const requests: string[] = [];
     vi.stubGlobal(
@@ -1044,6 +1089,42 @@ describe('helper store', () => {
     expect(requests[0]).toContain('tzOffsetMinutes=-480');
     expect(useHelperStore.getState().networkUsageSourceTrend?.sources[0]?.name).toBe('wd');
     expect(useHelperStore.getState().networkUsageSourceTrend?.unknownNodes[0]?.name).toBe('manual-node');
+  });
+
+  it('does not overlap source trend loading with another load or refresh', async () => {
+    let resolveTrend!: (response: Response) => void;
+    const fetchMock = vi.fn(
+      async () =>
+        await new Promise<Response>((resolve) => {
+          resolveTrend = resolve;
+        })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const request = {
+      days: 7,
+      bucket: 'hour' as const,
+      tzOffsetMinutes: -480
+    };
+    const first = useHelperStore.getState().loadNetworkUsageSourceTrend(request);
+    const duplicateLoad = useHelperStore.getState().loadNetworkUsageSourceTrend(request);
+    const overlappingRefresh = useHelperStore.getState().refreshNetworkUsageSourceTrend(request);
+
+    await Promise.all([duplicateLoad, overlappingRefresh]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveTrend(
+      jsonResponse({
+        fromMs: 0,
+        toMs: 604800000,
+        bucket: 'hour',
+        sources: [],
+        unknownNodes: []
+      })
+    );
+    await first;
+    expect(useHelperStore.getState().networkUsageSourceTrendLoading).toBe(false);
+    expect(useHelperStore.getState().networkUsageSourceTrendRefreshing).toBe(false);
   });
 
   it('refreshes source trend usage through the immediate sampling endpoint', async () => {

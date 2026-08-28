@@ -268,6 +268,28 @@ export type HelperNetworkClassVerdict =
   | 'mixed'
   | 'unknown';
 
+export type HelperNetworkClassSignal =
+  | 'residential'
+  | 'data_center'
+  | 'mobile'
+  | 'business'
+  | 'other';
+
+export type HelperNetworkClassEvidence = {
+  provider: string;
+  status: HelperRiskCheckStatus;
+  verdict: HelperNetworkClassVerdict;
+  signals: HelperNetworkClassSignal[];
+  userType: string | null;
+  isHostingProvider: boolean | null;
+  connectionType: string | null;
+  isp: string | null;
+  organization: string | null;
+  autonomousSystemNumber: number | null;
+  network: string | null;
+  error: string | null;
+};
+
 export type HelperNetworkClassResult = {
   status: HelperRiskCheckStatus;
   verdict: HelperNetworkClassVerdict;
@@ -279,6 +301,7 @@ export type HelperNetworkClassResult = {
   autonomousSystemNumber: number | null;
   network: string | null;
   userCount: number | null;
+  evidence: HelperNetworkClassEvidence[];
   source: string;
   checkedAt: string;
   error: string | null;

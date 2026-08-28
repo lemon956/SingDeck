@@ -220,17 +220,19 @@ Chrome profile 未配置、Google 账号 Cookie 缺失或无法解密、登录�
 {
   "geminiLocation": true,
   "nodeRisk": {
-    "exitIp": true,
+    "exitIp": false,
     "networkClass": true
   }
 }
 ```
 
-`geminiLocation: true` 只允许用于 Settings 指定的组。家宽/机房检测适用于能够逐节点切换的 Selector 组；其他类型的策略组会显示为不可用。定时后台测速和失败触发的重测同样只测速，不会隐式执行任何出口判定。出口 IP 通过 Google STUN 获取，因此 sing-box 路由必须保证 `stun.l.google.com:19302` 确实由当前 Selector 承载，否则结果属于实际承载 STUN 的其他路由，不能当作当前节点的权威分类。
+`geminiLocation: true` 只允许用于 Settings 指定的 Selector 组。通用出口与网络类型巡检适用于所有包含具体 outbound 成员的策略组。`exitIp` 与 `networkClass` 相互独立：当 `networkClass: true`、`exitIp: false` 时，helper 会在内部观测地址用于分类，但响应中的 `nodes[].raw.nodeRisk.exitIp` 仍为 `null`。定时后台测速和失败触发的重测同样只测速，不会隐式执行任何出口判定。
+
+通用巡检不会切换 Selector，也不会中断现有连接。helper 会从 Settings 保存的 sing-box 配置路径为每个具体成员构造最小配置，并执行 `sing-box tools fetch --outbound <成员名>`，只访问统一的 HTTPS 出口端点 `https://api64.ipify.org?format=json`。因此 helper 服务必须能读取该配置，并能从自身 `PATH` 找到 `sing-box`。节点标签缺失、目标本身是策略组、依赖链无效、命令超时或端点请求失败时，只会记录该节点失败，不会修改任何在线策略组选择。
 
 helper 会为每次巡检记录 `inspection start/complete`，并为每个节点分别记录 `Gemini location result` 与 `node risk result`。日志包含状态、检测结果和脱敏后的错误上下文，但不包含 Cookie、`at`、`f.sid` 或 `bl`。可使用 `journalctl -u singdeck-helper.service -f` 实时查看。
 
-家宽/机房分类先读取 proxycheck.io 的显式网络类型，再以无需 key 的 ipquery.io 作为兜底。只有明确的 `Residential` 证据才判为家宽；明确的 Hosting、Wireless、Business 分别判为机房、移动、商业网络；兜底结果无法证明家宽时保持“未知”，不会根据 ISP/ASN 猜测。
+家宽/机房分类会并行、独立查询 proxycheck.io 与 ipquery.io，二者不存在先后兜底关系；各来源结果保存在 `networkClass.evidence`。只有明确的住宅、托管、无线/移动或商业信号才分别判为家宽、机房、移动或商业网络；来源冲突时判为 `mixed`。没有明确正向信号时保持 `unknown`，单个来源失败仍保留另一个来源的证据，只有全部来源失败才返回 `unavailable`。不会根据 ISP/ASN 名称猜测家宽，也不会复用隐私、信誉、BGP 或 Tor 的结果。
 
 Gemini 出现 Sorry 页面时，实际含义是带 Chrome Google 登录态的请求被 Google 重定向到 `/sorry/` 反滥用挑战。Google 不会返回具体命中规则，因此不能断言节点存在某一种确定风险，更不能等同于“恶意节点”。共享出口请求频率、自动化特征、账号会话与出口 IP 不一致、IP 信誉等都可能参与触发。
 

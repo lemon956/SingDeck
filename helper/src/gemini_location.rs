@@ -25,6 +25,7 @@ pub const GEMINI_LOCATION_SOURCE: &str = "SWML_DESCRIPTION_FROM_YOUR_INTERNET_AD
 pub(crate) const GEMINI_APP_URL: &str = "https://gemini.google.com/app";
 pub(crate) const GEMINI_BATCH_URL: &str =
     "https://gemini.google.com/_/BardChatUi/data/batchexecute";
+pub(crate) const GEMINI_REQUEST_TIMEOUT_MS: i64 = 10_000;
 const GEMINI_LOCATION_RPC_ID: &str = "K4WWud";
 const GEMINI_AUTHENTICATED_FORM: &str = r#"[[["K4WWud","[[1],[\"zh-CN\"]]",null,"generic"]]]"#;
 const GEMINI_ACCEPT_LANGUAGE: &str = "en,zh-CN;q=0.9,zh;q=0.8";

@@ -33,6 +33,21 @@ function setupProxyWorkspace() {
       disconnect() {}
     }
   );
+  vi.stubGlobal(
+    'WebSocket',
+    class {
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      constructor(_url: string) {}
+
+      close() {
+        this.onclose?.();
+      }
+    }
+  );
   useControllerStore.setState({
     config: {
       controllerUrl: '',
@@ -296,7 +311,8 @@ describe('App proxy workspace', () => {
                         autonomousSystemNumber: null,
                         network: null,
                         userCount: null,
-                        source: 'proxycheck.io v3 API with ipquery.io fallback',
+                        evidence: [],
+                        source: 'independent proxycheck.io and ipquery.io evidence',
                         checkedAt: '2026-08-26T03:33:15.000Z',
                         error: 'network classification providers unavailable'
                       },
@@ -465,7 +481,7 @@ describe('App proxy workspace', () => {
     expect(hkNode.title).toContain('Chrome Google account session cookies are missing');
   });
 
-  it('runs residential classification through inspection without adding it to speed probes', async () => {
+  it('runs residential classification without requesting raw exit IP or adding it to speed probes', async () => {
     let speedRequestBody: unknown = null;
     let inspectionRequestBody: unknown = null;
     vi.stubGlobal(
@@ -523,7 +539,7 @@ describe('App proxy workspace', () => {
     await waitFor(() =>
       expect(inspectionRequestBody).toEqual({
         nodeRisk: {
-          exitIp: true,
+          exitIp: false,
           addressScope: false,
           networkIdentity: false,
           networkClass: true,
@@ -538,6 +554,54 @@ describe('App proxy workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Run score' }));
 
     await waitFor(() => expect(speedRequestBody).toEqual({ concurrency: 4 }));
+  });
+
+  it('runs raw exit IP inspection without enabling residential classification', async () => {
+    let inspectionRequestBody: unknown = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith('/api/v1/groups/select/inspection')) {
+          inspectionRequestBody = init?.body ? JSON.parse(String(init.body)) : null;
+          return new Response(
+            JSON.stringify({
+              group: 'select',
+              mode: 'score',
+              scheme: 'Balanced',
+              testUrl: groupConfig.testUrl,
+              recommended: null,
+              applyError: null,
+              nodes: []
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        return new Response(JSON.stringify({ nodes: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      })
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('checkbox', { name: '出口 IP 检测' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Run egress inspection' }));
+
+    await waitFor(() =>
+      expect(inspectionRequestBody).toEqual({
+        nodeRisk: {
+          exitIp: true,
+          addressScope: false,
+          networkIdentity: false,
+          networkClass: false,
+          routeSecurity: false,
+          tor: false,
+          privacy: false,
+          abuse: false
+        }
+      })
+    );
   });
 
   it('shows the Gemini switch only for the group selected in Settings', () => {
@@ -565,6 +629,32 @@ describe('App proxy workspace', () => {
 
     expect(screen.queryByText('Gemini 出口与解锁检测')).not.toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: '家宽 / 机房检测' })).toBeInTheDocument();
+  });
+
+  it('allows generic egress inspection for a URLTest group without exposing Gemini inspection', () => {
+    useProxyStore.setState((state) => ({
+      proxies: state.proxies.map((proxy) =>
+        proxy.name === 'select' ? { ...proxy, type: 'URLTest' } : proxy
+      )
+    }));
+    useHelperStore.setState((state) => ({
+      testingSettings: {
+        defaultTestUrl: groupConfig.testUrl,
+        delayTestTimeoutMs: 5000,
+        minProbeIntervalSec: 60,
+        probeConcurrency: 4,
+        geminiLocationGroup: 'select'
+      },
+      groups: state.groups.map((group) =>
+        group.name === 'select' ? { ...group, kind: 'URLTest' } : group
+      )
+    }));
+
+    render(<App />);
+
+    expect(screen.getByRole('checkbox', { name: '出口 IP 检测' })).toBeEnabled();
+    expect(screen.getByRole('checkbox', { name: '家宽 / 机房检测' })).toBeEnabled();
+    expect(screen.queryByRole('checkbox', { name: 'Gemini 出口与解锁检测' })).not.toBeInTheDocument();
   });
 
   it('saves the designated group Gemini switch with the sidebar configuration', async () => {
@@ -636,7 +726,7 @@ describe('App proxy workspace', () => {
           testUrl: 'https://api.example.test/generate_204',
           probeIntervalSec: 600,
           nodeRisk: expect.objectContaining({
-            exitIp: true,
+            exitIp: false,
             networkClass: true
           })
         })

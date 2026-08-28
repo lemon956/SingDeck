@@ -4,7 +4,7 @@ use std::{
     net::{IpAddr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -25,7 +25,7 @@ use base64::{
 };
 use chrono::{DateTime, Local, TimeZone};
 use reqwest::Client;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
@@ -33,6 +33,7 @@ use tower_http::cors::{Any, CorsLayer};
 mod gemini_location;
 mod network_usage;
 mod node_risk;
+mod sing_box_outbound;
 mod traffic;
 
 const DEFAULT_BIND: &str = "0.0.0.0:9531";
@@ -71,12 +72,38 @@ const NODE_SOURCE_FETCH_USER_AGENT: &str = "SingDeck-helper/0.1.0";
 const SELECTOR_RESTORE_ATTEMPTS: usize = 3;
 const SELECTOR_RESTORE_RETRY_MS: u64 = 100;
 const NODE_RISK_PROVIDER_TIMEOUT_MS: u64 = 8_000;
+const DATABASE_SLOW_OPERATION_MS: u128 = 250;
 
 static SELECTOR_SWEEP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone)]
+struct Database {
+    primary: Arc<Mutex<Connection>>,
+    path: Option<Arc<PathBuf>>,
+}
+
+impl Database {
+    fn new(connection: Connection) -> Self {
+        let path = connection
+            .path()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .map(Arc::new);
+        Self {
+            primary: Arc::new(Mutex::new(connection)),
+            path,
+        }
+    }
+
+    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Connection>> {
+        self.primary.lock()
+    }
+}
+
+#[derive(Clone)]
 struct AppState {
-    db: Arc<Mutex<Connection>>,
+    db: Database,
     http: Client,
     mobile_config_url: Option<String>,
     active_probes: Arc<Mutex<HashMap<String, ActiveProbeState>>>,
@@ -686,13 +713,14 @@ struct NetworkUsageSourceTrendQuery {
 #[tokio::main]
 async fn main() -> Result<()> {
     let bind = env::var("SINGDECK_HELPER_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
-    let db_path =
-        env::var("SINGDECK_HELPER_DB").unwrap_or_else(|_| "singdeck-helper.db".to_string());
-    let conn = Connection::open(db_path)?;
+    let db_path = PathBuf::from(
+        env::var("SINGDECK_HELPER_DB").unwrap_or_else(|_| "singdeck-helper.db".to_string()),
+    );
+    let conn = Connection::open(&db_path)?;
     configure_db_connection(&conn)?;
     init_db(&conn)?;
 
-    let db = Arc::new(Mutex::new(conn));
+    let db = Database::new(conn);
     let auth_token = resolve_auth_token(&db, &bind)?;
     let base_mobile_url =
         public_config_url().or_else(|| mobile_config_url_for_bind(&bind, detect_lan_ip()));
@@ -899,6 +927,88 @@ fn configure_db_connection(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DatabaseAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
+impl DatabaseAccess {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::ReadWrite => "read-write",
+        }
+    }
+}
+
+fn open_database_worker_connection(path: &Path, access: DatabaseAccess) -> Result<Connection> {
+    let flags = match access {
+        DatabaseAccess::ReadOnly => {
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        }
+        DatabaseAccess::ReadWrite => {
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        }
+    };
+    let conn = Connection::open_with_flags(path, flags)
+        .with_context(|| format!("open SQLite worker connection {}", path.display()))?;
+    conn.busy_timeout(Duration::from_secs(10))?;
+    if matches!(access, DatabaseAccess::ReadWrite) {
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+    }
+    Ok(conn)
+}
+
+async fn run_database_operation<T, F>(
+    state: &AppState,
+    operation_name: &'static str,
+    access: DatabaseAccess,
+    operation: F,
+) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+{
+    let path = state.db.path.clone();
+    let primary = state.db.primary.clone();
+    let started = Instant::now();
+    let worker_result = tokio::task::spawn_blocking(move || match path {
+        Some(path) => {
+            let conn = open_database_worker_connection(&path, access)?;
+            operation(&conn)
+        }
+        None => {
+            let conn = primary
+                .lock()
+                .map_err(|_| anyhow!("database lock poisoned"))?;
+            operation(&conn)
+        }
+    })
+    .await;
+    let elapsed_ms = started.elapsed().as_millis();
+    let result = match worker_result {
+        Ok(result) => result,
+        Err(error) => Err(anyhow!(
+            "{operation_name} database worker join failed: {error}"
+        )),
+    };
+
+    match &result {
+        Err(error) => eprintln!(
+            "singdeck-helper: database operation failed operation={operation_name:?} access={:?} elapsed_ms={elapsed_ms} error={error:#}",
+            access.label()
+        ),
+        Ok(_) if elapsed_ms >= DATABASE_SLOW_OPERATION_MS => eprintln!(
+            "singdeck-helper: database operation slow operation={operation_name:?} access={:?} elapsed_ms={elapsed_ms}",
+            access.label()
+        ),
+        Ok(_) => {}
+    }
+
+    result
+}
+
 fn add_column_if_missing(conn: &Connection, table: &str, column: &str, sql: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -912,13 +1022,14 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, sql: &str
 }
 
 async fn health(State(state): State<AppState>) -> Result<Json<HelperHealth>, AppError> {
-    let controller = load_controller(&state)?;
-    let sqlite = state
-        .db
-        .lock()
-        .map_err(|_| AppError::internal("database lock poisoned"))?
-        .query_row("SELECT 1", [], |_| Ok(()))
-        .is_ok();
+    let (controller, sqlite) =
+        run_database_operation(&state, "health", DatabaseAccess::ReadOnly, |db| {
+            let controller = load_json_kv_from_connection::<ControllerConfig>(db, "controller")?
+                .unwrap_or_default();
+            let sqlite = db.query_row("SELECT 1", [], |_| Ok(())).is_ok();
+            Ok((controller, sqlite))
+        })
+        .await?;
 
     let mut reachable = false;
     let mut error = None;
@@ -1041,22 +1152,28 @@ async fn save_traffic_settings(
 async fn network_usage_settings(
     State(state): State<AppState>,
 ) -> Result<Json<network_usage::NetworkUsageSettings>, AppError> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| AppError::internal("database lock poisoned"))?;
-    Ok(Json(network_usage::load_settings(&db)?))
+    let settings = run_database_operation(
+        &state,
+        "network-usage-settings",
+        DatabaseAccess::ReadOnly,
+        network_usage::load_settings,
+    )
+    .await?;
+    Ok(Json(settings))
 }
 
 async fn save_network_usage_settings(
     State(state): State<AppState>,
     Json(input): Json<network_usage::NetworkUsageSettings>,
 ) -> Result<Json<network_usage::NetworkUsageSettings>, AppError> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| AppError::internal("database lock poisoned"))?;
-    Ok(Json(network_usage::save_settings(&db, &input)?))
+    let settings = run_database_operation(
+        &state,
+        "save-network-usage-settings",
+        DatabaseAccess::ReadWrite,
+        move |db| network_usage::save_settings(db, &input),
+    )
+    .await?;
+    Ok(Json(settings))
 }
 
 async fn network_usage_summary(
@@ -1065,13 +1182,14 @@ async fn network_usage_summary(
 ) -> Result<Json<network_usage::UsageSummaryResponse>, AppError> {
     let (from_ms, to_ms) = resolve_usage_window(query.from, query.to);
     let bucket = network_usage::UsageBucket::parse(query.bucket.as_deref());
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| AppError::internal("database lock poisoned"))?;
-    Ok(Json(network_usage::query_summary(
-        &db, from_ms, to_ms, bucket,
-    )?))
+    let summary = run_database_operation(
+        &state,
+        "network-usage-summary",
+        DatabaseAccess::ReadOnly,
+        move |db| network_usage::query_summary(db, from_ms, to_ms, bucket),
+    )
+    .await?;
+    Ok(Json(summary))
 }
 
 async fn network_usage_top(
@@ -1080,17 +1198,15 @@ async fn network_usage_top(
 ) -> Result<Json<network_usage::UsageTopResponse>, AppError> {
     let (from_ms, to_ms) = resolve_usage_window(query.from, query.to);
     let group_by = network_usage::UsageGroupBy::parse(query.group_by.as_deref());
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| AppError::internal("database lock poisoned"))?;
-    Ok(Json(network_usage::query_top(
-        &db,
-        from_ms,
-        to_ms,
-        group_by,
-        query.limit.unwrap_or(10),
-    )?))
+    let limit = query.limit.unwrap_or(10);
+    let top = run_database_operation(
+        &state,
+        "network-usage-top",
+        DatabaseAccess::ReadOnly,
+        move |db| network_usage::query_top(db, from_ms, to_ms, group_by, limit),
+    )
+    .await?;
+    Ok(Json(top))
 }
 
 async fn network_usage_connections(
@@ -1098,17 +1214,16 @@ async fn network_usage_connections(
     Query(query): Query<NetworkUsageConnectionsQuery>,
 ) -> Result<Json<network_usage::UsageConnectionsResponse>, AppError> {
     let (from_ms, to_ms) = resolve_usage_window(query.from, query.to);
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| AppError::internal("database lock poisoned"))?;
-    Ok(Json(network_usage::query_connections(
-        &db,
-        from_ms,
-        to_ms,
-        query.limit.unwrap_or(20),
-        query.q.as_deref(),
-    )?))
+    let limit = query.limit.unwrap_or(20);
+    let search = query.q;
+    let connections = run_database_operation(
+        &state,
+        "network-usage-connections",
+        DatabaseAccess::ReadOnly,
+        move |db| network_usage::query_connections(db, from_ms, to_ms, limit, search.as_deref()),
+    )
+    .await?;
+    Ok(Json(connections))
 }
 
 async fn network_usage_window(
@@ -1117,18 +1232,16 @@ async fn network_usage_window(
 ) -> Result<Json<network_usage::UsageWindowResponse>, AppError> {
     let (from_ms, to_ms) = resolve_usage_window(query.from, query.to);
     let bucket = network_usage::UsageBucket::parse(query.bucket.as_deref());
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| AppError::internal("database lock poisoned"))?;
-    Ok(Json(network_usage::query_window(
-        &db,
-        from_ms,
-        to_ms,
-        bucket,
-        query.limit.unwrap_or(10),
-        query.q.as_deref(),
-    )?))
+    let limit = query.limit.unwrap_or(10);
+    let search = query.q;
+    let window = run_database_operation(
+        &state,
+        "network-usage-window",
+        DatabaseAccess::ReadOnly,
+        move |db| network_usage::query_window(db, from_ms, to_ms, bucket, limit, search.as_deref()),
+    )
+    .await?;
+    Ok(Json(window))
 }
 
 async fn network_usage_source_trend(
@@ -1152,27 +1265,26 @@ async fn read_network_usage_source_trend(
     query: &NetworkUsageSourceTrendQuery,
 ) -> Result<network_usage::UsageSourceTrendResponse> {
     let current_nodes = current_proxy_node_filter(state).await;
-    read_network_usage_source_trend_with_nodes(state, query, &current_nodes)
-}
-
-fn read_network_usage_source_trend_with_nodes(
-    state: &AppState,
-    query: &NetworkUsageSourceTrendQuery,
-    current_nodes: &BTreeSet<String>,
-) -> Result<network_usage::UsageSourceTrendResponse> {
     let bucket = network_usage::SourceTrendBucket::parse(query.bucket.as_deref());
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| anyhow!("database lock poisoned"))?;
-    network_usage::query_source_trend(
-        &db,
-        now_ms(),
-        query.days.unwrap_or(7),
-        bucket,
-        query.tz_offset_minutes.unwrap_or(0),
-        Some(current_nodes),
+    let days = query.days.unwrap_or(7);
+    let timezone_offset = query.tz_offset_minutes.unwrap_or(0);
+    let sampled_at_ms = now_ms();
+    run_database_operation(
+        state,
+        "network-usage-source-trend",
+        DatabaseAccess::ReadOnly,
+        move |db| {
+            network_usage::query_source_trend(
+                db,
+                sampled_at_ms,
+                days,
+                bucket,
+                timezone_offset,
+                Some(&current_nodes),
+            )
+        },
     )
+    .await
 }
 
 async fn refresh_network_usage_source_trend(
@@ -1290,7 +1402,6 @@ async fn save_group_config(
     Json(config): Json<GroupConfig>,
 ) -> Result<Json<GroupConfig>, AppError> {
     let mut normalized = config;
-    validate_node_risk_checks(normalized.node_risk)?;
     normalized.probe_interval_sec = normalize_probe_interval_with_min(
         normalized.probe_interval_sec,
         load_min_probe_interval_sec(&state)?,
@@ -1328,41 +1439,35 @@ async fn inspect_group(
             "geminiLocation is only allowed for the strategy group selected in Settings",
         ));
     }
-    validate_node_risk_checks(node_risk)?;
-
     let controller = load_controller(&state)?;
     let proxies = fetch_proxies(&state, &controller).await?;
     let proxy_map = proxy_map(&proxies);
     let group_proxy = proxy_map
         .get(&group)
         .ok_or_else(|| AppError::bad_request(format!("group not found: {group}")))?;
-    if !is_switchable_kind(&group_proxy.kind) {
+    if gemini_location && !is_switchable_kind(&group_proxy.kind) {
         return Err(AppError::bad_request(format!(
-            "{} is {}, but inspection requires a Selector group",
+            "{} is {}, but Gemini location inspection requires a Selector group",
             group_proxy.name, group_proxy.kind
         )));
     }
 
-    let timeout_ms = load_delay_test_timeout_ms(&state)?;
+    let node_risk_timeout_ms = if node_risk.any() {
+        Some(load_delay_test_timeout_ms(&state)?)
+    } else {
+        None
+    };
     let checks_json = serde_json::to_string(&node_risk).unwrap_or_else(|_| "{}".to_string());
     eprintln!(
-        "singdeck-helper: inspection start group={group:?} nodes={} gemini_location={gemini_location} node_risk={checks_json}",
-        group_proxy.all.len()
+        "singdeck-helper: inspection start group={group:?} nodes={} gemini_location={gemini_location} gemini_timeout_ms={:?} node_risk={checks_json} node_risk_timeout_ms={node_risk_timeout_ms:?}",
+        group_proxy.all.len(),
+        gemini_location.then_some(gemini_location::GEMINI_REQUEST_TIMEOUT_MS)
     );
     if gemini_location {
-        probe_and_save_gemini_locations(&state, &controller, &group, &group_proxy.all, timeout_ms)
-            .await;
+        probe_and_save_gemini_locations(&state, &controller, &group, &group_proxy.all).await;
     }
-    if node_risk.any() {
-        probe_and_save_node_risks(
-            &state,
-            &controller,
-            &group,
-            &group_proxy.all,
-            timeout_ms,
-            node_risk,
-        )
-        .await;
+    if let Some(timeout_ms) = node_risk_timeout_ms {
+        probe_and_save_node_risks(&state, &group, &group_proxy.all, timeout_ms, node_risk).await;
     }
 
     let config = load_group_config(&state, &group)?;
@@ -1390,15 +1495,6 @@ async fn inspect_group(
     );
     eprintln!("singdeck-helper: inspection complete group={group:?}");
     Ok(Json(response))
-}
-
-fn validate_node_risk_checks(checks: node_risk::types::NodeRiskChecks) -> Result<(), AppError> {
-    if checks.any_ip_dependent() && !checks.exit_ip {
-        return Err(AppError::bad_request(
-            "nodeRisk.exitIp must be true when any IP-dependent nodeRisk check is enabled",
-        ));
-    }
-    Ok(())
 }
 
 async fn group_scores(
@@ -1495,6 +1591,20 @@ async fn read_config(State(state): State<AppState>) -> Result<Json<ConfigRespons
         error: last_error
             .or_else(|| Some("Config path is not configured in Settings.".to_string())),
     }))
+}
+
+fn load_sing_box_outbound_fetcher(
+    state: &AppState,
+) -> Result<sing_box_outbound::SingBoxOutboundFetcher> {
+    let config_path = load_string_kv(state, "config_path")?
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| anyhow!("Config path is not configured in Settings"))?;
+    let content = fs::read_to_string(&config_path)
+        .with_context(|| format!("read configured sing-box config {config_path}"))?;
+    let config = sing_box_outbound::parse_config(&normalize_jsonc(&content))
+        .with_context(|| format!("parse configured sing-box config {config_path}"))?;
+    Ok(sing_box_outbound::SingBoxOutboundFetcher::new(config))
 }
 
 async fn save_config_source(
@@ -1758,7 +1868,7 @@ async fn sync_node_sources_with_nodes(
         }
 
         let result = async {
-            let content = state
+            let response = state
                 .http
                 .get(source.url.trim())
                 .header(header::USER_AGENT, NODE_SOURCE_FETCH_USER_AGENT)
@@ -1769,12 +1879,30 @@ async fn sync_node_sources_with_nodes(
                 .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
                 .send()
                 .await
-                .with_context(|| format!("fetch {}", source.url))?
-                .error_for_status()
-                .with_context(|| format!("fetch {}", source.url))?
+                .map_err(|error| {
+                    anyhow!(
+                        "fetch node source {:?}: {}",
+                        source.name.trim(),
+                        error.without_url()
+                    )
+                })?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(anyhow!(
+                    "fetch node source {:?}: HTTP status {status}",
+                    source.name.trim()
+                ));
+            }
+            let content = response
                 .text()
                 .await
-                .with_context(|| format!("read {}", source.url))?;
+                .map_err(|error| {
+                    anyhow!(
+                        "read node source {:?}: {}",
+                        source.name.trim(),
+                        error.without_url()
+                    )
+                })?;
             let subscription_names = extract_subscription_node_names(&content)?;
             Ok::<_, anyhow::Error>(match_subscription_nodes(&subscription_names, current_nodes))
         }
@@ -2312,12 +2440,6 @@ struct GeminiLocationSweep {
 }
 
 #[derive(Debug)]
-struct NodeRiskSweep {
-    results: Vec<(String, node_risk::types::NodeRiskReport)>,
-    restore_error: Option<String>,
-}
-
-#[derive(Debug)]
 struct GeminiChromeCredentials {
     cookie_header: String,
     user_agent: String,
@@ -2328,14 +2450,12 @@ async fn run_gemini_location_sweep(
     controller: &ControllerConfig,
     group: &str,
     nodes: &[String],
-    timeout_ms: i64,
 ) -> Result<GeminiLocationSweep> {
     run_gemini_location_sweep_at_urls(
         state,
         controller,
         group,
         nodes,
-        timeout_ms,
         gemini_location::GEMINI_APP_URL,
         gemini_location::GEMINI_BATCH_URL,
     )
@@ -2343,6 +2463,26 @@ async fn run_gemini_location_sweep(
 }
 
 async fn run_gemini_location_sweep_at_urls(
+    state: &AppState,
+    controller: &ControllerConfig,
+    group: &str,
+    nodes: &[String],
+    app_url: &str,
+    batch_url: &str,
+) -> Result<GeminiLocationSweep> {
+    run_gemini_location_sweep_at_urls_with_timeout(
+        state,
+        controller,
+        group,
+        nodes,
+        gemini_location::GEMINI_REQUEST_TIMEOUT_MS,
+        app_url,
+        batch_url,
+    )
+    .await
+}
+
+async fn run_gemini_location_sweep_at_urls_with_timeout(
     state: &AppState,
     controller: &ControllerConfig,
     group: &str,
@@ -2452,65 +2592,39 @@ async fn restore_proxy_node_with_retries(
 
 async fn run_node_risk_sweep(
     state: &AppState,
-    controller: &ControllerConfig,
-    group: &str,
+    fetcher: &sing_box_outbound::SingBoxOutboundFetcher,
     nodes: &[String],
     timeout_ms: i64,
     checks: node_risk::types::NodeRiskChecks,
     provider_config: &node_risk::ProviderConfig,
-) -> Result<NodeRiskSweep> {
-    let _sweep_guard = SELECTOR_SWEEP_LOCK.lock().await;
-    let group_proxy = load_proxy_view(state, controller, group).await?;
-    if !is_switchable_kind(&group_proxy.kind) {
-        return Err(anyhow!(
-            "{} is {}, but node risk probing requires a Selector group",
-            group_proxy.name,
-            group_proxy.kind
-        ));
-    }
-    if group_proxy.now.trim().is_empty() {
-        return Err(anyhow!("{} has no selected node to restore", group_proxy.name));
-    }
-
-    let original_node = group_proxy.now;
+) -> Vec<(String, node_risk::types::NodeRiskReport)> {
     let mut results = Vec::with_capacity(nodes.len());
-    let stun_timeout = Duration::from_millis(normalize_delay_test_timeout(timeout_ms) as u64);
+    let probe_timeout = Duration::from_millis(normalize_delay_test_timeout(timeout_ms) as u64);
     let provider_timeout = Duration::from_millis(NODE_RISK_PROVIDER_TIMEOUT_MS);
     for node in nodes {
-        match select_proxy_node(state, controller, group, node).await {
-            Ok(()) => {
-                let report = node_risk::assess_selected_node(
-                    &state.http,
-                    stun_timeout,
-                    provider_timeout,
-                    checks,
-                    provider_config,
-                )
-                .await;
-                results.push((node.clone(), report));
-            }
-            Err(error) => results.push((
-                node.clone(),
-                node_risk::routing_error_report(
-                    format!("select node for risk probe: {error}"),
-                    checks,
-                    provider_config,
-                ),
-            )),
-        }
+        let started = Instant::now();
+        eprintln!("singdeck-helper: node egress observation start node={node:?}");
+        let report = node_risk::assess_outbound_node(
+            &state.http,
+            fetcher,
+            node,
+            probe_timeout,
+            provider_timeout,
+            checks,
+            provider_config,
+        )
+        .await;
+        eprintln!(
+            "singdeck-helper: node egress observation complete node={node:?} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        results.push((node.clone(), report));
     }
-
-    let restore_error =
-        restore_proxy_node_with_retries(state, controller, group, &original_node).await;
-    Ok(NodeRiskSweep {
-        results,
-        restore_error,
-    })
+    results
 }
 
 async fn probe_and_save_node_risks(
     state: &AppState,
-    controller: &ControllerConfig,
     group: &str,
     nodes: &[String],
     timeout_ms: i64,
@@ -2520,50 +2634,30 @@ async fn probe_and_save_node_risks(
         return;
     }
     let provider_config = node_risk::ProviderConfig::from_env();
-    match run_node_risk_sweep(
-        state,
-        controller,
-        group,
-        nodes,
-        timeout_ms,
-        checks,
-        &provider_config,
-    )
-    .await
-    {
-        Ok(sweep) => {
-            for (node, result) in sweep.results {
+    match load_sing_box_outbound_fetcher(state) {
+        Ok(fetcher) => {
+            let results =
+                run_node_risk_sweep(state, &fetcher, nodes, timeout_ms, checks, &provider_config)
+                    .await;
+            for (node, result) in results {
                 log_node_risk_result(group, &node, &result);
                 if let Err(error) = save_node_risk_result(state, group, &node, &result, now_ms()) {
-                    report_node_risk_error(
-                        state,
-                        format!("save {node} risk result: {error}"),
-                    );
+                    report_node_risk_error(state, format!("save {node} risk result: {error}"));
                 }
-            }
-            if let Some(error) = sweep.restore_error {
-                report_node_risk_error(
-                    state,
-                    format!("restore original {group} node: {error}"),
-                );
             }
         }
         Err(error) => {
-            let error = format!("run {group} risk sweep: {error}");
+            let error = format!("load sing-box config for {group} risk sweep: {error:#}");
             report_node_risk_error(state, error.clone());
             for node in nodes {
-                let result = node_risk::routing_error_report(
-                    error.clone(),
-                    checks,
-                    &provider_config,
-                );
+                let result = node_risk::probe_error_report(error.clone(), checks, &provider_config);
                 log_node_risk_result(group, node, &result);
                 if let Err(save_error) =
                     save_node_risk_result(state, group, node, &result, now_ms())
                 {
                     report_node_risk_error(
                         state,
-                        format!("save {node} routing error: {save_error}"),
+                        format!("save {node} outbound probe error: {save_error}"),
                     );
                 }
             }
@@ -2598,7 +2692,6 @@ async fn probe_and_save_gemini_locations(
     controller: &ControllerConfig,
     group: &str,
     nodes: &[String],
-    timeout_ms: i64,
 ) {
     match load_gemini_location_group(state) {
         Ok(configured_group) if configured_group == group => {}
@@ -2609,7 +2702,7 @@ async fn probe_and_save_gemini_locations(
         }
     }
 
-    match run_gemini_location_sweep(state, controller, group, nodes, timeout_ms).await {
+    match run_gemini_location_sweep(state, controller, group, nodes).await {
         Ok(sweep) => {
             for (node, result) in sweep.results {
                 log_gemini_location_result(group, &node, &result);
@@ -2873,13 +2966,13 @@ fn spawn_network_usage_sampler(state: AppState) {
 }
 
 async fn sample_network_usage(state: &AppState) -> Result<network_usage::NetworkUsageSettings> {
-    let settings = {
-        let db = state
-            .db
-            .lock()
-            .map_err(|_| anyhow!("database lock poisoned"))?;
-        network_usage::load_settings(&db)?
-    };
+    let settings = run_database_operation(
+        state,
+        "network-usage-sample-settings",
+        DatabaseAccess::ReadOnly,
+        network_usage::load_settings,
+    )
+    .await?;
     if !settings.enabled {
         return Ok(settings);
     }
@@ -2891,12 +2984,18 @@ async fn sample_network_usage(state: &AppState) -> Result<network_usage::Network
 
     let snapshot = controller_get::<serde_json::Value>(state, &controller, "/connections").await?;
     let sampled_at_ms = now_ms();
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| anyhow!("database lock poisoned"))?;
-    network_usage::apply_connections_snapshot(&db, &snapshot, sampled_at_ms)?;
-    network_usage::cleanup_old_usage_if_due(&db, sampled_at_ms, settings.retention_days)?;
+    let retention_days = settings.retention_days;
+    run_database_operation(
+        state,
+        "network-usage-sample",
+        DatabaseAccess::ReadWrite,
+        move |db| {
+            network_usage::apply_connections_snapshot(db, &snapshot, sampled_at_ms)?;
+            network_usage::cleanup_old_usage_if_due(db, sampled_at_ms, retention_days)?;
+            Ok(())
+        },
+    )
+    .await?;
     Ok(settings)
 }
 
@@ -3427,7 +3526,7 @@ struct AuthState {
 /// Resolve the helper API auth token. An explicit `SINGDECK_HELPER_TOKEN` always
 /// wins. Otherwise a token is generated and persisted only when the helper is
 /// reachable beyond loopback, so local-only setups keep working with no config.
-fn resolve_auth_token(db: &Arc<Mutex<Connection>>, bind: &str) -> Result<Option<String>> {
+fn resolve_auth_token(db: &Database, bind: &str) -> Result<Option<String>> {
     if let Ok(token) = env::var("SINGDECK_HELPER_TOKEN") {
         let token = token.trim().to_string();
         if !token.is_empty() {
@@ -4513,6 +4612,13 @@ fn load_json_kv<T: for<'de> Deserialize<'de>>(state: &AppState, key: &str) -> Re
         .db
         .lock()
         .map_err(|_| anyhow!("database lock poisoned"))?;
+    load_json_kv_from_connection(&db, key)
+}
+
+fn load_json_kv_from_connection<T: for<'de> Deserialize<'de>>(
+    db: &Connection,
+    key: &str,
+) -> Result<Option<T>> {
     let value = db
         .query_row("SELECT value FROM kv WHERE key = ?1", params![key], |row| {
             row.get::<_, String>(0)
@@ -4759,7 +4865,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -4877,12 +4983,14 @@ mod tests {
         bootstrap_count: Arc<AtomicUsize>,
         batch_count: Arc<AtomicUsize>,
         fail_first_batch: bool,
+        bootstrap_delay: Duration,
     }
 
     async fn fake_gemini_bootstrap(
         State(state): State<FakeGeminiLocationState>,
     ) -> Response {
         state.bootstrap_count.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(state.bootstrap_delay).await;
         (
             StatusCode::OK,
             [(header::SET_COOKIE, "COMPASS=test-bootstrap; Path=/")],
@@ -5000,21 +5108,14 @@ mod tests {
     }
 
     #[test]
-    fn node_risk_request_requires_explicit_exit_ip_dependency() {
-        assert!(validate_node_risk_checks(node_risk::types::NodeRiskChecks::default()).is_ok());
-        assert!(validate_node_risk_checks(node_risk::types::NodeRiskChecks {
-            exit_ip: true,
-            ..node_risk::types::NodeRiskChecks::default()
-        })
-        .is_ok());
-
-        let error = validate_node_risk_checks(node_risk::types::NodeRiskChecks {
-            address_scope: true,
-            ..node_risk::types::NodeRiskChecks::default()
-        })
-        .unwrap_err();
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
-        assert!(error.message.contains("nodeRisk.exitIp"));
+    fn node_risk_request_allows_internal_exit_ip_observation() {
+        let inspection: InspectionRequest = serde_json::from_value(serde_json::json!({
+            "nodeRisk": {"networkClass": true}
+        }))
+        .unwrap();
+        let checks = inspection.node_risk.unwrap();
+        assert!(checks.network_class);
+        assert!(!checks.exit_ip);
     }
 
     #[test]
@@ -5454,6 +5555,7 @@ mod tests {
                 bootstrap_count: bootstrap_count.clone(),
                 batch_count: batch_count.clone(),
                 fail_first_batch: false,
+                bootstrap_delay: Duration::ZERO,
             },
         )
         .await;
@@ -5462,7 +5564,7 @@ mod tests {
             secret: String::new(),
         };
 
-        let sweep = run_gemini_location_sweep_at_urls(
+        let sweep = run_gemini_location_sweep_at_urls_with_timeout(
             &state,
             &controller,
             gemini_location::GEMINI_GROUP_NAME,
@@ -5493,6 +5595,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gemini_sweep_does_not_use_delay_test_timeout() {
+        let state = test_app_state();
+        let _browser_root = configure_test_gemini_chrome_profile(&state);
+        save_string_kv(&state, "delay_test_timeout_ms", "1").unwrap();
+        let nodes = vec!["node-a".to_string()];
+        let controller_url = spawn_fake_gemini_controller(FakeGeminiControllerState {
+            selected: Arc::new(Mutex::new(nodes[0].clone())),
+            nodes: Arc::new(nodes.clone()),
+            switches: Arc::new(Mutex::new(Vec::new())),
+            restore_failures_remaining: Arc::new(AtomicUsize::new(0)),
+        })
+        .await;
+        let bootstrap_count = Arc::new(AtomicUsize::new(0));
+        let batch_count = Arc::new(AtomicUsize::new(0));
+        let (app_url, batch_url) = spawn_fake_gemini_location_server(
+            FakeGeminiLocationState {
+                bootstrap_count: bootstrap_count.clone(),
+                batch_count: batch_count.clone(),
+                fail_first_batch: false,
+                bootstrap_delay: Duration::from_millis(650),
+            },
+        )
+        .await;
+        let controller = ControllerConfig {
+            controller_url,
+            secret: String::new(),
+        };
+
+        let sweep = run_gemini_location_sweep_at_urls(
+            &state,
+            &controller,
+            gemini_location::GEMINI_GROUP_NAME,
+            &nodes,
+            &app_url,
+            &batch_url,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(load_delay_test_timeout_ms(&state).unwrap(), 500);
+        assert_eq!(sweep.results.len(), 1);
+        assert_eq!(
+            sweep.results[0].1.status,
+            gemini_location::GeminiLocationStatus::Success
+        );
+        assert_eq!(bootstrap_count.load(Ordering::SeqCst), 1);
+        assert_eq!(batch_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn gemini_sweep_retries_transient_restore_failure() {
         let state = test_app_state();
         let _browser_root = configure_test_gemini_chrome_profile(&state);
@@ -5514,6 +5666,7 @@ mod tests {
                 bootstrap_count: bootstrap_count.clone(),
                 batch_count: batch_count.clone(),
                 fail_first_batch: false,
+                bootstrap_delay: Duration::ZERO,
             },
         )
         .await;
@@ -5522,7 +5675,7 @@ mod tests {
             secret: String::new(),
         };
 
-        let sweep = run_gemini_location_sweep_at_urls(
+        let sweep = run_gemini_location_sweep_at_urls_with_timeout(
             &state,
             &controller,
             gemini_location::GEMINI_GROUP_NAME,
@@ -5546,28 +5699,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_risk_sweep_supports_custom_group_and_records_selection_failure() {
-        let state = test_app_state();
-        let controller_nodes = vec!["node-a".to_string(), "node-b".to_string()];
-        let selected = Arc::new(Mutex::new(controller_nodes[0].clone()));
-        let switches = Arc::new(Mutex::new(Vec::new()));
-        let controller_url = spawn_fake_gemini_controller(FakeGeminiControllerState {
-            selected: selected.clone(),
-            nodes: Arc::new(controller_nodes),
-            switches: switches.clone(),
-            restore_failures_remaining: Arc::new(AtomicUsize::new(0)),
-        })
-        .await;
-        let controller = ControllerConfig {
-            controller_url,
-            secret: String::new(),
-        };
+    async fn node_risk_sweep_uses_concrete_outbounds_without_a_controller() {
+        use std::os::unix::fs::PermissionsExt;
 
-        let sweep = run_node_risk_sweep(
+        let state = test_app_state();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let binary = temp_dir.path().join("sing-box");
+        fs::write(
+            &binary,
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"ip\":\"203.0.113.9\"}'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary, permissions).unwrap();
+        let fetcher = sing_box_outbound::SingBoxOutboundFetcher::with_binary(
+            serde_json::json!({
+                "outbounds": [{
+                    "type": "vless",
+                    "tag": "node-a",
+                    "server": "node.example",
+                    "server_port": 443,
+                    "uuid": "test"
+                }]
+            }),
+            binary,
+        );
+
+        let results = run_node_risk_sweep(
             &state,
-            &controller,
-            "custom-policy",
-            &["missing-node".to_string()],
+            &fetcher,
+            &["node-a".to_string(), "missing-node".to_string()],
             2_000,
             node_risk::types::NodeRiskChecks {
                 exit_ip: true,
@@ -5576,11 +5738,18 @@ mod tests {
             },
             &node_risk::ProviderConfig::default(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        assert_eq!(sweep.results.len(), 1);
-        let report = &sweep.results[0].1;
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].1.exit_ip.as_ref().unwrap().status,
+            node_risk::types::CheckStatus::Success
+        );
+        assert_eq!(
+            results[0].1.exit_ip.as_ref().unwrap().ip.as_deref(),
+            Some("203.0.113.9")
+        );
+        let report = &results[1].1;
         assert_eq!(
             report.exit_ip.as_ref().unwrap().status,
             node_risk::types::CheckStatus::Unavailable
@@ -5594,9 +5763,6 @@ mod tests {
         assert!(report.tor.is_none());
         assert!(report.privacy.is_none());
         assert!(report.abuse.is_none());
-        assert_eq!(sweep.restore_error, None);
-        assert_eq!(*selected.lock().unwrap(), "node-a");
-        assert!(switches.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -5619,6 +5785,7 @@ mod tests {
                 bootstrap_count: bootstrap_count.clone(),
                 batch_count: batch_count.clone(),
                 fail_first_batch: false,
+                bootstrap_delay: Duration::ZERO,
             },
         )
         .await;
@@ -5627,7 +5794,7 @@ mod tests {
             secret: String::new(),
         };
 
-        let sweep = run_gemini_location_sweep_at_urls(
+        let sweep = run_gemini_location_sweep_at_urls_with_timeout(
             &state,
             &controller,
             gemini_location::GEMINI_GROUP_NAME,
@@ -5671,6 +5838,7 @@ mod tests {
                 bootstrap_count: bootstrap_count.clone(),
                 batch_count: batch_count.clone(),
                 fail_first_batch: true,
+                bootstrap_delay: Duration::ZERO,
             },
         )
         .await;
@@ -5679,7 +5847,7 @@ mod tests {
             secret: String::new(),
         };
 
-        let sweep = run_gemini_location_sweep_at_urls(
+        let sweep = run_gemini_location_sweep_at_urls_with_timeout(
             &state,
             &controller,
             gemini_location::GEMINI_GROUP_NAME,
@@ -5975,7 +6143,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6012,7 +6180,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6151,7 +6319,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6218,7 +6386,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6265,7 +6433,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6468,7 +6636,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6490,7 +6658,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6520,7 +6688,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6552,7 +6720,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6577,7 +6745,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6621,7 +6789,7 @@ mod tests {
         let events = helper_event_channel();
         let mut receiver = events.subscribe();
         let state = AppState {
-            db: Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+            db: Database::new(Connection::open_in_memory().unwrap()),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6654,7 +6822,7 @@ mod tests {
         let events = helper_event_channel();
         let mut receiver = events.subscribe();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6705,7 +6873,7 @@ mod tests {
         let events = helper_event_channel();
         let mut receiver = events.subscribe();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6753,7 +6921,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -6791,7 +6959,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -7264,7 +7432,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -7347,7 +7515,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -7448,6 +7616,7 @@ mod tests {
         let conn = Connection::open(db_path).unwrap();
 
         configure_db_connection(&conn).unwrap();
+        init_db(&conn).unwrap();
 
         let journal_mode: String = conn
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
@@ -7455,8 +7624,43 @@ mod tests {
         let busy_timeout_ms: i64 = conn
             .pragma_query_value(None, "busy_timeout", |row| row.get(0))
             .unwrap();
+        let cleanup_index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_usage_last_seen_seen_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
         assert!(busy_timeout_ms >= 5000);
+        assert_eq!(cleanup_index_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_database_health_does_not_wait_for_primary_connection_mutex() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("helper.db");
+        let conn = Connection::open(&db_path).unwrap();
+        configure_db_connection(&conn).unwrap();
+        init_db(&conn).unwrap();
+        let state = AppState {
+            db: Database::new(conn),
+            http: Client::new(),
+            mobile_config_url: None,
+            active_probes: Arc::new(Mutex::new(HashMap::new())),
+            probe_limiter: ProbeLimiter::new(),
+            events: helper_event_channel(),
+        };
+
+        let _primary_guard = state.db.lock().unwrap();
+        let Json(response) =
+            tokio::time::timeout(Duration::from_secs(1), health(State(state.clone())))
+                .await
+                .expect("health should use the independent worker connection")
+                .unwrap();
+
+        assert!(response.ok);
+        assert!(response.sqlite);
     }
 
     #[test]
@@ -7563,7 +7767,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -7621,7 +7825,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -7663,7 +7867,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -7718,7 +7922,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -7771,7 +7975,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -7823,7 +8027,7 @@ mod tests {
                 });
             }
         });
-        let subscription_url = format!("http://{sub_addr}");
+        let subscription_url = format!("http://{sub_addr}/subscription?token=secret-test-token");
 
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("config.jsonc");
@@ -7844,7 +8048,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -7867,7 +8071,9 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         let response = load_node_sources_response(&state).unwrap();
         let source = response.sources.iter().find(|source| source.name == "ss-id").unwrap();
-        assert!(source.last_error.as_deref().unwrap_or_default().contains("429"));
+        let error = source.last_error.as_deref().unwrap_or_default();
+        assert!(error.contains("429"));
+        assert!(!error.contains("secret-test-token"));
     }
 
     #[tokio::test]
@@ -7897,7 +8103,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -7948,7 +8154,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),
@@ -7983,7 +8189,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let state = AppState {
-            db: Arc::new(Mutex::new(conn)),
+            db: Database::new(conn),
             http: Client::new(),
             mobile_config_url: None,
             active_probes: Arc::new(Mutex::new(HashMap::new())),

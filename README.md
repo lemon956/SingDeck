@@ -220,7 +220,7 @@ The sidebar's “Run egress inspection” button calls `POST /api/v1/groups/<gro
 {
   "geminiLocation": true,
   "nodeRisk": {
-    "exitIp": true,
+    "exitIp": false,
     "addressScope": false,
     "networkIdentity": false,
     "networkClass": true,
@@ -232,13 +232,13 @@ The sidebar's “Run egress inspection” button calls `POST /api/v1/groups/<gro
 }
 ```
 
-`geminiLocation: true` is accepted only for the group selected in Settings. Every IP-dependent node check requires `exitIp: true`; invalid combinations return HTTP 400 instead of silently enabling another detector. Unselected results are `null` under `nodes[].raw.nodeRisk`, while the report's `checks` object records the exact selection. Scheduled and failure-triggered probes remain speed-only and never invoke an inspection implicitly.
+`geminiLocation: true` is accepted only for the Selector group selected in Settings. Generic exit and network inspection is available to every strategy group that contains concrete outbound members. `exitIp` and `networkClass` are independent: when `networkClass: true` and `exitIp: false`, the helper observes the address internally but leaves `nodes[].raw.nodeRisk.exitIp` as `null`. The report's `checks` object records the exact requested selection. Scheduled and failure-triggered probes remain speed-only and never invoke an inspection implicitly.
 
 The helper logs `inspection start/complete` for each run and emits one `Gemini location result` or `node risk result` JSON line per node. These lines contain statuses, results, and sanitized error context, but never Cookie values or the dynamic `at`, `f.sid`, and `bl` session parameters. Follow them with `journalctl -u singdeck-helper.service -f`.
 
-Exit IP observation uses Google STUN. The helper switches the Selector before each node probe, but sing-box routing must still send `stun.l.google.com:19302` through that Selector. If another route captures STUN, the observed address belongs to that route and must not be treated as an authoritative classification of the selected node.
+Generic inspection does not switch a Selector and does not interrupt existing connections. For each concrete member, the helper derives a minimal configuration from the sing-box config path saved in Settings and runs `sing-box tools fetch --outbound <member>` against the canonical HTTPS endpoint `https://api64.ipify.org?format=json`. The helper host therefore needs a readable sing-box configuration and a `sing-box` executable in its service `PATH`. A missing tag, unsupported group tag, invalid dependency chain, command timeout, or endpoint failure is reported for that node without changing any live policy-group selection.
 
-`networkClass` first asks proxycheck.io and falls back to ipquery.io without requiring a key. It reports `residential` only from proxycheck.io's explicit `Residential` network type. Explicit hosting, wireless, and business evidence maps to `data_center`, `mobile`, and `business`; conflicting residential and hosting evidence is `mixed`. ipquery.io can confirm data-center or mobile evidence, but a negative result remains `unknown` and is never promoted to residential. This detector does not reuse privacy, reputation, BGP, or Tor results.
+`networkClass` queries proxycheck.io and ipquery.io independently and concurrently; neither provider is a fallback for the other. Provider-specific records are returned in `networkClass.evidence`. Explicit residential, hosting, wireless/mobile, and business signals map to `residential`, `data_center`, `mobile`, and `business`; conflicting signals produce `mixed`. A provider response without an explicit positive signal remains `unknown`, partial provider failures retain the successful evidence, and only an all-provider failure produces `unavailable`. This detector does not reuse privacy, reputation, BGP, or Tor results.
 
 If Gemini redirects the Chrome-authenticated request to `/sorry/`, SingDeck reports `anti_abuse_challenge`. This proves that Google applied an anti-abuse challenge to that request, not that SingDeck has classified the node as malicious. Google does not expose the exact matched rule; shared-exit request volume, automation characteristics, account-session/IP mismatch, or IP reputation can all contribute.
 

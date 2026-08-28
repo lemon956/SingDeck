@@ -13,6 +13,8 @@ use std::{env, net::IpAddr, time::Duration};
 use chrono::Local;
 use reqwest::Client;
 
+use crate::sing_box_outbound::SingBoxOutboundFetcher;
+
 use self::types::{ExitIpResult, NodeRiskChecks, NodeRiskReport};
 
 #[derive(Clone, Default)]
@@ -32,17 +34,19 @@ impl ProviderConfig {
     }
 }
 
-pub async fn assess_selected_node(
+pub async fn assess_outbound_node(
     client: &Client,
-    stun_timeout: Duration,
+    fetcher: &SingBoxOutboundFetcher,
+    outbound: &str,
+    probe_timeout: Duration,
     provider_timeout: Duration,
     checks: NodeRiskChecks,
     config: &ProviderConfig,
 ) -> NodeRiskReport {
-    if !checks.exit_ip {
+    if !checks.any() {
         return empty_report(checks);
     }
-    let exit_ip = exit_ip::detect(stun_timeout).await;
+    let exit_ip = exit_ip::detect(fetcher, outbound, probe_timeout).await;
     let ip = exit_ip.ip.as_deref().and_then(|value| value.parse().ok());
     let Some(ip) = ip else {
         let reason = exit_ip
@@ -55,13 +59,13 @@ pub async fn assess_selected_node(
     assess_ip(client, exit_ip, ip, provider_timeout, checks, config).await
 }
 
-pub fn routing_error_report(
+pub fn probe_error_report(
     reason: impl Into<String>,
     checks: NodeRiskChecks,
     config: &ProviderConfig,
 ) -> NodeRiskReport {
     let reason = reason.into();
-    if !checks.exit_ip {
+    if !checks.any() {
         return empty_report(checks);
     }
     unavailable_report(exit_ip::unavailable(reason.clone()), checks, config, reason)
@@ -146,7 +150,7 @@ async fn assess_ip(
     );
     NodeRiskReport {
         checks,
-        exit_ip: Some(exit_ip),
+        exit_ip: checks.exit_ip.then_some(exit_ip),
         address_scope,
         network_identity,
         network_class,
@@ -167,7 +171,7 @@ fn unavailable_report(
     let reason = reason.into();
     NodeRiskReport {
         checks,
-        exit_ip: Some(exit_ip),
+        exit_ip: checks.exit_ip.then_some(exit_ip),
         address_scope: checks
             .address_scope
             .then(|| address_scope::unavailable(reason.clone())),
@@ -227,9 +231,9 @@ mod tests {
     use crate::node_risk::types::CheckStatus;
 
     #[test]
-    fn routing_failure_preserves_independent_provider_statuses() {
-        let report = routing_error_report(
-            "selector failed",
+    fn outbound_probe_failure_preserves_independent_provider_statuses() {
+        let report = probe_error_report(
+            "outbound probe failed",
             NodeRiskChecks::all(),
             &ProviderConfig::default(),
         );
@@ -257,13 +261,13 @@ mod tests {
     }
 
     #[test]
-    fn routing_failure_marks_configured_providers_unavailable() {
+    fn outbound_probe_failure_marks_configured_providers_unavailable() {
         let config = ProviderConfig {
             ipinfo_token: Some("configured".to_string()),
             abuseipdb_key: Some("configured".to_string()),
             proxycheck_key: Some("configured".to_string()),
         };
-        let report = routing_error_report("selector failed", NodeRiskChecks::all(), &config);
+        let report = probe_error_report("outbound probe failed", NodeRiskChecks::all(), &config);
 
         assert_eq!(report.privacy.unwrap().status, CheckStatus::Unavailable);
         assert_eq!(report.abuse.unwrap().status, CheckStatus::Unavailable);
@@ -313,7 +317,6 @@ mod tests {
     #[tokio::test]
     async fn selected_network_class_does_not_enable_other_provider_checks() {
         let checks = NodeRiskChecks {
-            exit_ip: true,
             network_class: true,
             ..NodeRiskChecks::default()
         };
@@ -341,6 +344,7 @@ mod tests {
             report.network_class.unwrap().status,
             CheckStatus::Unavailable
         );
+        assert!(report.exit_ip.is_none());
         assert!(report.network_identity.is_none());
         assert!(report.route_security.is_none());
         assert!(report.tor.is_none());

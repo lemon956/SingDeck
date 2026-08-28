@@ -47,16 +47,6 @@ impl NodeRiskChecks {
             || self.privacy
             || self.abuse
     }
-
-    pub fn any_ip_dependent(self) -> bool {
-        self.address_scope
-            || self.network_identity
-            || self.network_class
-            || self.route_security
-            || self.tor
-            || self.privacy
-            || self.abuse
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -220,6 +210,33 @@ pub enum NetworkClassVerdict {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkClassSignal {
+    Residential,
+    DataCenter,
+    Mobile,
+    Business,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkClassEvidence {
+    pub provider: String,
+    pub status: CheckStatus,
+    pub verdict: NetworkClassVerdict,
+    pub signals: Vec<NetworkClassSignal>,
+    pub user_type: Option<String>,
+    pub is_hosting_provider: Option<bool>,
+    pub connection_type: Option<String>,
+    pub isp: Option<String>,
+    pub organization: Option<String>,
+    pub autonomous_system_number: Option<u32>,
+    pub network: Option<String>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkClassResult {
@@ -233,6 +250,8 @@ pub struct NetworkClassResult {
     pub autonomous_system_number: Option<u32>,
     pub network: Option<String>,
     pub user_count: Option<u64>,
+    #[serde(default)]
+    pub evidence: Vec<NetworkClassEvidence>,
     pub source: String,
     pub checked_at: String,
     pub error: Option<String>,
@@ -302,7 +321,6 @@ mod tests {
         assert!(!checks.privacy);
         assert!(!checks.abuse);
         assert!(checks.any());
-        assert!(checks.any_ip_dependent());
         assert_eq!(NodeRiskChecks::default().any(), false);
         assert!(serde_json::from_value::<NodeRiskChecks>(serde_json::json!({
             "exitIP": true
@@ -359,6 +377,20 @@ mod tests {
                 autonomous_system_number: Some(64500),
                 network: Some("203.0.113.0/24".to_string()),
                 user_count: Some(1),
+                evidence: vec![NetworkClassEvidence {
+                    provider: "test-provider".to_string(),
+                    status: CheckStatus::Success,
+                    verdict: NetworkClassVerdict::Residential,
+                    signals: vec![NetworkClassSignal::Residential],
+                    user_type: Some("residential".to_string()),
+                    is_hosting_provider: Some(false),
+                    connection_type: Some("Cable/DSL".to_string()),
+                    isp: Some("Example ISP".to_string()),
+                    organization: Some("Example ISP".to_string()),
+                    autonomous_system_number: Some(64500),
+                    network: Some("203.0.113.0/24".to_string()),
+                    error: None,
+                }],
                 source: "maxmind".to_string(),
                 checked_at: "2026-01-01T00:00:00Z".to_string(),
                 error: None,
@@ -400,6 +432,10 @@ mod tests {
         assert_eq!(value["exitIp"]["family"], "ipv4");
         assert_eq!(value["addressScope"]["classification"], "documentation");
         assert_eq!(value["networkClass"]["verdict"], "residential");
+        assert_eq!(
+            value["networkClass"]["evidence"][0]["signals"][0],
+            "residential"
+        );
         assert_eq!(value["routeSecurity"]["status"], "unavailable");
         assert_eq!(value["privacy"]["status"], "not_configured");
         assert_eq!(value["checks"]["abuse"], false);

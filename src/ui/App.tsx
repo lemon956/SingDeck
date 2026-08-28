@@ -718,6 +718,7 @@ function normalizeNodeRiskChecks(checks?: Partial<HelperNodeRiskChecks> | null):
 
 function hasSelectedNodeRiskCheck(checks: HelperNodeRiskChecks): boolean {
   return (
+    checks.exitIp ||
     checks.addressScope ||
     checks.networkIdentity ||
     checks.networkClass ||
@@ -1659,9 +1660,11 @@ export function App() {
       : activeHelperGroup?.config ?? fallbackGroupConfig(activeGroupTestUrl);
   const activeNodeRisk = normalizeNodeRiskChecks(activeGroupConfig.nodeRisk);
   const activeIsGeminiLocationGroup = Boolean(
-    activeStrategyGroup && helper.testingSettings?.geminiLocationGroup === activeStrategyGroup.name
+    activeStrategyGroup &&
+      isSelectableProxyGroup(activeStrategyGroup) &&
+      helper.testingSettings?.geminiLocationGroup === activeStrategyGroup.name
   );
-  const activeSupportsNodeInspection = Boolean(activeStrategyGroup && isSelectableProxyGroup(activeStrategyGroup));
+  const activeSupportsNodeInspection = Boolean(activeStrategyGroup && activeStrategyMembers.length > 0);
   const activeAdvancedRiskEnabled =
     activeNodeRisk.addressScope ||
     activeNodeRisk.networkIdentity ||
@@ -2202,7 +2205,6 @@ export function App() {
       return;
     }
     const next = { ...activeNodeRisk, [key]: enabled };
-    next.exitIp = hasSelectedNodeRiskCheck(next);
     draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, { nodeRisk: next });
   };
 
@@ -2298,7 +2300,7 @@ export function App() {
       inspection.geminiLocation = true;
     }
     if (hasSelectedNodeRiskCheck(activeNodeRisk)) {
-      inspection.nodeRisk = { ...activeNodeRisk, exitIp: true };
+      inspection.nodeRisk = { ...activeNodeRisk };
     }
     if (inspection.geminiLocation === undefined && inspection.nodeRisk === undefined) {
       return;
@@ -4301,6 +4303,24 @@ export function App() {
                           </label>
                         ) : null}
 
+                        <label className={`automation-option ${activeNodeRisk.exitIp ? 'on' : ''}`}>
+                          <input
+                            aria-label="出口 IP 检测"
+                            checked={activeNodeRisk.exitIp}
+                            disabled={!helperServiceAvailable || !activeSupportsNodeInspection}
+                            type="checkbox"
+                            onChange={(event) => draftActiveNodeRiskCheck('exitIp', event.target.checked)}
+                          />
+                          <span
+                            className={`automation-switch ${activeNodeRisk.exitIp ? 'on' : ''}`}
+                            aria-hidden="true"
+                          />
+                          <span>
+                            <strong>出口 IP 检测</strong>
+                            <small>由独立巡检按钮执行；通过目标节点直接观测 IPv4 / IPv6 出口</small>
+                          </span>
+                        </label>
+
                         <label className={`automation-option ${activeNodeRisk.networkClass ? 'on' : ''}`}>
                           <input
                             aria-label="家宽 / 机房检测"
@@ -4321,7 +4341,7 @@ export function App() {
 
                         {!activeSupportsNodeInspection ? (
                           <div className="settings-scope-note">
-                            当前组不是 Selector，无法逐节点切换出口，因此网络类型检测不可用。
+                            当前组没有可检测的具体节点，因此出口与网络类型检测不可用。
                           </div>
                         ) : null}
 
@@ -4400,7 +4420,7 @@ export function App() {
                       title={
                         activeHasInspectionSelection
                           ? '独立运行已勾选的出口与网络类型检测，不执行测速'
-                          : '请先勾选 Gemini 或网络类型检测项'
+                          : '请先勾选 Gemini、出口 IP 或网络类型检测项'
                       }
                       type="button"
                     >
