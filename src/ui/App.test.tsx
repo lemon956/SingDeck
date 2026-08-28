@@ -18,6 +18,10 @@ const groupConfig = {
   probeIntervalSec: 600
 };
 
+function localEpochSeconds(year: number, monthIndex: number, day: number): number {
+  return new Date(year, monthIndex, day).getTime() / 1000;
+}
+
 function setupProxyWorkspace() {
   window.location.hash = '#/proxies';
   localStorage.clear();
@@ -1606,7 +1610,7 @@ describe('App proxy workspace', () => {
 
   it('shows provider traffic as total, used, reset date, and payment time', () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-05-28T00:00:00Z'));
+    vi.setSystemTime(new Date(2026, 4, 28));
     window.location.hash = '#/overview';
     const loadSourceTrend = vi.fn(async () => undefined);
     const refreshSourceTrend = vi.fn(async () => undefined);
@@ -1632,9 +1636,9 @@ describe('App proxy workspace', () => {
             totalBytes: 8192,
             remainingBytes: 5120,
             usedRatio: 37.5,
-            expireAt: 1781971200,
+            expireAt: localEpochSeconds(2026, 5, 21),
             resetDay: null,
-            resetAt: 1780272000,
+            resetAt: localEpochSeconds(2026, 5, 1),
             stale: true,
             lastSuccessfulAt: '2026-05-27T18:00:00+08:00',
             fetchedAt: '2026-05-28T09:00:00+08:00',

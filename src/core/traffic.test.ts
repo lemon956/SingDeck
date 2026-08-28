@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { summarizeTrafficProvider } from './traffic';
 
+function localEpochSeconds(year: number, monthIndex: number, day: number): number {
+  return new Date(year, monthIndex, day).getTime() / 1000;
+}
+
 describe('traffic provider summary', () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-05-28T00:00:00Z'));
+    vi.setSystemTime(new Date(2026, 4, 28));
   });
 
   afterEach(() => {
@@ -24,9 +28,9 @@ describe('traffic provider summary', () => {
         totalBytes: 8192,
         remainingBytes: 5120,
         usedRatio: 37.5,
-        expireAt: 1781971200,
+        expireAt: localEpochSeconds(2026, 5, 21),
         resetDay: 17,
-        resetAt: 1780272000,
+        resetAt: localEpochSeconds(2026, 5, 1),
         stale: false,
         lastSuccessfulAt: '2026-05-27T18:00:00+08:00',
         fetchedAt: '2026-05-07T16:00:00+08:00',
@@ -54,9 +58,9 @@ describe('traffic provider summary', () => {
         totalBytes: 10737418240,
         remainingBytes: 5368709120,
         usedRatio: 50,
-        expireAt: 1783094400,
+        expireAt: localEpochSeconds(2026, 6, 4),
         resetDay: 30,
-        resetAt: 1782489600,
+        resetAt: localEpochSeconds(2026, 5, 27),
         stale: true,
         lastSuccessfulAt: '2026-05-27T18:00:00+08:00',
         fetchedAt: '2026-05-28T09:00:00+08:00',
@@ -84,7 +88,7 @@ describe('traffic provider summary', () => {
         totalBytes: 10737418240,
         remainingBytes: 5368709120,
         usedRatio: 50,
-        expireAt: 1781971200,
+        expireAt: localEpochSeconds(2026, 5, 21),
         resetDay: null,
         resetAt: null,
         stale: false,
