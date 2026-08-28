@@ -59,16 +59,8 @@ const SINGDECK_CONFIG_FILE: &str = "singdeck.json";
 const SINGDECK_CONFIG_JSONC_FILE: &str = "singdeck.jsonc";
 const NODE_SOURCE_STARTUP_SYNC_ATTEMPTS: usize = 30;
 const NODE_SOURCE_STARTUP_SYNC_RETRY_MS: u64 = 2_000;
-// Re-sync node sources periodically so a source that failed at startup (e.g. a
-// rate-limited subscription) still populates once a quiet window opens. Kept
-// gentle — only sources that are NOT freshly-succeeded are actually re-fetched.
-const NODE_SOURCE_RESYNC_INTERVAL_SECS: u64 = 30 * 60;
-// A source that synced successfully within this window is left untouched (its
-// node list rarely changes), so the helper never hammers rate-limited /
-// Cloudflare-fronted subscription endpoints once it has the data. Failed sources
-// are retried promptly (at startup and each periodic cycle).
-const NODE_SOURCE_SUCCESS_TTL_MS: i64 = 6 * 60 * 60 * 1000;
 const NODE_SOURCE_FETCH_USER_AGENT: &str = "SingDeck-helper/0.1.0";
+const NODE_SOURCE_REMOTE_CACHE_MIGRATION_KEY: &str = "node_source_remote_cache_migrated_v1";
 const SELECTOR_RESTORE_ATTEMPTS: usize = 3;
 const SELECTOR_RESTORE_RETRY_MS: u64 = 100;
 const NODE_RISK_PROVIDER_TIMEOUT_MS: u64 = 8_000;
@@ -321,6 +313,12 @@ struct GroupConfig {
     gemini_location_probe_enabled: bool,
     #[serde(default)]
     node_risk: node_risk::types::NodeRiskChecks,
+    #[serde(default)]
+    source_restriction_enabled: bool,
+    #[serde(default)]
+    allowed_node_sources: Vec<String>,
+    #[serde(default)]
+    allow_unlabeled_nodes: bool,
 }
 
 impl Default for GroupConfig {
@@ -335,6 +333,9 @@ impl Default for GroupConfig {
             probe_interval_sec: DEFAULT_PROBE_INTERVAL_SEC,
             gemini_location_probe_enabled: false,
             node_risk: node_risk::types::NodeRiskChecks::default(),
+            source_restriction_enabled: false,
+            allowed_node_sources: vec![],
+            allow_unlabeled_nodes: false,
         }
     }
 }
@@ -351,6 +352,9 @@ impl GroupConfig {
             probe_interval_sec: DEFAULT_PROBE_INTERVAL_SEC,
             gemini_location_probe_enabled: false,
             node_risk: node_risk::types::NodeRiskChecks::default(),
+            source_restriction_enabled: false,
+            allowed_node_sources: vec![],
+            allow_unlabeled_nodes: false,
         }
     }
 }
@@ -430,12 +434,16 @@ struct NodeSourceConfig {
     sources: Vec<NodeSourceConfigEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct NodeSourceConfigEntry {
     name: String,
+    #[serde(default)]
     url: String,
+    #[serde(default)]
     associate: bool,
+    #[serde(default)]
+    nodes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -778,6 +786,7 @@ async fn main() -> Result<()> {
         )
         .route("/api/v1/groups", get(groups))
         .route("/api/v1/node-sources", get(node_sources))
+        .route("/api/v1/node-sources/refresh", post(refresh_node_sources))
         .route("/api/v1/events", get(helper_events))
         .route("/api/v1/probes", get(active_probes))
         .route("/api/v1/groups/:group/config", put(save_group_config))
@@ -877,7 +886,8 @@ fn init_db(conn: &Connection) -> Result<()> {
           associate INTEGER NOT NULL,
           last_synced_ms INTEGER,
           last_error TEXT,
-          node_count INTEGER NOT NULL DEFAULT 0
+          node_count INTEGER NOT NULL DEFAULT 0,
+          remote_nodes_json TEXT NOT NULL DEFAULT '[]'
         );
         CREATE TABLE IF NOT EXISTS node_source_nodes (
           source_name TEXT NOT NULL,
@@ -916,6 +926,80 @@ fn init_db(conn: &Connection) -> Result<()> {
         "group_configs",
         "node_risk_json",
         "ALTER TABLE group_configs ADD COLUMN node_risk_json TEXT NOT NULL DEFAULT '{}'",
+    )?;
+    add_column_if_missing(
+        conn,
+        "group_configs",
+        "source_restriction_enabled",
+        "ALTER TABLE group_configs ADD COLUMN source_restriction_enabled INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
+        "group_configs",
+        "allowed_node_sources_json",
+        "ALTER TABLE group_configs ADD COLUMN allowed_node_sources_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    add_column_if_missing(
+        conn,
+        "group_configs",
+        "allow_unlabeled_nodes",
+        "ALTER TABLE group_configs ADD COLUMN allow_unlabeled_nodes INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
+        "node_sources",
+        "remote_nodes_json",
+        "ALTER TABLE node_sources ADD COLUMN remote_nodes_json TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    migrate_legacy_node_source_remote_nodes(conn)?;
+    Ok(())
+}
+
+fn migrate_legacy_node_source_remote_nodes(conn: &Connection) -> Result<()> {
+    let migrated = conn
+        .query_row(
+            "SELECT value FROM kv WHERE key = ?1",
+            params![NODE_SOURCE_REMOTE_CACHE_MIGRATION_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .is_some();
+    if migrated {
+        return Ok(());
+    }
+
+    let source_names = {
+        let mut stmt = conn.prepare(
+            "SELECT name FROM node_sources WHERE TRIM(url) <> '' ORDER BY name",
+        )?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+    for source_name in source_names {
+        let remote_nodes_json = conn.query_row(
+            "SELECT remote_nodes_json FROM node_sources WHERE name = ?1",
+            params![source_name],
+            |row| row.get::<_, String>(0),
+        )?;
+        let remote_nodes: Vec<String> = serde_json::from_str(&remote_nodes_json)
+            .context("decode legacy node source remote links")?;
+        if !remote_nodes.is_empty() {
+            continue;
+        }
+        let legacy_nodes = load_node_source_nodes_from_db(conn, &source_name)?;
+        if !legacy_nodes.is_empty() {
+            conn.execute(
+                "UPDATE node_sources SET remote_nodes_json = ?2 WHERE name = ?1",
+                params![source_name, serde_json::to_string(&legacy_nodes)?],
+            )?;
+        }
+    }
+    conn.execute(
+        "INSERT INTO kv (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![NODE_SOURCE_REMOTE_CACHE_MIGRATION_KEY],
     )?;
     Ok(())
 }
@@ -1311,11 +1395,13 @@ async fn current_proxy_node_filter(state: &AppState) -> BTreeSet<String> {
 async fn groups(State(state): State<AppState>) -> Result<Json<GroupsResponse>, AppError> {
     let controller = load_controller(&state)?;
     let proxies = fetch_proxies(&state, &controller).await?;
+    let proxy_map = proxy_map(&proxies);
     let groups = proxy_groups(&proxies)
         .into_iter()
         .map(|proxy| {
             let config = load_group_config(&state, &proxy.name)?;
-            let scores = compute_scores_for_group(&state, &proxy.name, &proxy.all, &config)?;
+            let eligible = eligible_group_members(&state, &proxy, &config, &proxy_map)?;
+            let scores = compute_scores_for_group(&state, &proxy.name, &eligible, &config)?;
             let recommended = recommended_node(&scores);
             Ok(GroupView {
                 name: proxy.name,
@@ -1332,6 +1418,28 @@ async fn groups(State(state): State<AppState>) -> Result<Json<GroupsResponse>, A
 }
 
 async fn node_sources(State(state): State<AppState>) -> Result<Json<NodeSourcesResponse>, AppError> {
+    Ok(Json(load_node_sources_response(&state)?))
+}
+
+async fn refresh_node_sources(
+    State(state): State<AppState>,
+) -> Result<Json<NodeSourcesResponse>, AppError> {
+    let config_path = load_string_kv(&state, "config_path")?
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| AppError::bad_request("Config path is not configured in Settings"))?;
+    let source_config = read_node_source_config_for_config_path(Path::new(&config_path))?;
+    hide_unconfigured_node_sources(&state, &source_config)?;
+    if source_config.sources.is_empty() {
+        return Ok(Json(load_node_sources_response(&state)?));
+    }
+
+    let controller = load_controller(&state)?;
+    let proxies = fetch_proxies(&state, &controller).await?;
+    let current_nodes = proxy_node_names(&proxies);
+    if let Err(error) = sync_node_sources_with_nodes(&state, &source_config, &current_nodes).await {
+        eprintln!("manual node source refresh completed with errors: {error}");
+    }
     Ok(Json(load_node_sources_response(&state)?))
 }
 
@@ -1406,6 +1514,62 @@ async fn save_group_config(
         normalized.probe_interval_sec,
         load_min_probe_interval_sec(&state)?,
     );
+    normalize_allowed_node_sources(&mut normalized.allowed_node_sources);
+    if normalized.source_restriction_enabled {
+        if normalized.allowed_node_sources.is_empty() && !normalized.allow_unlabeled_nodes {
+            return Err(AppError::bad_request(
+                "source restriction requires at least one source or unlabeled nodes",
+            ));
+        }
+
+        let configured_sources = load_active_node_source_names(&state)?;
+        let unknown_sources = normalized
+            .allowed_node_sources
+            .iter()
+            .filter(|source| !configured_sources.contains(source.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unknown_sources.is_empty() {
+            return Err(AppError::bad_request(format!(
+                "unknown node sources: {}",
+                unknown_sources.join(", ")
+            )));
+        }
+
+        let controller = load_controller(&state)?;
+        let proxies = fetch_proxies(&state, &controller).await?;
+        let proxy_map = proxy_map(&proxies);
+        let group_proxy = proxy_map
+            .get(&group)
+            .ok_or_else(|| AppError::bad_request(format!("group not found: {group}")))?;
+        if !is_switchable_kind(&group_proxy.kind) {
+            return Err(AppError::bad_request(format!(
+                "source restriction is only supported for Selector groups, but {} is {}",
+                group_proxy.name, group_proxy.kind
+            )));
+        }
+        let eligible = eligible_group_members(&state, group_proxy, &normalized, &proxy_map)?;
+        if eligible.is_empty() {
+            return Err(AppError::bad_request(
+                "source restriction does not leave any selectable nodes",
+            ));
+        }
+        if !eligible.iter().any(|node| node == &group_proxy.now) {
+            let scores = compute_scores_for_group(&state, &group, &eligible, &normalized)?;
+            let target = recommended_node(&scores).ok_or_else(|| {
+                AppError::bad_request(
+                    "current node is outside the source restriction and no allowed node has a successful score",
+                )
+            })?;
+            if let Some(error) =
+                apply_recommended_node(&state, &controller, group_proxy, &target).await
+            {
+                return Err(AppError::bad_request(format!(
+                    "switch to allowed node {target:?} failed: {error}"
+                )));
+            }
+        }
+    }
     save_group_config_row(&state, &group, &normalized)?;
     Ok(Json(normalized))
 }
@@ -1471,7 +1635,8 @@ async fn inspect_group(
     }
 
     let config = load_group_config(&state, &group)?;
-    let mut scores = compute_scores_for_group(&state, &group, &group_proxy.all, &config)?;
+    let eligible = eligible_group_members(&state, group_proxy, &config, &proxy_map)?;
+    let mut scores = compute_scores_for_group(&state, &group, &eligible, &config)?;
     if gemini_location {
         for score in &mut scores {
             score.raw.gemini_location = load_gemini_location_result(&state, &group, &score.name)?;
@@ -1508,7 +1673,8 @@ async fn group_scores(
         .get(&group)
         .ok_or_else(|| AppError::bad_request(format!("group not found: {group}")))?;
     let config = load_group_config(&state, &group)?;
-    let scores = compute_scores_for_group(&state, &group, &group_proxy.all, &config)?;
+    let eligible = eligible_group_members(&state, group_proxy, &config, &proxy_map)?;
+    let scores = compute_scores_for_group(&state, &group, &eligible, &config)?;
     Ok(Json(ScoresResponse {
         group,
         mode: config.mode,
@@ -1532,11 +1698,17 @@ async fn apply_group(
         .get(&group)
         .ok_or_else(|| AppError::bad_request(format!("group not found: {group}")))?;
     let config = load_group_config(&state, &group)?;
-    let scores = compute_scores_for_group(&state, &group, &group_proxy.all, &config)?;
+    let eligible = eligible_group_members(&state, group_proxy, &config, &proxy_map)?;
+    let scores = compute_scores_for_group(&state, &group, &eligible, &config)?;
     let target = request
         .node
         .or_else(|| recommended_node(&scores))
         .ok_or_else(|| AppError::bad_request("no recommended node available"))?;
+    if config.source_restriction_enabled && !eligible.iter().any(|node| node == &target) {
+        return Err(AppError::bad_request(format!(
+            "node {target:?} is not allowed by the source restriction for {group:?}"
+        )));
+    }
 
     let apply_error = apply_recommended_node(&state, &controller, group_proxy, &target).await;
 
@@ -1798,16 +1970,10 @@ async fn sync_node_sources_on_startup(state: &AppState) -> Result<()> {
     let controller = load_controller(state)?;
     let current_nodes = match fetch_proxies(state, &controller).await {
         Ok(proxies) => proxy_node_names(&proxies),
-        Err(error) => {
-            let message = format!("controller proxies unavailable: {error}");
-            for source in source_config.sources.iter().filter(|source| source.associate) {
-                save_node_source_error(state, source, message.clone())?;
-            }
-            return Err(anyhow!(message));
-        }
+        Err(error) => return Err(anyhow!("controller proxies unavailable: {error}")),
     };
 
-    sync_node_sources_with_nodes(state, &source_config, &current_nodes).await
+    restore_node_sources_with_nodes(state, &source_config, &current_nodes).await
 }
 
 async fn sync_node_sources_on_startup_with_retries(
@@ -1821,13 +1987,8 @@ async fn sync_node_sources_on_startup_with_retries(
         match sync_node_sources_on_startup(state).await {
             Ok(()) => return Ok(()),
             Err(error) => {
-                // Retry transient failures (controller still starting, subscription
-                // briefly unavailable) — but NOT a 429: hammering a rate-limited
-                // source just sustains the 429. It is recorded per source and the
-                // periodic re-sync retries it later in a gentler window.
-                let rate_limited = error.to_string().contains("429");
                 last_error = Some(error);
-                if attempt < attempts && !rate_limited {
+                if attempt < attempts {
                     tokio::time::sleep(retry_delay).await;
                 } else {
                     break;
@@ -1843,85 +2004,224 @@ async fn sync_node_sources_with_nodes(
     config: &NodeSourceConfig,
     current_nodes: &[String],
 ) -> Result<()> {
+    sync_node_sources_with_mode(state, config, current_nodes, true).await
+}
+
+async fn restore_node_sources_with_nodes(
+    state: &AppState,
+    config: &NodeSourceConfig,
+    current_nodes: &[String],
+) -> Result<()> {
+    sync_node_sources_with_mode(state, config, current_nodes, false).await
+}
+
+async fn sync_node_sources_with_mode(
+    state: &AppState,
+    config: &NodeSourceConfig,
+    current_nodes: &[String],
+    refresh_subscriptions: bool,
+) -> Result<()> {
     hide_unconfigured_node_sources(state, config)?;
 
     let mut seen = BTreeSet::new();
     let mut source_errors = Vec::new();
+    let mut candidates = Vec::new();
     for source in &config.sources {
-        if !seen.insert(source.name.clone()) {
+        let source_name = source.name.trim();
+        if source_name.is_empty() {
+            source_errors.push("source name is empty".to_string());
+            continue;
+        }
+        if !seen.insert(source_name.to_string()) {
             let message = "duplicate source name".to_string();
             save_node_source_error(state, source, message.clone())?;
-            source_errors.push(format!("{}: {message}", source.name.trim()));
+            source_errors.push(format!("{source_name}: {message}"));
             continue;
         }
 
-        if !source.associate {
-            save_node_source_metadata_preserving_links(state, source)?;
-            continue;
+        let (manual_nodes, missing_manual_nodes) =
+            match_configured_source_nodes(&source.nodes, current_nodes);
+        let mut messages = Vec::new();
+        if !missing_manual_nodes.is_empty() {
+            messages.push(format!(
+                "configured nodes not found: {}",
+                missing_manual_nodes.join(", ")
+            ));
         }
 
-        // Already have a fresh successful sync — keep its nodes, don't re-fetch
-        // (subscription node lists rarely change; avoids re-hitting the endpoint).
-        if node_source_recently_synced(state, &source.name)? {
-            save_node_source_metadata_preserving_links(state, source)?;
-            continue;
-        }
-
-        let result = async {
-            let response = state
-                .http
-                .get(source.url.trim())
-                .header(header::USER_AGENT, NODE_SOURCE_FETCH_USER_AGENT)
-                // A bare UA-only request gets flagged as a bot by Cloudflare-fronted
-                // subscription endpoints (e.g. get.ssidwork.com). Send the same
-                // basic headers a normal client/curl does so it isn't 403/429'd.
-                .header(header::ACCEPT, "*/*")
-                .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
-                .send()
-                .await
-                .map_err(|error| {
-                    anyhow!(
-                        "fetch node source {:?}: {}",
-                        source.name.trim(),
-                        error.without_url()
-                    )
-                })?;
-            let status = response.status();
-            if !status.is_success() {
-                return Err(anyhow!(
-                    "fetch node source {:?}: HTTP status {status}",
-                    source.name.trim()
-                ));
+        let mut remote_nodes = load_node_source_remote_nodes(state, source)?;
+        let current_node_names = current_nodes.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        remote_nodes.retain(|node| current_node_names.contains(node.as_str()));
+        let mut remote_nodes_refreshed = false;
+        let mut mark_synced = source.url.trim().is_empty();
+        let remote_source = source.associate && !source.url.trim().is_empty();
+        if refresh_subscriptions && remote_source {
+            match fetch_node_source_nodes(state, source, current_nodes).await {
+                Ok(nodes) => {
+                    remote_nodes = nodes;
+                    remote_nodes_refreshed = true;
+                    mark_synced = true;
+                }
+                Err(error) => {
+                    mark_synced = true;
+                    let message = format!("{error:#}");
+                    messages.push(message.clone());
+                    source_errors.push(format!("{source_name}: {message}"));
+                }
             }
-            let content = response
-                .text()
-                .await
-                .map_err(|error| {
-                    anyhow!(
-                        "read node source {:?}: {}",
-                        source.name.trim(),
-                        error.without_url()
-                    )
-                })?;
-            let subscription_names = extract_subscription_node_names(&content)?;
-            Ok::<_, anyhow::Error>(match_subscription_nodes(&subscription_names, current_nodes))
         }
-        .await;
 
-        match result {
-            Ok(nodes) => save_node_source_links(state, source, &nodes, None)?,
-            Err(error) => {
-                let message = format!("{error:#}");
-                save_node_source_error(state, source, message.clone())?;
-                source_errors.push(format!("{}: {message}", source.name.trim()));
-            }
+        candidates.push(NodeSourceSyncCandidate {
+            source: source.clone(),
+            manual_nodes,
+            remote_nodes,
+            remote_nodes_refreshed,
+            mark_synced,
+            preserve_error: !refresh_subscriptions && remote_source && messages.is_empty(),
+            error: (!messages.is_empty()).then(|| messages.join("; ")),
+        });
+    }
+
+    let mut owner_by_node = HashMap::new();
+    for candidate in &candidates {
+        for node in &candidate.manual_nodes {
+            owner_by_node
+                .entry(node.clone())
+                .or_insert_with(|| candidate.source.name.trim().to_string());
         }
     }
+    for candidate in &candidates {
+        for node in &candidate.remote_nodes {
+            owner_by_node
+                .entry(node.clone())
+                .or_insert_with(|| candidate.source.name.trim().to_string());
+        }
+    }
+
+    for candidate in candidates {
+        let source_name = candidate.source.name.trim();
+        let nodes = owner_by_node
+            .iter()
+            .filter_map(|(node, owner)| (owner == source_name).then_some(node.clone()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        save_node_source_sync_result(
+            state,
+            &candidate.source,
+            &nodes,
+            candidate
+                .remote_nodes_refreshed
+                .then_some(candidate.remote_nodes.as_slice()),
+            candidate.error,
+            candidate.mark_synced,
+            candidate.preserve_error,
+        )?;
+    }
+
     if source_errors.is_empty() {
         Ok(())
     } else {
         Err(anyhow!("node source sync failed: {}", source_errors.join("; ")))
     }
+}
+
+#[derive(Debug)]
+struct NodeSourceSyncCandidate {
+    source: NodeSourceConfigEntry,
+    manual_nodes: Vec<String>,
+    remote_nodes: Vec<String>,
+    remote_nodes_refreshed: bool,
+    mark_synced: bool,
+    preserve_error: bool,
+    error: Option<String>,
+}
+
+fn match_configured_source_nodes(
+    configured_nodes: &[String],
+    current_nodes: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let current = current_nodes
+        .iter()
+        .map(|node| node.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut matched = BTreeSet::new();
+    let mut missing = BTreeSet::new();
+    for configured in configured_nodes {
+        let configured = configured.trim();
+        if configured.is_empty() {
+            continue;
+        }
+        if current.contains(configured) {
+            matched.insert(configured.to_string());
+        } else {
+            missing.insert(configured.to_string());
+        }
+    }
+    (matched.into_iter().collect(), missing.into_iter().collect())
+}
+
+async fn fetch_node_source_nodes(
+    state: &AppState,
+    source: &NodeSourceConfigEntry,
+    current_nodes: &[String],
+) -> Result<Vec<String>> {
+    let response = state
+        .http
+        .get(source.url.trim())
+        .header(header::USER_AGENT, NODE_SOURCE_FETCH_USER_AGENT)
+        // A bare UA-only request gets flagged as a bot by Cloudflare-fronted
+        // subscription endpoints (e.g. get.ssidwork.com). Send the same
+        // basic headers a normal client/curl does so it isn't 403/429'd.
+        .header(header::ACCEPT, "*/*")
+        .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
+        .send()
+        .await
+        .map_err(|error| {
+            anyhow!(
+                "fetch node source {:?}: {}",
+                source.name.trim(),
+                error.without_url()
+            )
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow!(
+            "fetch node source {:?}: HTTP status {status}",
+            source.name.trim()
+        ));
+    }
+    let content = response.text().await.map_err(|error| {
+        anyhow!(
+            "read node source {:?}: {}",
+            source.name.trim(),
+            error.without_url()
+        )
+    })?;
+    let subscription_names = extract_subscription_node_names(&content)?;
+    Ok(match_subscription_nodes(
+        &subscription_names,
+        current_nodes,
+    ))
+}
+
+fn load_node_source_remote_nodes(
+    state: &AppState,
+    source: &NodeSourceConfigEntry,
+) -> Result<Vec<String>> {
+    let db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
+    let value = db
+        .query_row(
+            "SELECT remote_nodes_json FROM node_sources WHERE name = ?1",
+            params![source.name.trim()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let remote_nodes: Vec<String> = value
+        .map(|value| serde_json::from_str(&value).context("decode saved remote node source links"))
+        .transpose()
+        .map(|nodes| nodes.unwrap_or_default())?;
+    Ok(remote_nodes)
 }
 
 fn hide_unconfigured_node_sources(state: &AppState, config: &NodeSourceConfig) -> Result<()> {
@@ -1999,49 +2299,156 @@ fn load_node_source_nodes_from_db(db: &Connection, source_name: &str) -> Result<
     Ok(nodes)
 }
 
-fn save_node_source_metadata_preserving_links(
-    state: &AppState,
-    source: &NodeSourceConfigEntry,
-) -> Result<()> {
+fn load_active_node_source_owners(state: &AppState) -> Result<HashMap<String, String>> {
     let db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
-    let node_count = count_node_source_nodes_from_db(&db, &source.name)?;
-    db.execute(
-        "INSERT INTO node_sources (name, url, associate, last_synced_ms, last_error, node_count)
-         VALUES (?1, ?2, ?3, COALESCE((SELECT last_synced_ms FROM node_sources WHERE name = ?1), NULL), NULL, ?4)
-         ON CONFLICT(name) DO UPDATE SET
-           url = excluded.url,
-           associate = excluded.associate,
-           last_error = NULL,
-           node_count = excluded.node_count",
-        params![source.name.trim(), source.url.trim(), bool_int(source.associate), node_count],
+    let mut stmt = db.prepare(
+        "SELECT links.node_name, links.source_name
+         FROM node_source_nodes links
+         INNER JOIN node_sources sources ON sources.name = links.source_name
+         ORDER BY sources.name",
     )?;
-    Ok(())
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut owners = HashMap::new();
+    for (node, source) in rows {
+        owners.entry(node).or_insert(source);
+    }
+    Ok(owners)
 }
 
+fn load_active_node_source_names(state: &AppState) -> Result<BTreeSet<String>> {
+    let db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
+    let mut stmt = db.prepare("SELECT name FROM node_sources ORDER BY name")?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+    Ok(names)
+}
+
+fn normalize_allowed_node_sources(sources: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    sources.retain_mut(|source| {
+        *source = source.trim().to_string();
+        !source.is_empty() && seen.insert(source.clone())
+    });
+}
+
+fn eligible_group_members(
+    state: &AppState,
+    group: &ProxyView,
+    config: &GroupConfig,
+    proxy_map: &HashMap<String, ProxyView>,
+) -> Result<Vec<String>> {
+    if !config.source_restriction_enabled {
+        return Ok(group.all.clone());
+    }
+    if !is_switchable_kind(&group.kind) {
+        return Err(anyhow!(
+            "source restriction is only supported for Selector groups, but {} is {}",
+            group.name,
+            group.kind
+        ));
+    }
+
+    let allowed_sources = config
+        .allowed_node_sources
+        .iter()
+        .map(|source| source.trim())
+        .filter(|source| !source.is_empty())
+        .collect::<BTreeSet<_>>();
+    let owners = load_active_node_source_owners(state)?;
+    Ok(group
+        .all
+        .iter()
+        .filter(|member| {
+            if proxy_map.contains_key(member.as_str()) {
+                return false;
+            }
+            match owners.get(member.as_str()) {
+                Some(source) => allowed_sources.contains(source.trim()),
+                None => config.allow_unlabeled_nodes,
+            }
+        })
+        .cloned()
+        .collect())
+}
+
+#[cfg(test)]
 fn save_node_source_links(
     state: &AppState,
     source: &NodeSourceConfigEntry,
     nodes: &[String],
     error: Option<String>,
 ) -> Result<()> {
+    save_node_source_sync_result(state, source, nodes, Some(nodes), error, true, false)
+}
+
+fn save_node_source_sync_result(
+    state: &AppState,
+    source: &NodeSourceConfigEntry,
+    nodes: &[String],
+    remote_nodes: Option<&[String]>,
+    error: Option<String>,
+    mark_synced: bool,
+    preserve_error: bool,
+) -> Result<()> {
     let mut db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
+    let existing = db
+        .query_row(
+            "SELECT last_synced_ms, last_error, remote_nodes_json FROM node_sources WHERE name = ?1",
+            params![source.name.trim()],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let last_synced_ms = if mark_synced {
+        Some(now_ms())
+    } else {
+        existing
+            .as_ref()
+            .and_then(|(last_synced_ms, _, _)| *last_synced_ms)
+    };
+    let last_error = if preserve_error {
+        existing
+            .as_ref()
+            .and_then(|(_, last_error, _)| last_error.clone())
+    } else {
+        error
+    };
+    let remote_nodes_json = match remote_nodes {
+        Some(remote_nodes) => serde_json::to_string(remote_nodes)?,
+        None => existing
+            .as_ref()
+            .map(|(_, _, remote_nodes_json)| remote_nodes_json.clone())
+            .unwrap_or_else(|| "[]".to_string()),
+    };
     let tx = db.transaction()?;
     tx.execute(
-        "INSERT INTO node_sources (name, url, associate, last_synced_ms, last_error, node_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO node_sources (name, url, associate, last_synced_ms, last_error, node_count, remote_nodes_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(name) DO UPDATE SET
            url = excluded.url,
            associate = excluded.associate,
            last_synced_ms = excluded.last_synced_ms,
            last_error = excluded.last_error,
-           node_count = excluded.node_count",
+           node_count = excluded.node_count,
+           remote_nodes_json = excluded.remote_nodes_json",
         params![
             source.name.trim(),
             source.url.trim(),
             bool_int(source.associate),
-            now_ms(),
-            error,
-            nodes.len() as i64
+            last_synced_ms,
+            last_error,
+            nodes.len() as i64,
+            remote_nodes_json
         ],
     )?;
     tx.execute(
@@ -2092,25 +2499,6 @@ fn count_node_source_nodes_from_db(db: &Connection, source_name: &str) -> Result
         params![source_name.trim()],
         |row| row.get::<_, i64>(0),
     )?)
-}
-
-/// True if this source synced successfully (no error, has nodes) within the
-/// success TTL — skip re-fetching it to spare rate-limited endpoints. Failed
-/// sources return false so they are retried promptly.
-fn node_source_recently_synced(state: &AppState, name: &str) -> Result<bool> {
-    let db = state.db.lock().map_err(|_| anyhow!("database lock poisoned"))?;
-    let row: Option<(Option<i64>, Option<String>, i64)> = db
-        .query_row(
-            "SELECT last_synced_ms, last_error, node_count FROM node_sources WHERE name = ?1",
-            params![name.trim()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-    Ok(matches!(
-        row,
-        Some((Some(last_synced), None, node_count))
-            if node_count > 0 && now_ms() - last_synced < NODE_SOURCE_SUCCESS_TTL_MS
-    ))
 }
 
 fn bool_int(value: bool) -> i64 {
@@ -2233,9 +2621,10 @@ async fn probe_group_internal(
         .get(group)
         .ok_or_else(|| anyhow!("group not found: {group}"))?;
     let config = load_group_config(state, group)?;
+    let eligible = eligible_group_members(state, group_proxy, &config, &proxy_map)?;
 
     if uses_native_urltest_delay(group_proxy, &config) {
-        let scores = compute_scores_for_group(state, group, &group_proxy.all, &config)?;
+        let scores = compute_scores_for_group(state, group, &eligible, &config)?;
         let recommended = if group_proxy.now.is_empty() {
             recommended_node(&scores)
         } else {
@@ -2265,14 +2654,14 @@ async fn probe_group_internal(
         state,
         &controller,
         group,
-        group_proxy,
+        &eligible,
         &config,
         concurrency,
         &proxy_map,
     )
     .await?;
     if run_status == ProbeRunStatus::Skipped {
-        let scores = compute_scores_for_group(state, group, &group_proxy.all, &config)?;
+        let scores = compute_scores_for_group(state, group, &eligible, &config)?;
         return Ok(ScoresResponse {
             group: group.to_string(),
             mode: config.mode,
@@ -2284,7 +2673,7 @@ async fn probe_group_internal(
         });
     }
 
-    let scores = compute_scores_after_probe_run(state, group, &group_proxy.all, &config)?;
+    let scores = compute_scores_after_probe_run(state, group, &eligible, &config)?;
     let recommended = recommended_node(&scores);
     let apply_error = if should_apply_probe_result(apply_urltest, &config) {
         if let Some(target) = recommended.as_deref() {
@@ -2320,7 +2709,7 @@ async fn probe_group_nodes(
     state: &AppState,
     controller: &ControllerConfig,
     group: &str,
-    group_proxy: &ProxyView,
+    nodes: &[String],
     config: &GroupConfig,
     concurrency: usize,
     proxy_map: &HashMap<String, ProxyView>,
@@ -2334,13 +2723,12 @@ async fn probe_group_nodes(
     let progress = ProbeProgressContext {
         config: config.clone(),
     };
-    let nodes = group_proxy.all.clone();
     let mut next_index = 0_usize;
     let mut tasks = tokio::task::JoinSet::new();
     spawn_probe_workers(
         &mut tasks,
         &mut next_index,
-        &nodes,
+        nodes,
         concurrency,
         concurrency,
         state,
@@ -2367,7 +2755,7 @@ async fn probe_group_nodes(
         spawn_probe_workers(
             &mut tasks,
             &mut next_index,
-            &nodes,
+            nodes,
             1,
             concurrency,
             state,
@@ -2914,18 +3302,6 @@ fn spawn_node_source_startup_sync(state: AppState) {
         {
             eprintln!("node source startup sync failed: {error}");
         }
-
-        // Periodic re-sync so rate-limited sources that 429'd at startup populate
-        // once a quiet window opens. Previously-synced node links persist across
-        // transient failures, so this only ever adds coverage.
-        let mut ticker = tokio::time::interval(Duration::from_secs(NODE_SOURCE_RESYNC_INTERVAL_SECS));
-        ticker.tick().await; // consume the immediate first tick (startup already ran)
-        loop {
-            ticker.tick().await;
-            if let Err(error) = sync_node_sources_on_startup(&state).await {
-                eprintln!("node source periodic sync: {error}");
-            }
-        }
     });
 }
 
@@ -3125,6 +3501,7 @@ async fn run_scheduled_probe_group(
     if !config.auto_probe {
         return Ok(());
     }
+    let eligible = eligible_group_members(state, group, &config, proxy_map)?;
     if uses_native_urltest_delay(group, &config) {
         return Ok(());
     }
@@ -3145,7 +3522,7 @@ async fn run_scheduled_probe_group(
         state,
         controller,
         &group.name,
-        group,
+        &eligible,
         &config,
         probe_concurrency,
         proxy_map,
@@ -3155,7 +3532,7 @@ async fn run_scheduled_probe_group(
         return Ok(());
     }
 
-    let scores = compute_scores_after_probe_run(state, &group.name, &group.all, &config)?;
+    let scores = compute_scores_after_probe_run(state, &group.name, &eligible, &config)?;
     if config.auto_switch {
         if let Some(target) = recommended_node(&scores) {
             if let Some(error) = apply_recommended_node(state, controller, group, &target).await {
@@ -3447,8 +3824,39 @@ fn proxy_node_names(response: &ClashProxiesResponse) -> Vec<String> {
 }
 
 fn extract_subscription_node_names(content: &str) -> Result<Vec<String>> {
-    let decoded = decode_base64_text(content)?;
     let mut names = Vec::new();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
+        if let Some(outbounds) = value.get("outbounds").and_then(|item| item.as_array()) {
+            outbounds
+                .iter()
+                .filter(|outbound| {
+                    outbound.get("type").and_then(|item| item.as_str()) == Some("anytls")
+                })
+                .filter_map(|outbound| outbound.get("tag").and_then(|item| item.as_str()))
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .for_each(|name| {
+                    if !names.iter().any(|existing| existing == name) {
+                        names.push(name.to_string());
+                    }
+                });
+            return Ok(names);
+        }
+    }
+
+    let plain_lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let is_plain_anytls = plain_lines.clone().next().is_some()
+        && plain_lines
+            .clone()
+            .all(|line| line.starts_with("anytls://"));
+    let decoded = if is_plain_anytls {
+        content.to_string()
+    } else {
+        decode_base64_text(content)?
+    };
     decoded
         .lines()
         .filter_map(subscription_line_node_name)
@@ -3834,7 +4242,7 @@ fn load_group_config(state: &AppState, group: &str) -> Result<GroupConfig> {
         .map_err(|_| anyhow!("database lock poisoned"))?;
     let row = db
         .query_row(
-            "SELECT test_url, test_url_overridden, mode, scheme, auto_switch, auto_probe, probe_interval_sec, gemini_location_probe_enabled, node_risk_json FROM group_configs WHERE group_name = ?1",
+            "SELECT test_url, test_url_overridden, mode, scheme, auto_switch, auto_probe, probe_interval_sec, gemini_location_probe_enabled, node_risk_json, source_restriction_enabled, allowed_node_sources_json, allow_unlabeled_nodes FROM group_configs WHERE group_name = ?1",
             params![group],
             |row| {
                 let raw_test_url: String = row.get(0)?;
@@ -3842,6 +4250,7 @@ fn load_group_config(state: &AppState, group: &str) -> Result<GroupConfig> {
                 let probe_interval_sec =
                     normalize_probe_interval_with_min(row.get::<_, i64>(6)?, min_probe_interval_sec);
                 let node_risk_json = row.get::<_, String>(8)?;
+                let allowed_node_sources_json = row.get::<_, String>(10)?;
                 Ok(GroupConfig {
                     test_url: if test_url_overridden {
                         raw_test_url
@@ -3856,6 +4265,10 @@ fn load_group_config(state: &AppState, group: &str) -> Result<GroupConfig> {
                     probe_interval_sec,
                     gemini_location_probe_enabled: row.get::<_, i64>(7)? != 0,
                     node_risk: serde_json::from_str(&node_risk_json).unwrap_or_default(),
+                    source_restriction_enabled: row.get::<_, i64>(9)? != 0,
+                    allowed_node_sources: serde_json::from_str(&allowed_node_sources_json)
+                        .unwrap_or_default(),
+                    allow_unlabeled_nodes: row.get::<_, i64>(11)? != 0,
                 })
             },
         )
@@ -3866,14 +4279,15 @@ fn load_group_config(state: &AppState, group: &str) -> Result<GroupConfig> {
 fn save_group_config_row(state: &AppState, group: &str, config: &GroupConfig) -> Result<()> {
     let min_probe_interval_sec = load_min_probe_interval_sec(state)?;
     let node_risk_json = serde_json::to_string(&config.node_risk)?;
+    let allowed_node_sources_json = serde_json::to_string(&config.allowed_node_sources)?;
     let db = state
         .db
         .lock()
         .map_err(|_| anyhow!("database lock poisoned"))?;
     db.execute(
         r#"
-        INSERT INTO group_configs(group_name, test_url, test_url_overridden, mode, scheme, auto_switch, auto_probe, probe_interval_sec, gemini_location_probe_enabled, node_risk_json)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        INSERT INTO group_configs(group_name, test_url, test_url_overridden, mode, scheme, auto_switch, auto_probe, probe_interval_sec, gemini_location_probe_enabled, node_risk_json, source_restriction_enabled, allowed_node_sources_json, allow_unlabeled_nodes)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
         ON CONFLICT(group_name) DO UPDATE SET
           test_url = excluded.test_url,
           test_url_overridden = excluded.test_url_overridden,
@@ -3883,7 +4297,10 @@ fn save_group_config_row(state: &AppState, group: &str, config: &GroupConfig) ->
           auto_probe = excluded.auto_probe,
           probe_interval_sec = excluded.probe_interval_sec,
           gemini_location_probe_enabled = excluded.gemini_location_probe_enabled,
-          node_risk_json = excluded.node_risk_json
+          node_risk_json = excluded.node_risk_json,
+          source_restriction_enabled = excluded.source_restriction_enabled,
+          allowed_node_sources_json = excluded.allowed_node_sources_json,
+          allow_unlabeled_nodes = excluded.allow_unlabeled_nodes
         "#,
         params![
             group,
@@ -3895,7 +4312,10 @@ fn save_group_config_row(state: &AppState, group: &str, config: &GroupConfig) ->
             if config.auto_probe { 1 } else { 0 },
             normalize_probe_interval_with_min(config.probe_interval_sec, min_probe_interval_sec),
             if config.gemini_location_probe_enabled { 1 } else { 0 },
-            node_risk_json
+            node_risk_json,
+            if config.source_restriction_enabled { 1 } else { 0 },
+            allowed_node_sources_json,
+            if config.allow_unlabeled_nodes { 1 } else { 0 }
         ],
     )?;
     Ok(())
@@ -4856,6 +5276,49 @@ mod tests {
         restore_failures_remaining: Arc<AtomicUsize>,
     }
 
+    #[derive(Clone)]
+    struct FakeSourceRestrictionControllerState {
+        probed: Arc<Mutex<Vec<String>>>,
+    }
+
+    async fn fake_source_restriction_proxies() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "proxies": {
+                "custom-policy": {
+                    "name": "custom-policy",
+                    "type": "Selector",
+                    "now": "allowed-node",
+                    "all": ["allowed-node", "blocked-node"]
+                },
+                "allowed-node": { "name": "allowed-node", "type": "Trojan", "now": "", "all": [] },
+                "blocked-node": { "name": "blocked-node", "type": "Trojan", "now": "", "all": [] }
+            }
+        }))
+    }
+
+    async fn fake_source_restriction_delay(
+        AxumPath(node): AxumPath<String>,
+        State(state): State<FakeSourceRestrictionControllerState>,
+    ) -> Json<serde_json::Value> {
+        state.probed.lock().unwrap().push(node);
+        Json(serde_json::json!({ "delay": 42 }))
+    }
+
+    async fn spawn_fake_source_restriction_controller(
+        probed: Arc<Mutex<Vec<String>>>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/proxies", get(fake_source_restriction_proxies))
+            .route("/proxies/:node/delay", get(fake_source_restriction_delay))
+            .with_state(FakeSourceRestrictionControllerState { probed });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
     #[derive(Deserialize)]
     struct FakeSelectorRequest {
         name: String,
@@ -4976,6 +5439,54 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    async fn source_restriction_save_fixture(
+    ) -> (AppState, Arc<Mutex<String>>, Arc<Mutex<Vec<String>>>) {
+        let state = test_app_state();
+        let selected = Arc::new(Mutex::new("blocked-node".to_string()));
+        let switches = Arc::new(Mutex::new(Vec::new()));
+        let controller_url = spawn_fake_gemini_controller(FakeGeminiControllerState {
+            selected: selected.clone(),
+            nodes: Arc::new(vec!["blocked-node".to_string(), "allowed-node".to_string()]),
+            switches: switches.clone(),
+            restore_failures_remaining: Arc::new(AtomicUsize::new(0)),
+        })
+        .await;
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "blocked-source".to_string(),
+                url: "https://example.com/blocked".to_string(),
+                associate: true,
+                nodes: vec![],
+            },
+            &["blocked-node".to_string()],
+            None,
+        )
+        .unwrap();
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "allowed-source".to_string(),
+                url: "https://example.com/allowed".to_string(),
+                associate: true,
+                nodes: vec![],
+            },
+            &["allowed-node".to_string()],
+            None,
+        )
+        .unwrap();
+        (state, selected, switches)
     }
 
     #[derive(Clone)]
@@ -5300,6 +5811,9 @@ mod tests {
         let state = test_app_state();
         let config = GroupConfig {
             gemini_location_probe_enabled: true,
+            source_restriction_enabled: true,
+            allowed_node_sources: vec!["provider-a".to_string(), "self-hosted".to_string()],
+            allow_unlabeled_nodes: true,
             node_risk: node_risk::types::NodeRiskChecks {
                 exit_ip: true,
                 network_class: true,
@@ -5317,6 +5831,304 @@ mod tests {
         assert!(loaded.node_risk.network_class);
         assert!(loaded.node_risk.tor);
         assert!(!loaded.node_risk.abuse);
+        assert!(loaded.source_restriction_enabled);
+        assert_eq!(
+            loaded.allowed_node_sources,
+            vec!["provider-a".to_string(), "self-hosted".to_string()]
+        );
+        assert!(loaded.allow_unlabeled_nodes);
+    }
+
+    #[test]
+    fn group_config_defaults_source_restriction_for_legacy_payloads() {
+        let mut value = serde_json::to_value(GroupConfig::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("sourceRestrictionEnabled");
+        object.remove("allowedNodeSources");
+        object.remove("allowUnlabeledNodes");
+
+        let config = serde_json::from_value::<GroupConfig>(value).unwrap();
+
+        assert!(!config.source_restriction_enabled);
+        assert!(config.allowed_node_sources.is_empty());
+        assert!(!config.allow_unlabeled_nodes);
+    }
+
+    #[test]
+    fn source_restriction_filters_sources_unlabeled_and_nested_members() {
+        let state = test_app_state();
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "provider-a".to_string(),
+                url: "https://example.com/a".to_string(),
+                associate: true,
+                nodes: vec![],
+            },
+            &["provider-a-node".to_string()],
+            None,
+        )
+        .unwrap();
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "provider-b".to_string(),
+                url: "https://example.com/b".to_string(),
+                associate: true,
+                nodes: vec![],
+            },
+            &["provider-b-node".to_string()],
+            None,
+        )
+        .unwrap();
+        let group = ProxyView {
+            name: "custom-policy".to_string(),
+            kind: "Selector".to_string(),
+            now: "provider-a-node".to_string(),
+            all: vec![
+                "provider-a-node".to_string(),
+                "provider-b-node".to_string(),
+                "unlabeled-node".to_string(),
+                "nested-urltest".to_string(),
+            ],
+        };
+        let proxy_map = HashMap::from([(
+            "nested-urltest".to_string(),
+            ProxyView {
+                name: "nested-urltest".to_string(),
+                kind: "URLTest".to_string(),
+                now: "provider-a-node".to_string(),
+                all: vec!["provider-a-node".to_string()],
+            },
+        )]);
+        let config = GroupConfig {
+            source_restriction_enabled: true,
+            allowed_node_sources: vec!["provider-a".to_string()],
+            allow_unlabeled_nodes: true,
+            ..GroupConfig::default()
+        };
+
+        let eligible = eligible_group_members(&state, &group, &config, &proxy_map).unwrap();
+
+        assert_eq!(
+            eligible,
+            vec!["provider-a-node".to_string(), "unlabeled-node".to_string()]
+        );
+    }
+
+    #[test]
+    fn source_restriction_rejects_non_selector_groups() {
+        let state = test_app_state();
+        let group = ProxyView {
+            name: "native-auto".to_string(),
+            kind: "URLTest".to_string(),
+            now: "node-a".to_string(),
+            all: vec!["node-a".to_string()],
+        };
+        let config = GroupConfig {
+            source_restriction_enabled: true,
+            allow_unlabeled_nodes: true,
+            ..GroupConfig::default()
+        };
+
+        let error = eligible_group_members(&state, &group, &config, &HashMap::new()).unwrap_err();
+
+        assert!(error.to_string().contains("only supported for Selector"));
+    }
+
+    #[tokio::test]
+    async fn source_restriction_limits_group_probe_and_scores() {
+        let state = test_app_state();
+        let probed = Arc::new(Mutex::new(Vec::new()));
+        let controller_url = spawn_fake_source_restriction_controller(probed.clone()).await;
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "allowed-source".to_string(),
+                url: "https://example.com/allowed".to_string(),
+                associate: true,
+                nodes: vec![],
+            },
+            &["allowed-node".to_string()],
+            None,
+        )
+        .unwrap();
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "blocked-source".to_string(),
+                url: "https://example.com/blocked".to_string(),
+                associate: true,
+                nodes: vec![],
+            },
+            &["blocked-node".to_string()],
+            None,
+        )
+        .unwrap();
+        save_group_config_row(
+            &state,
+            "custom-policy",
+            &GroupConfig {
+                source_restriction_enabled: true,
+                allowed_node_sources: vec!["allowed-source".to_string()],
+                ..GroupConfig::default()
+            },
+        )
+        .unwrap();
+
+        let response = probe_group_internal(&state, "custom-policy", 4, false)
+            .await
+            .unwrap();
+
+        assert_eq!(probed.lock().unwrap().as_slice(), ["allowed-node"]);
+        assert_eq!(response.nodes.len(), 1);
+        assert_eq!(response.nodes[0].name, "allowed-node");
+        assert_eq!(response.recommended.as_deref(), Some("allowed-node"));
+    }
+
+    #[tokio::test]
+    async fn source_restriction_rejects_disallowed_apply_requests() {
+        let state = test_app_state();
+        let nodes = Arc::new(vec!["allowed-node".to_string(), "blocked-node".to_string()]);
+        let switches = Arc::new(Mutex::new(Vec::new()));
+        let controller_url = spawn_fake_gemini_controller(FakeGeminiControllerState {
+            selected: Arc::new(Mutex::new(nodes[0].clone())),
+            nodes,
+            switches: switches.clone(),
+            restore_failures_remaining: Arc::new(AtomicUsize::new(0)),
+        })
+        .await;
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "allowed-source".to_string(),
+                url: "https://example.com/allowed".to_string(),
+                associate: true,
+                nodes: vec![],
+            },
+            &["allowed-node".to_string()],
+            None,
+        )
+        .unwrap();
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "blocked-source".to_string(),
+                url: "https://example.com/blocked".to_string(),
+                associate: true,
+                nodes: vec![],
+            },
+            &["blocked-node".to_string()],
+            None,
+        )
+        .unwrap();
+        save_group_config_row(
+            &state,
+            "custom-policy",
+            &GroupConfig {
+                source_restriction_enabled: true,
+                allowed_node_sources: vec!["allowed-source".to_string()],
+                ..GroupConfig::default()
+            },
+        )
+        .unwrap();
+
+        let error = apply_group(
+            State(state),
+            AxumPath("custom-policy".to_string()),
+            Json(ApplyRequest {
+                node: Some("blocked-node".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("not allowed by the source restriction"));
+        assert!(switches.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn saving_source_restriction_switches_before_persisting() {
+        let (state, selected, switches) = source_restriction_save_fixture().await;
+        save_probe_sample(
+            &state,
+            "custom-policy",
+            "allowed-node",
+            DEFAULT_TEST_URL,
+            Some(35),
+            true,
+            None,
+            now_ms(),
+        )
+        .unwrap();
+        let config = GroupConfig {
+            source_restriction_enabled: true,
+            allowed_node_sources: vec![
+                " allowed-source ".to_string(),
+                "allowed-source".to_string(),
+            ],
+            ..GroupConfig::default()
+        };
+
+        let Json(saved) = save_group_config(
+            State(state.clone()),
+            AxumPath("custom-policy".to_string()),
+            Json(config),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(saved.allowed_node_sources, vec!["allowed-source".to_string()]);
+        assert_eq!(selected.lock().unwrap().as_str(), "allowed-node");
+        assert_eq!(switches.lock().unwrap().as_slice(), ["allowed-node"]);
+        let loaded = load_group_config(&state, "custom-policy").unwrap();
+        assert!(loaded.source_restriction_enabled);
+        assert_eq!(loaded.allowed_node_sources, vec!["allowed-source".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn saving_source_restriction_without_successful_score_keeps_old_config() {
+        let (state, selected, switches) = source_restriction_save_fixture().await;
+        let config = GroupConfig {
+            source_restriction_enabled: true,
+            allowed_node_sources: vec!["allowed-source".to_string()],
+            ..GroupConfig::default()
+        };
+
+        let error = save_group_config(
+            State(state.clone()),
+            AxumPath("custom-policy".to_string()),
+            Json(config),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("no allowed node has a successful score"));
+        assert_eq!(selected.lock().unwrap().as_str(), "blocked-node");
+        assert!(switches.lock().unwrap().is_empty());
+        assert!(!load_group_config(&state, "custom-policy")
+            .unwrap()
+            .source_restriction_enabled);
     }
 
     #[test]
@@ -7739,12 +8551,72 @@ mod tests {
     }
 
     #[test]
+    fn reads_manual_node_source_without_subscription_fields() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.jsonc");
+        let sidecar_path = temp_dir.path().join("singdeck.jsonc");
+        fs::write(
+            &sidecar_path,
+            r#"{"nodeSources":[{"name":"self-hosted","nodes":["Reality-1"]}]}"#,
+        )
+        .unwrap();
+
+        let config = read_node_source_config_for_config_path(&config_path).unwrap();
+
+        assert_eq!(config.sources.len(), 1);
+        assert_eq!(config.sources[0].name, "self-hosted");
+        assert_eq!(config.sources[0].nodes, vec!["Reality-1".to_string()]);
+        assert!(config.sources[0].url.is_empty());
+        assert!(!config.sources[0].associate);
+    }
+
+    #[test]
     fn extracts_node_names_from_base64_subscription() {
         let encoded = "dHJvamFuOi8vcGFzc0BleGFtcGxlLmNvbTo0NDMjVW5pdGVkJTIwU3RhdGVzJTIwJTdDJTIwMDEKdmxlc3M6Ly9pZEBleGFtcGxlLmNvbTo0NDMjSG9uZyUyMEtvbmclMjAlN0MlMjAwMQ==";
 
         let names = extract_subscription_node_names(encoded).unwrap();
 
         assert_eq!(names, vec!["United States | 01".to_string(), "Hong Kong | 01".to_string()]);
+    }
+
+    #[test]
+    fn extracts_node_names_from_base64_anytls_subscription() {
+        let encoded = STANDARD.encode(
+            "anytls://test-password@example.com:443/?insecure=0&sni=edge.example.com#%F0%9F%87%AD%F0%9F%87%B0%20%E9%A6%99%E6%B8%AF%2001",
+        );
+
+        let names = extract_subscription_node_names(&encoded).unwrap();
+
+        assert_eq!(names, vec!["🇭🇰 香港 01".to_string()]);
+    }
+
+    #[test]
+    fn extracts_node_names_from_plain_anytls_subscription() {
+        let content = "anytls://test-password@example.com:443/?insecure=0&sni=edge.example.com#%F0%9F%87%AD%F0%9F%87%B0%20%E9%A6%99%E6%B8%AF%2001";
+
+        let names = extract_subscription_node_names(content).unwrap();
+
+        assert_eq!(names, vec!["🇭🇰 香港 01".to_string()]);
+    }
+
+    #[test]
+    fn extracts_only_anytls_nodes_from_sing_box_json_subscription() {
+        let content = r#"{
+          "outbounds": [
+            {"type": "anytls", "tag": "🇭🇰 香港 01", "server": "hk.example.com", "server_port": 443, "password": "test-password"},
+            {"type": "anytls", "tag": "🇯🇵 日本 01", "server": "jp.example.com", "server_port": 443, "password": "test-password"},
+            {"type": "selector", "tag": "select", "outbounds": ["🇭🇰 香港 01", "🇯🇵 日本 01"]},
+            {"type": "urltest", "tag": "urltest", "outbounds": ["🇭🇰 香港 01", "🇯🇵 日本 01"]},
+            {"type": "direct", "tag": "direct-out"}
+          ]
+        }"#;
+
+        let names = extract_subscription_node_names(content).unwrap();
+
+        assert_eq!(
+            names,
+            vec!["🇭🇰 香港 01".to_string(), "🇯🇵 日本 01".to_string()]
+        );
     }
 
     #[test]
@@ -7780,6 +8652,7 @@ mod tests {
                 name: "manual".to_string(),
                 url: "http://127.0.0.1:1/not-requested".to_string(),
                 associate: false,
+                nodes: vec![],
             },
             &["manual-node".to_string()],
             None,
@@ -7795,11 +8668,13 @@ mod tests {
                     name: "auto".to_string(),
                     url: subscription_url,
                     associate: true,
+                    nodes: vec![],
                 },
                 NodeSourceConfigEntry {
                     name: "manual".to_string(),
                     url: "http://127.0.0.1:1/not-requested".to_string(),
                     associate: false,
+                    nodes: vec![],
                 },
             ],
         };
@@ -7818,6 +8693,107 @@ mod tests {
         assert_eq!(manual.nodes, vec!["manual-node".to_string()]);
         assert_eq!(manual.node_count, 1);
         assert!(manual.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_node_sources_prefers_manual_nodes_then_source_order() {
+        let state = test_app_state();
+        let remote_a = NodeSourceConfigEntry {
+            name: "remote-a".to_string(),
+            url: "https://example.com/a".to_string(),
+            associate: false,
+            nodes: vec![],
+        };
+        let remote_b = NodeSourceConfigEntry {
+            name: "remote-b".to_string(),
+            url: "https://example.com/b".to_string(),
+            associate: false,
+            nodes: vec![],
+        };
+        save_node_source_links(
+            &state,
+            &remote_a,
+            &["shared".to_string(), "remote-only".to_string()],
+            None,
+        )
+        .unwrap();
+        save_node_source_links(
+            &state,
+            &remote_b,
+            &["shared".to_string(), "remote-only".to_string(), "remote-b".to_string()],
+            None,
+        )
+        .unwrap();
+        let config = NodeSourceConfig {
+            sources: vec![
+                remote_a,
+                remote_b,
+                NodeSourceConfigEntry {
+                    name: "self-hosted".to_string(),
+                    nodes: vec!["shared".to_string(), "Reality-1".to_string()],
+                    ..NodeSourceConfigEntry::default()
+                },
+            ],
+        };
+
+        sync_node_sources_with_nodes(
+            &state,
+            &config,
+            &[
+                "shared".to_string(),
+                "remote-only".to_string(),
+                "remote-b".to_string(),
+                "Reality-1".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let response = load_node_sources_response(&state).unwrap();
+        let remote_a = response
+            .sources
+            .iter()
+            .find(|source| source.name == "remote-a")
+            .unwrap();
+        let remote_b = response
+            .sources
+            .iter()
+            .find(|source| source.name == "remote-b")
+            .unwrap();
+        let manual = response
+            .sources
+            .iter()
+            .find(|source| source.name == "self-hosted")
+            .unwrap();
+        assert_eq!(remote_a.nodes, vec!["remote-only".to_string()]);
+        assert_eq!(remote_b.nodes, vec!["remote-b".to_string()]);
+        assert_eq!(
+            manual.nodes,
+            vec!["Reality-1".to_string(), "shared".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_node_source_reports_missing_exact_names() {
+        let state = test_app_state();
+        let config = NodeSourceConfig {
+            sources: vec![NodeSourceConfigEntry {
+                name: "self-hosted".to_string(),
+                nodes: vec!["Reality-1".to_string(), "reality-1".to_string()],
+                ..NodeSourceConfigEntry::default()
+            }],
+        };
+
+        sync_node_sources_with_nodes(&state, &config, &["Reality-1".to_string()])
+            .await
+            .unwrap();
+
+        let response = load_node_sources_response(&state).unwrap();
+        assert_eq!(response.sources[0].nodes, vec!["Reality-1".to_string()]);
+        assert!(response.sources[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("reality-1")));
     }
 
     #[tokio::test]
@@ -7841,6 +8817,7 @@ mod tests {
                 name: "west-data".to_string(),
                 url: subscription_url,
                 associate: true,
+                nodes: vec![],
             }],
         };
 
@@ -7855,7 +8832,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_node_source_sync_reports_controller_unavailable_as_retryable_error() {
+    async fn manual_node_source_refresh_fetches_subscription_and_returns_associations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.jsonc");
+        let sidecar_path = temp_dir.path().join("singdeck.json");
+        let subscription_url = spawn_subscription_server(
+            "dHJvamFuOi8vcGFzc0BleGFtcGxlLmNvbTo0NDMjaGstMQ==",
+        )
+        .await;
+        fs::write(
+            &sidecar_path,
+            format!(
+                r#"{{"nodeSources":[{{"name":"west-data","url":"{subscription_url}","associate":true}}]}}"#
+            ),
+        )
+        .unwrap();
+        let controller_url = spawn_flaky_proxy_controller(
+            0,
+            r#"{"proxies":{"select":{"type":"Selector","all":["hk-1"]},"hk-1":{"type":"Trojan"}}}"#,
+        )
+        .await;
+        let state = test_app_state();
+        save_string_kv(&state, "config_path", config_path.to_str().unwrap()).unwrap();
+        save_json_kv(
+            &state,
+            "controller",
+            &ControllerConfig {
+                controller_url,
+                secret: String::new(),
+            },
+        )
+        .unwrap();
+
+        let response = refresh_node_sources(State(state)).await.unwrap().0;
+
+        let source = response.sources.iter().find(|source| source.name == "west-data").unwrap();
+        assert_eq!(source.nodes, vec!["hk-1".to_string()]);
+        assert_eq!(source.node_count, 1);
+        assert!(source.last_error.is_none());
+        assert!(source.last_synced_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn startup_node_source_restore_keeps_cached_links_when_controller_is_unavailable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("config.jsonc");
         let sidecar_path = temp_dir.path().join("singdeck.json");
@@ -7884,39 +8903,68 @@ mod tests {
             },
         )
         .unwrap();
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "west-data".to_string(),
+                url: "https://example.com/sub".to_string(),
+                associate: true,
+                nodes: vec![],
+            },
+            &["hk-1".to_string()],
+            Some("previous refresh failed".to_string()),
+        )
+        .unwrap();
 
         let error = sync_node_sources_on_startup(&state).await.unwrap_err();
 
         assert!(error.to_string().contains("controller proxies unavailable"));
         let response = load_node_sources_response(&state).unwrap();
         let source = response.sources.iter().find(|source| source.name == "west-data").unwrap();
-        assert_eq!(source.node_count, 0);
-        assert!(source
-            .last_error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("controller proxies unavailable"));
+        assert_eq!(source.nodes, vec!["hk-1".to_string()]);
+        assert_eq!(source.last_error.as_deref(), Some("previous refresh failed"));
     }
 
     #[tokio::test]
-    async fn startup_node_source_sync_retries_until_controller_is_ready() {
+    async fn startup_node_source_restore_retries_controller_and_only_matches_saved_nodes() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("config.jsonc");
         let sidecar_path = temp_dir.path().join("singdeck.json");
-        let subscription_url = spawn_subscription_server(
-            "dHJvamFuOi8vcGFzc0BleGFtcGxlLmNvbTo0NDMjaGstMQ==",
-        )
-        .await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sub_addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server_hits = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let server_hits = server_hits.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 512];
+                    let _ = stream.read(&mut buffer).await.unwrap_or(0);
+                    server_hits.fetch_add(1, Ordering::SeqCst);
+                    let body = "dHJvamFuOi8vcGFzc0BleGFtcGxlLmNvbTo0NDMjaGstMQ==";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let subscription_url = format!("http://{sub_addr}/subscription");
         fs::write(
             &sidecar_path,
             format!(
-                r#"{{"nodeSources":[{{"name":"west-data","url":"{subscription_url}","associate":true}}]}}"#
+                r#"{{"nodeSources":[{{"name":"west-data","url":"{subscription_url}","associate":true}},{{"name":"self","nodes":["manual-1"]}}]}}"#
             ),
         )
         .unwrap();
         let controller_url = spawn_flaky_proxy_controller(
             1,
-            r#"{"proxies":{"select":{"type":"Selector","all":["hk-1"]},"hk-1":{"type":"Trojan"}}}"#,
+            r#"{"proxies":{"select":{"type":"Selector","all":["hk-1","manual-1"]},"hk-1":{"type":"Trojan"},"manual-1":{"type":"VLESS"}}}"#,
         )
         .await;
         let conn = Connection::open_in_memory().unwrap();
@@ -7939,57 +8987,16 @@ mod tests {
             },
         )
         .unwrap();
-
-        sync_node_sources_on_startup_with_retries(&state, 2, Duration::from_millis(1))
-            .await
-            .unwrap();
-
-        let response = load_node_sources_response(&state).unwrap();
-        let source = response.sources.iter().find(|source| source.name == "west-data").unwrap();
-        assert_eq!(source.nodes, vec!["hk-1".to_string()]);
-        assert!(source.last_error.is_none());
-    }
-
-    #[tokio::test]
-    async fn startup_node_source_sync_retries_until_subscription_is_ready() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir.path().join("config.jsonc");
-        let sidecar_path = temp_dir.path().join("singdeck.json");
-        let subscription_url = spawn_flaky_proxy_controller(
-            1,
-            "dHJvamFuOi8vcGFzc0BleGFtcGxlLmNvbTo0NDMjaGstMQ==",
-        )
-        .await;
-        fs::write(
-            &sidecar_path,
-            format!(
-                r#"{{"nodeSources":[{{"name":"west-data","url":"{subscription_url}","associate":true}}]}}"#
-            ),
-        )
-        .unwrap();
-        let controller_url = spawn_flaky_proxy_controller(
-            0,
-            r#"{"proxies":{"select":{"type":"Selector","all":["hk-1"]},"hk-1":{"type":"Trojan"}}}"#,
-        )
-        .await;
-        let conn = Connection::open_in_memory().unwrap();
-        init_db(&conn).unwrap();
-        let state = AppState {
-            db: Database::new(conn),
-            http: Client::new(),
-            mobile_config_url: None,
-            active_probes: Arc::new(Mutex::new(HashMap::new())),
-            probe_limiter: ProbeLimiter::new(),
-            events: helper_event_channel(),
-        };
-        save_string_kv(&state, "config_path", config_path.to_str().unwrap()).unwrap();
-        save_json_kv(
+        save_node_source_links(
             &state,
-            "controller",
-            &ControllerConfig {
-                controller_url,
-                secret: String::new(),
+            &NodeSourceConfigEntry {
+                name: "west-data".to_string(),
+                url: subscription_url,
+                associate: true,
+                nodes: vec![],
             },
+            &["hk-1".to_string()],
+            None,
         )
         .unwrap();
 
@@ -7997,16 +9004,95 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
         let response = load_node_sources_response(&state).unwrap();
-        let source = response.sources.iter().find(|source| source.name == "west-data").unwrap();
-        assert_eq!(source.nodes, vec!["hk-1".to_string()]);
-        assert!(source.last_error.is_none());
+        let remote = response.sources.iter().find(|source| source.name == "west-data").unwrap();
+        assert_eq!(remote.nodes, vec!["hk-1".to_string()]);
+        let manual = response.sources.iter().find(|source| source.name == "self").unwrap();
+        assert_eq!(manual.nodes, vec!["manual-1".to_string()]);
+    }
+
+    #[test]
+    fn init_db_migrates_legacy_subscription_links_into_remote_cache() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE node_sources (
+              name TEXT PRIMARY KEY,
+              url TEXT NOT NULL,
+              associate INTEGER NOT NULL,
+              last_synced_ms INTEGER,
+              last_error TEXT,
+              node_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE node_source_nodes (
+              source_name TEXT NOT NULL,
+              node_name TEXT NOT NULL,
+              PRIMARY KEY (source_name, node_name)
+            );
+            INSERT INTO node_sources (name, url, associate, last_synced_ms, last_error, node_count)
+            VALUES ('west-data', 'https://example.com/sub', 1, 123, NULL, 1);
+            INSERT INTO node_source_nodes (source_name, node_name) VALUES ('west-data', 'hk-1');
+            "#,
+        )
+        .unwrap();
+
+        init_db(&conn).unwrap();
+
+        let remote_nodes_json: String = conn
+            .query_row(
+                "SELECT remote_nodes_json FROM node_sources WHERE name = 'west-data'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remote_nodes_json, r#"["hk-1"]"#);
+        let migration_marker: String = conn
+            .query_row(
+                "SELECT value FROM kv WHERE key = ?1",
+                params![NODE_SOURCE_REMOTE_CACHE_MIGRATION_KEY],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migration_marker, "1");
     }
 
     #[tokio::test]
-    async fn startup_node_source_sync_does_not_hammer_rate_limited_source() {
-        // A rate-limited (429) source must be fetched once, not retried in a tight
-        // loop — that just sustains the 429. The periodic re-sync retries it later.
+    async fn startup_restore_does_not_turn_manual_links_into_subscription_cache() {
+        let state = test_app_state();
+        let source_with_manual_node = NodeSourceConfigEntry {
+            name: "west-data".to_string(),
+            url: "https://example.com/sub".to_string(),
+            associate: true,
+            nodes: vec!["manual-1".to_string()],
+        };
+        save_node_source_sync_result(
+            &state,
+            &source_with_manual_node,
+            &["manual-1".to_string()],
+            Some(&[]),
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+        let config_without_manual_node = NodeSourceConfig {
+            sources: vec![NodeSourceConfigEntry {
+                nodes: vec![],
+                ..source_with_manual_node
+            }],
+        };
+
+        restore_node_sources_with_nodes(&state, &config_without_manual_node, &["manual-1".to_string()])
+            .await
+            .unwrap();
+
+        let response = load_node_sources_response(&state).unwrap();
+        assert!(response.sources[0].nodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn startup_node_source_restore_never_requests_subscription() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let sub_addr = listener.local_addr().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
@@ -8065,12 +9151,27 @@ mod tests {
             },
         )
         .unwrap();
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "ss-id".to_string(),
+                url: subscription_url,
+                associate: true,
+                nodes: vec![],
+            },
+            &["hk-1".to_string()],
+            Some("fetch node source \"ss-id\": HTTP status 429 Too Many Requests".to_string()),
+        )
+        .unwrap();
 
-        let _ = sync_node_sources_on_startup_with_retries(&state, 5, Duration::from_millis(1)).await;
+        sync_node_sources_on_startup_with_retries(&state, 5, Duration::from_millis(1))
+            .await
+            .unwrap();
 
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
         let response = load_node_sources_response(&state).unwrap();
         let source = response.sources.iter().find(|source| source.name == "ss-id").unwrap();
+        assert_eq!(source.nodes, vec!["hk-1".to_string()]);
         let error = source.last_error.as_deref().unwrap_or_default();
         assert!(error.contains("429"));
         assert!(!error.contains("secret-test-token"));
@@ -8115,6 +9216,7 @@ mod tests {
                 name: "ss-id".to_string(),
                 url: format!("http://{addr}"),
                 associate: true,
+                nodes: vec![],
             }],
         };
         sync_node_sources_with_nodes(&state, &config, &["hk-1".to_string()])
@@ -8127,9 +9229,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_skips_recently_succeeded_source() {
-        // A source that already synced successfully must NOT be re-fetched —
-        // otherwise the helper keeps hitting a rate-limited subscription endpoint.
+    async fn manual_refresh_preserves_cached_nodes_when_subscription_fails() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
@@ -8165,23 +9265,27 @@ mod tests {
             name: "ss-id".to_string(),
             url: format!("http://{addr}"),
             associate: true,
+            nodes: vec![],
         };
-        // Record a prior successful sync (no error, has a node).
+        // Record a prior successful refresh (no error, has a node).
         save_node_source_links(&state, &source, &["hk-1".to_string()], None).unwrap();
-        assert!(node_source_recently_synced(&state, "ss-id").unwrap());
 
         let config = NodeSourceConfig {
             sources: vec![source],
         };
-        sync_node_sources_with_nodes(&state, &config, &["hk-1".to_string()])
+        let error = sync_node_sources_with_nodes(&state, &config, &["hk-1".to_string()])
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "fresh source must not be re-fetched");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(error.to_string().contains("429"));
         let response = load_node_sources_response(&state).unwrap();
         let kept = response.sources.iter().find(|source| source.name == "ss-id").unwrap();
         assert_eq!(kept.nodes, vec!["hk-1".to_string()]);
-        assert!(kept.last_error.is_none());
+        assert!(kept
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("429")));
     }
 
     #[tokio::test]
@@ -8202,6 +9306,7 @@ mod tests {
                 name: "removed".to_string(),
                 url: "https://example.com/removed".to_string(),
                 associate: true,
+                nodes: vec![],
             },
             &["kept-node".to_string()],
             None,

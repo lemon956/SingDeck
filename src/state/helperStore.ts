@@ -47,6 +47,8 @@ type HelperState = {
   networkUsageSettings: HelperNetworkUsageSettings | null;
   groups: HelperGroup[];
   nodeSources: HelperNodeSource[];
+  nodeSourcesRefreshing: boolean;
+  nodeSourcesRefreshError: string | null;
   scoresByGroup: Record<string, HelperScoresResponse>;
   activeProbeGroups: string[];
   activeProbeNodesByGroup: Record<string, string[]>;
@@ -90,6 +92,7 @@ type HelperState = {
   saveNetworkUsageSettings: (settings: HelperNetworkUsageSettings) => Promise<void>;
   loadGroups: () => Promise<void>;
   loadNodeSources: () => Promise<void>;
+  refreshNodeSources: () => Promise<void>;
   loadActiveProbes: () => Promise<void>;
   setEventStreamConnected: (connected: boolean) => void;
   saveGroupConfig: (group: string, config: HelperGroupConfig) => Promise<void>;
@@ -117,6 +120,8 @@ export const useHelperStore = create<HelperState>()(
       networkUsageSettings: null,
       groups: [],
       nodeSources: [],
+      nodeSourcesRefreshing: false,
+      nodeSourcesRefreshError: null,
       scoresByGroup: {},
       activeProbeGroups: [],
       activeProbeNodesByGroup: {},
@@ -160,6 +165,8 @@ export const useHelperStore = create<HelperState>()(
             activeProbeNodesByGroup: connectionChanged ? {} : state.activeProbeNodesByGroup,
             inspectingGroups: connectionChanged ? [] : state.inspectingGroups,
             nodeSources: connectionChanged ? [] : state.nodeSources,
+            nodeSourcesRefreshing: connectionChanged ? false : state.nodeSourcesRefreshing,
+            nodeSourcesRefreshError: connectionChanged ? null : state.nodeSourcesRefreshError,
             error: connectionChanged ? null : state.error,
             lastCheckedAt: connectionChanged ? null : state.lastCheckedAt,
             lastSyncedControllerKey: connectionChanged ? null : state.lastSyncedControllerKey
@@ -446,6 +453,22 @@ export const useHelperStore = create<HelperState>()(
           set({ nodeSources: Array.isArray(response.sources) ? response.sources : [], error: null });
         } catch (error) {
           set({ error: formatHelperError(error) });
+        }
+      },
+      refreshNodeSources: async () => {
+        set({ nodeSourcesRefreshing: true, nodeSourcesRefreshError: null });
+        try {
+          const response = await client().postJson<HelperNodeSourcesResponse>('/api/v1/node-sources/refresh', {});
+          set({
+            nodeSources: Array.isArray(response.sources) ? response.sources : [],
+            nodeSourcesRefreshing: false,
+            nodeSourcesRefreshError: null
+          });
+        } catch (error) {
+          set({
+            nodeSourcesRefreshing: false,
+            nodeSourcesRefreshError: formatHelperError(error)
+          });
         }
       },
       loadActiveProbes: async () => {

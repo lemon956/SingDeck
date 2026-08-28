@@ -198,6 +198,34 @@ The packaged systemd units run as root by default so the helper can read root-ow
 
 The helper database stores controller settings, secrets, group settings, scheduled probe timestamps, and probe samples. Do not commit it and do not share it as a deployment artifact.
 
+### Node Sources and Selector Restrictions
+
+Node source metadata is read from `singdeck.json` or `singdeck.jsonc` next to the sing-box config path saved in Settings. Subscription-backed and self-hosted nodes can share the same `nodeSources` list:
+
+```jsonc
+{
+  "nodeSources": [
+    {
+      "name": "provider-a",
+      "url": "https://example.com/subscription",
+      "associate": true
+    },
+    {
+      "name": "self-hosted Reality",
+      "nodes": ["Reality-1", "Reality-2"]
+    }
+  ]
+}
+```
+
+`nodes` uses exact, case-sensitive sing-box outbound tags. It can be used without a URL or combined with subscription discovery. Every node has one source: explicit `nodes` entries win, then subscription matches use the first matching `nodeSources` entry. Missing explicit tags are reported in the source sync status.
+
+Subscription URLs are refreshed only when **Refresh sources** is clicked in the Settings Helper card. A successful refresh persists the discovered associations in the helper database. Until the next manual refresh, the UI and helper APIs keep reading those persisted associations. Restarting the helper does not request subscription URLs: startup only rematches the explicit `nodes` entries against the current sing-box nodes and restores persisted subscription associations that still exist in the controller. If one subscription request fails, its previous persisted associations are kept and the error is shown in the source refresh status.
+
+Source labels receive stable automatic colors in the Proxies page. A Selector sidebar can enable a source restriction and choose multiple sources plus the special Unlabeled category. The restriction applies to manual selection, speed probes, recommendations, scheduled auto-switching, and the helper apply API. URLTest and Fallback groups remain read-only because sing-box owns their selection. Nested strategy-group members are locked while a restriction is enabled because they do not have a single guaranteed source.
+
+Saving a restriction that excludes the current node switches to the highest-scoring allowed node before persisting. If no allowed node has a successful score, the save is rejected and the previous configuration remains active. SingDeck does not rewrite or reload the sing-box config; an external controller can still force a disallowed node, which the page marks as a source violation. Independent egress inspections continue to inspect the full group.
+
 ### Gemini Location and Node Inspection Parameters
 
 Choose the one Selector group allowed to run the Gemini location probe with `geminiLocationGroup` in Settings. The selected group's sidebar stores `geminiLocationProbeEnabled`; Gemini controls and results are hidden from every other group. No group name is built into this behavior.

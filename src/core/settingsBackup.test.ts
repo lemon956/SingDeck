@@ -70,7 +70,10 @@ describe('settings backup', () => {
               scheme: 'LatencyFirst',
               autoSwitch: true,
               autoProbe: true,
-              probeIntervalSec: 900
+              probeIntervalSec: 900,
+              sourceRestrictionEnabled: true,
+              allowedNodeSources: ['provider-a', 'self-hosted'],
+              allowUnlabeledNodes: false
             }
           }
         ]
@@ -91,6 +94,10 @@ describe('settings backup', () => {
 
     expect(backup.schema).toBe('singdeck.settings.v1');
     expect(backup.helper.groupConfigs[0].config.autoSwitch).toBe(true);
+    expect(backup.helper.groupConfigs[0].config.allowedNodeSources).toEqual([
+      'provider-a',
+      'self-hosted'
+    ]);
     expect(backup.helper.trafficSettings?.browserProfile).toBe('/home/alice/.config/google-chrome/Default');
     expect(backup.proxies.groupTestUrls['openai-us']).toBe('https://api.openai.com');
     expect(backup.ui.strategyGroupOrder).toEqual(['openai-us']);

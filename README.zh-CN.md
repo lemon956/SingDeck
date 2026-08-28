@@ -198,6 +198,34 @@ sudo systemctl restart sing-box.service
 
 helper 数据库会保存 controller 设置、secret、策略组设置、定时探测时间戳和探测样本。不要提交它，也不要把它作为部署产物分享。
 
+### 节点来源与 Selector 来源限制
+
+节点来源从 Settings 中 sing-box 配置路径同目录下的 `singdeck.json` 或 `singdeck.jsonc` 读取。订阅节点和自建节点可以放在同一份 `nodeSources` 中：
+
+```jsonc
+{
+  "nodeSources": [
+    {
+      "name": "provider-a",
+      "url": "https://example.com/subscription",
+      "associate": true
+    },
+    {
+      "name": "自建 Reality",
+      "nodes": ["Reality-1", "Reality-2"]
+    }
+  ]
+}
+```
+
+`nodes` 按 sing-box outbound tag 精确、区分大小写匹配；既可以单独使用，也可以与订阅解析结果合并。每个节点只归属一个来源：显式 `nodes` 优先，其余订阅命中按 `nodeSources` 配置顺序取第一个。找不到的显式节点会显示在来源同步错误中。
+
+订阅 URL 只会在 Settings 的 Helper 卡片中手动点击 **Refresh sources** 时请求；刷新成功后，解析出的来源关联会持久化到 helper 数据库。在下一次手动刷新前，页面和 helper API 都继续读取数据库里的关联。重启 helper 不会请求订阅 URL：启动时只把显式配置在 `nodes` 中的 tag 与当前 sing-box 节点重新匹配，并恢复数据库中仍存在于 controller 的订阅节点关联。某个订阅请求失败时会保留该来源上一次持久化的关联，并在来源刷新状态中显示错误。
+
+Proxies 页面会为各来源标签自动分配稳定颜色。Selector 侧栏可以开启来源限制，多选允许来源及“未标记”类别；该规则同时约束手选、测速、推荐、定时自动切换和 helper apply API。URLTest/Fallback 的实际选择由 sing-box 管理，因此只显示只读说明。嵌套策略组无法保证唯一来源，限制开启时会被锁定。
+
+如果保存的新限制排除了当前节点，helper 会先切换到已有成功评分最高的允许节点，再持久化配置；没有允许节点具备成功评分时会拒绝保存并保留旧配置。SingDeck 不会改写或重载 sing-box 配置，外部 controller 仍可强制切到不允许的节点，此时页面会显示来源越界警告。独立出口巡检仍按策略组全部成员执行。
+
 ### Gemini 出口与家宽/机房检测
 
 在 Settings 的“Gemini 检测策略组”中选择一个 Selector 组。只有这个组会显示 Gemini 开关和 Gemini 出口结果；具体组名由 Settings 保存，代码没有写死 `gemini-us`。该组侧栏中的 Gemini 开关以及每个策略组各自的家宽/机房、高级检查开关，都会随“Save settings”保存到 helper。

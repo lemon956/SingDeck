@@ -157,6 +157,17 @@ function validateGroupConfig(value: unknown, path: string): void {
   requireBoolean(config.autoSwitch, `${path}.autoSwitch`);
   requireBoolean(config.autoProbe, `${path}.autoProbe`);
   requireNumber(config.probeIntervalSec, `${path}.probeIntervalSec`);
+  if (config.sourceRestrictionEnabled !== undefined) {
+    requireBoolean(config.sourceRestrictionEnabled, `${path}.sourceRestrictionEnabled`);
+  }
+  if (config.allowedNodeSources !== undefined) {
+    requireArray(config.allowedNodeSources, `${path}.allowedNodeSources`).forEach((source, index) =>
+      requireString(source, `${path}.allowedNodeSources[${index}]`)
+    );
+  }
+  if (config.allowUnlabeledNodes !== undefined) {
+    requireBoolean(config.allowUnlabeledNodes, `${path}.allowUnlabeledNodes`);
+  }
 }
 
 function validateStringRecord(value: unknown, path: string): void {

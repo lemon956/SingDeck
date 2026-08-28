@@ -20,6 +20,8 @@ describe('helper store', () => {
       networkUsageSettings: null,
       groups: [],
       nodeSources: [],
+      nodeSourcesRefreshing: false,
+      nodeSourcesRefreshError: null,
       scoresByGroup: {},
       activeProbeGroups: [],
       activeProbeNodesByGroup: {},
@@ -162,6 +164,56 @@ describe('helper store', () => {
     await useHelperStore.getState().loadNodeSources();
 
     expect(useHelperStore.getState().nodeSources.map((source) => source.name)).toEqual(['bing-us']);
+  });
+
+  it('refreshes subscription node sources only through the manual POST action', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      return jsonResponse({
+        sources: [
+          {
+            name: 'ss-id',
+            url: 'https://example.com/sub',
+            associate: true,
+            lastSyncedAt: '2026-08-28T12:00:00+08:00',
+            lastError: null,
+            nodeCount: 1,
+            nodes: ['hk-1']
+          }
+        ],
+        requestMethod: init?.method
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await useHelperStore.getState().refreshNodeSources();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://helper.local/api/v1/node-sources/refresh',
+      expect.objectContaining({ method: 'POST', body: '{}' })
+    );
+    expect(useHelperStore.getState().nodeSources.map((source) => source.name)).toEqual(['ss-id']);
+    expect(useHelperStore.getState().nodeSourcesRefreshing).toBe(false);
+    expect(useHelperStore.getState().nodeSourcesRefreshError).toBeNull();
+  });
+
+  it('keeps cached node sources when the manual refresh request fails', async () => {
+    const cachedSource = {
+      name: 'ss-id',
+      url: 'https://example.com/sub',
+      associate: true,
+      lastSyncedAt: '2026-08-27T12:00:00+08:00',
+      lastError: null,
+      nodeCount: 1,
+      nodes: ['hk-1']
+    };
+    useHelperStore.setState({ nodeSources: [cachedSource] });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('unavailable', { status: 503 })));
+
+    await useHelperStore.getState().refreshNodeSources();
+
+    expect(useHelperStore.getState().nodeSources).toEqual([cachedSource]);
+    expect(useHelperStore.getState().nodeSourcesRefreshing).toBe(false);
+    expect(useHelperStore.getState().nodeSourcesRefreshError).toBe('Helper HTTP 503');
   });
 
   it('keeps previous scores visible while strategy groups refresh', async () => {

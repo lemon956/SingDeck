@@ -1,5 +1,6 @@
-import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
+  AlertCircle,
   Cable,
   ChevronDown,
   ChevronRight,
@@ -9,6 +10,7 @@ import {
   Globe,
   Layers,
   LayoutDashboard,
+  Lock,
   QrCode,
   RefreshCw,
   Save,
@@ -22,6 +24,7 @@ import {
   Zap
 } from 'lucide-react';
 import QRCode from 'qrcode';
+import { buildNodeSourceTagStyles, formatRelativeTime, sourceRestrictionAllowsNode } from '../core/nodeSources';
 import { WorldRequestMap } from './WorldRequestMap';
 import { isLoopbackUrl, resolveConfigDownloadUrl } from '../core/configDownloadUrl';
 import { routeFromHash, type AppRoute } from '../core/navigation';
@@ -79,6 +82,16 @@ const TRAFFIC_SPARKLINE_WIDTH = 188;
 const TRAFFIC_SPARKLINE_HEIGHT = 44;
 const SOURCE_TREND_DAYS = 7;
 const SOURCE_TREND_COLORS = ['#34d399', '#38bdf8', '#fbbf24', '#a78bfa', '#f87171', '#60a5fa'];
+const NODE_SOURCE_TAG_PALETTE = [
+  { color: '#38bdf8', background: 'rgba(56, 189, 248, 0.10)', border: 'rgba(56, 189, 248, 0.34)' },
+  { color: '#a78bfa', background: 'rgba(167, 139, 250, 0.10)', border: 'rgba(167, 139, 250, 0.34)' },
+  { color: '#34d399', background: 'rgba(52, 211, 153, 0.10)', border: 'rgba(52, 211, 153, 0.34)' },
+  { color: '#fbbf24', background: 'rgba(251, 191, 36, 0.10)', border: 'rgba(251, 191, 36, 0.34)' },
+  { color: '#60a5fa', background: 'rgba(96, 165, 250, 0.10)', border: 'rgba(96, 165, 250, 0.34)' },
+  { color: '#f472b6', background: 'rgba(244, 114, 182, 0.10)', border: 'rgba(244, 114, 182, 0.34)' },
+  { color: '#2dd4bf', background: 'rgba(45, 212, 191, 0.10)', border: 'rgba(45, 212, 191, 0.34)' },
+  { color: '#fb923c', background: 'rgba(251, 146, 60, 0.10)', border: 'rgba(251, 146, 60, 0.34)' }
+] as const;
 const DEFAULT_DELAY_TEST_TIMEOUT_MS = 5000;
 const DEFAULT_MIN_PROBE_INTERVAL_SEC = 60;
 const DEFAULT_NETWORK_USAGE_SAMPLE_INTERVAL_SEC = 5;
@@ -104,6 +117,7 @@ type InlineStatus = {
   tone: 'ok' | 'warn' | 'neutral';
   text: string;
 };
+
 
 const sections = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard, navKey: 'O' },
@@ -601,7 +615,10 @@ function formatNodeCardTooltip(
   return lines.join('\n');
 }
 
-function latestScoreUpdateAt(scores: HelperNodeScore[]): Date | null {
+function latestScoreUpdateAt(scores: HelperNodeScore[] | undefined): Date | null {
+  if (!Array.isArray(scores) || scores.length === 0) {
+    return null;
+  }
   const timestamps = scores
     .map((score) => (score.lastTestedAt ? Date.parse(score.lastTestedAt) : Number.NaN))
     .filter(Number.isFinite);
@@ -612,7 +629,10 @@ function latestScoreUpdateAt(scores: HelperNodeScore[]): Date | null {
   return new Date(Math.max(...timestamps));
 }
 
-function probeSnapshotTimestamp(scores: HelperNodeScore[]): Date | null {
+function probeSnapshotTimestamp(scores: HelperNodeScore[] | undefined): Date | null {
+  if (!Array.isArray(scores) || scores.length === 0) {
+    return null;
+  }
   const timestamps = scores
     .map((score) => score.raw?.testedAt ?? score.lastTestedAt)
     .filter((value): value is string => Boolean(value))
@@ -695,7 +715,10 @@ function fallbackGroupConfig(testUrl: string): HelperGroupConfig {
     autoProbe: true,
     probeIntervalSec: 15 * 60,
     geminiLocationProbeEnabled: false,
-    nodeRisk: emptyNodeRiskChecks()
+    nodeRisk: emptyNodeRiskChecks(),
+    sourceRestrictionEnabled: false,
+    allowedNodeSources: [],
+    allowUnlabeledNodes: false
   };
 }
 
@@ -1128,6 +1151,7 @@ export function App() {
   const [selectedNodeScoreGroup, setSelectedNodeScoreGroup] = useState('');
   const [nodeScoreDropdownOpen, setNodeScoreDropdownOpen] = useState(false);
   const [selectedNodeSourceName, setSelectedNodeSourceName] = useState('');
+  const [sourceRestrictionDropdownOpen, setSourceRestrictionDropdownOpen] = useState(false);
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
   const [groupConfigSaveStatus, setGroupConfigSaveStatus] = useState<{
     groupName: string;
@@ -1162,12 +1186,45 @@ export function App() {
   const [groupConfigDrafts, setGroupConfigDrafts] = useState<Record<string, HelperGroupConfig>>({});
   const [overviewVizMode, setOverviewVizMode] = useState<'worldMap' | 'topology'>('topology');
   const [connectionsViewMode, setConnectionsViewMode] = useState<'list' | 'map'>('list');
+  const [dismissedErrorKeys, setDismissedErrorKeys] = useState<Set<string>>(() => new Set());
   const topologyChartRef = useRef<HTMLDivElement | null>(null);
   const topologyChartInstanceRef = useRef<echarts.EChartsType | null>(null);
   const settingsImportInputRef = useRef<HTMLInputElement | null>(null);
   const previousHelperActiveProbeGroupsRef = useRef<Set<string>>(new Set());
   const strategyGroupsAutoCollapsedRef = useRef(false);
   const logListRef = useRef<HTMLDivElement | null>(null);
+  const sourceRestrictionMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!sourceRestrictionDropdownOpen) {
+      return;
+    }
+
+    const handleClickOutside = (event: MouseEvent | TouchEvent) => {
+      if (
+        sourceRestrictionMenuRef.current &&
+        !sourceRestrictionMenuRef.current.contains(event.target as Node)
+      ) {
+        setSourceRestrictionDropdownOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSourceRestrictionDropdownOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('touchstart', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('touchstart', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [sourceRestrictionDropdownOpen]);
 
   const filteredLogs = useMemo(() => {
     const needle = connections.logQuery.trim().toLowerCase();
@@ -1439,6 +1496,10 @@ export function App() {
     }
     return map;
   }, [helper.nodeSources]);
+  const nodeSourceTagStyleByName = useMemo(
+    () => buildNodeSourceTagStyles(helper.nodeSources.map((source) => source.name)),
+    [helper.nodeSources]
+  );
   const sourceFilteredStrategyGroups = useMemo(() => {
     if (!selectedNodeSource) {
       return orderedStrategyGroups;
@@ -1541,6 +1602,8 @@ export function App() {
   const networkUsageRetentionDays = helper.networkUsageSettings?.retentionDays ?? 7;
   const networkUsageSampleIntervalSec =
     helper.networkUsageSettings?.sampleIntervalSec ?? DEFAULT_NETWORK_USAGE_SAMPLE_INTERVAL_SEC;
+  const nodeSourceNodeCount = helper.nodeSources.reduce((total, source) => total + source.nodeCount, 0);
+  const nodeSourceIssueCount = helper.nodeSources.filter((source) => Boolean(source.lastError)).length;
   const helperDefaultTestUrl = helper.testingSettings?.defaultTestUrl ?? config.defaultTestUrl;
   const helperDelayTestTimeoutMs =
     helper.testingSettings?.delayTestTimeoutMs ?? config.delayTestTimeoutMs ?? DEFAULT_DELAY_TEST_TIMEOUT_MS;
@@ -1567,14 +1630,14 @@ export function App() {
         ? 'Save issue'
         : 'Save controller settings';
   const localBehaviorButtonTone = localBehaviorStatus?.tone ?? 'neutral';
-  const helperButtonLabel = (action: string, idle: string, busy: string) => {
+  const helperButtonLabel = (action: string, idle: string, busy: string, success = 'Saved') => {
     if (helperPendingAction === action) {
       return busy;
     }
     if (helperStatusAction !== action || !helperActionStatus) {
       return idle;
     }
-    return helperActionStatus.tone === 'ok' ? 'Saved' : helperActionStatus.tone === 'warn' ? 'Issue' : busy;
+    return helperActionStatus.tone === 'ok' ? success : helperActionStatus.tone === 'warn' ? 'Issue' : busy;
   };
   const helperButtonTitle = (action: string) =>
     helperStatusAction === action && helperActionStatus ? helperActionStatus.text : undefined;
@@ -1595,19 +1658,23 @@ export function App() {
           applyError: null,
           nodes: []
         };
+      const nodes = scores.nodes ?? [];
       return {
         scores,
-        updatedAt: probeSnapshotTimestamp(scores.nodes),
-        failedCount: scores.nodes.filter((node) => node.raw?.success === false || Boolean(node.error)).length
+        updatedAt: probeSnapshotTimestamp(nodes),
+        failedCount: nodes.filter((node) => node.raw?.success === false || Boolean(node.error)).length
       };
     });
     const fromScoresOnly = Object.values(helper.scoresByGroup)
       .filter((scores) => !helperGroupNames.has(scores.group))
-      .map((scores) => ({
+      .map((scores) => {
+        const nodes = scores.nodes ?? [];
+        return {
           scores,
-          updatedAt: probeSnapshotTimestamp(scores.nodes),
-          failedCount: scores.nodes.filter((node) => node.raw?.success === false || Boolean(node.error)).length
-        }));
+          updatedAt: probeSnapshotTimestamp(nodes),
+          failedCount: nodes.filter((node) => node.raw?.success === false || Boolean(node.error)).length
+        };
+      });
     return [...fromHelperGroups, ...fromScoresOnly].sort(
       (left, right) => (right.updatedAt?.getTime() ?? 0) - (left.updatedAt?.getTime() ?? 0)
     );
@@ -1658,6 +1725,79 @@ export function App() {
     activeStrategyGroup && groupConfigDrafts[activeStrategyGroup.name]
       ? groupConfigDrafts[activeStrategyGroup.name]
       : activeHelperGroup?.config ?? fallbackGroupConfig(activeGroupTestUrl);
+  const activeSourceRestrictionEnabled = Boolean(activeGroupConfig.sourceRestrictionEnabled);
+  const activeAllowedNodeSources = activeGroupConfig.allowedNodeSources ?? [];
+  const activeAllowedSourcesSet = useMemo(
+    () => new Set(activeAllowedNodeSources),
+    [activeAllowedNodeSources]
+  );
+  const activeNodeSourceNames = useMemo(
+    () => new Set(helper.nodeSources.map((source) => source.name)),
+    [helper.nodeSources]
+  );
+  const activeMissingAllowedSources = useMemo(
+    () => activeAllowedNodeSources.filter((source) => !activeNodeSourceNames.has(source)),
+    [activeAllowedNodeSources, activeNodeSourceNames]
+  );
+  const activeCanRestrictSources = Boolean(
+    activeStrategyGroup && isSelectableProxyGroup(activeStrategyGroup)
+  );
+  const activeSourceEligibleCount = useMemo(() => {
+    if (!activeStrategyGroup) {
+      return 0;
+    }
+    return activeStrategyGroup.all.filter((memberName) => {
+      const member = proxyByName.get(memberName);
+      return sourceRestrictionAllowsNode(
+        memberName,
+        Boolean(member && isProxyGroup(member)),
+        activeAllowedSourcesSet,
+        activeGroupConfig.allowUnlabeledNodes,
+        nodeSourceByNodeName,
+        activeSourceRestrictionEnabled
+      );
+    }).length;
+  }, [
+    activeStrategyGroup,
+    proxyByName,
+    activeAllowedSourcesSet,
+    activeGroupConfig.allowUnlabeledNodes,
+    nodeSourceByNodeName,
+    activeSourceRestrictionEnabled
+  ]);
+  const activeCurrentSourceAllowed = useMemo(() => {
+    if (!activeStrategyGroup) {
+      return true;
+    }
+    return sourceRestrictionAllowsNode(
+      activeStrategyGroup.now,
+      Boolean(proxyByName.get(activeStrategyGroup.now)?.all.length),
+      activeAllowedSourcesSet,
+      activeGroupConfig.allowUnlabeledNodes,
+      nodeSourceByNodeName,
+      activeSourceRestrictionEnabled
+    );
+  }, [
+    activeStrategyGroup,
+    proxyByName,
+    activeAllowedSourcesSet,
+    activeGroupConfig.allowUnlabeledNodes,
+    nodeSourceByNodeName,
+    activeSourceRestrictionEnabled
+  ]);
+  const activeSourceSelectionCount = useMemo(
+    () => activeAllowedNodeSources.length + (activeGroupConfig.allowUnlabeledNodes ? 1 : 0),
+    [activeAllowedNodeSources.length, activeGroupConfig.allowUnlabeledNodes]
+  );
+  const activeSourceSelectionLabel = useMemo(
+    () =>
+      activeSourceSelectionCount === 0
+        ? '未选择来源'
+        : `${activeAllowedNodeSources.length} 个来源${
+            activeGroupConfig.allowUnlabeledNodes ? ' + 未标记' : ''
+          }`,
+    [activeAllowedNodeSources.length, activeGroupConfig.allowUnlabeledNodes, activeSourceSelectionCount]
+  );
   const activeNodeRisk = normalizeNodeRiskChecks(activeGroupConfig.nodeRisk);
   const activeIsGeminiLocationGroup = Boolean(
     activeStrategyGroup &&
@@ -1707,6 +1847,7 @@ export function App() {
   }, [activeInspectorModel.intervalMinutes, activeStrategyGroup?.name]);
   useEffect(() => {
     setGroupConfigSaveStatus(null);
+    setSourceRestrictionDropdownOpen(false);
   }, [activeStrategyGroup?.name]);
   const activeGroupBusy = Boolean(
     activeStrategyGroup && (activeProbeGroupNames.has(activeStrategyGroup.name) || activeNativeGroupTesting)
@@ -2045,6 +2186,28 @@ export function App() {
       };
     });
 
+  const refreshNodeSourcesWithFeedback = () =>
+    runHelperAction('node-sources', 'Refreshing subscription sources...', async () => {
+      await useHelperStore.getState().refreshNodeSources();
+      const state = useHelperStore.getState();
+      if (state.nodeSourcesRefreshError) {
+        return { tone: 'warn', text: state.nodeSourcesRefreshError };
+      }
+      const subscriptionSources = state.nodeSources.filter(
+        (source) => source.associate && source.url.trim().length > 0
+      );
+      const failedSources = state.nodeSources.filter((source) => Boolean(source.lastError));
+      if (failedSources.length > 0) {
+        return {
+          tone: 'warn',
+          text: `${failedSources.length} source(s) reported issues. Cached subscription associations were kept where available.`
+        };
+      }
+      return subscriptionSources.length > 0
+        ? { tone: 'ok', text: `Refreshed ${subscriptionSources.length} subscription source(s).` }
+        : { tone: 'ok', text: 'Node sources refreshed. No associated subscription URLs are configured.' };
+    });
+
   const saveTrafficWithFeedback = (enabled: boolean, browserProfile: string) =>
     runHelperAction('traffic', enabled ? 'Saving and syncing traffic...' : 'Disabling provider traffic...', async () => {
       await useHelperStore.getState().saveTrafficSettings({ enabled, browserProfile });
@@ -2183,7 +2346,14 @@ export function App() {
       testUrlOverridden: patch.testUrlOverridden ?? (hasTestUrlPatch ? true : currentConfig.testUrlOverridden),
       geminiLocationProbeEnabled:
         patch.geminiLocationProbeEnabled ?? currentConfig.geminiLocationProbeEnabled ?? false,
-      nodeRisk: normalizeNodeRiskChecks(patch.nodeRisk ?? currentConfig.nodeRisk)
+      nodeRisk: normalizeNodeRiskChecks(patch.nodeRisk ?? currentConfig.nodeRisk),
+      sourceRestrictionEnabled:
+        patch.sourceRestrictionEnabled ?? currentConfig.sourceRestrictionEnabled ?? false,
+      allowedNodeSources: [
+        ...(patch.allowedNodeSources ?? currentConfig.allowedNodeSources ?? [])
+      ],
+      allowUnlabeledNodes:
+        patch.allowUnlabeledNodes ?? currentConfig.allowUnlabeledNodes ?? false
     };
     return nextConfig;
   };
@@ -2193,6 +2363,103 @@ export function App() {
     setGroupConfigDrafts((current) => ({ ...current, [groupName]: nextConfig }));
     proxies.setGroupTestUrl(groupName, nextConfig.testUrl);
     return nextConfig;
+  };
+
+  const toggleActiveSourceRestriction = (enabled: boolean) => {
+    if (!activeStrategyGroup || !activeCanRestrictSources) {
+      return;
+    }
+    const hasSavedSelection =
+      activeAllowedNodeSources.length > 0 || Boolean(activeGroupConfig.allowUnlabeledNodes);
+    draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+      sourceRestrictionEnabled: enabled,
+      allowedNodeSources:
+        enabled && !hasSavedSelection
+          ? helper.nodeSources.map((source) => source.name)
+          : activeAllowedNodeSources,
+      allowUnlabeledNodes:
+        enabled && !hasSavedSelection ? true : Boolean(activeGroupConfig.allowUnlabeledNodes)
+    });
+    setSourceRestrictionDropdownOpen(enabled);
+  };
+
+  const toggleActiveAllowedNodeSource = (sourceName: string, enabled: boolean) => {
+    if (!activeStrategyGroup) {
+      return;
+    }
+    const next = enabled
+      ? Array.from(new Set([...activeAllowedNodeSources, sourceName]))
+      : activeAllowedNodeSources.filter((source) => source !== sourceName);
+    draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+      allowedNodeSources: next
+    });
+  };
+
+  const selectAllActiveNodeSources = () => {
+    if (!activeStrategyGroup) {
+      return;
+    }
+    draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+      allowedNodeSources: helper.nodeSources.map((source) => source.name),
+      allowUnlabeledNodes: true
+    });
+  };
+
+  const clearActiveNodeSources = () => {
+    if (!activeStrategyGroup) {
+      return;
+    }
+    draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+      allowedNodeSources: [],
+      allowUnlabeledNodes: false
+    });
+  };
+
+  const fixActiveSourceViolation = async (groupToFix = activeStrategyGroup) => {
+    if (!groupToFix || !isSelectableProxyGroup(groupToFix)) {
+      return;
+    }
+    const targetConfig =
+      groupConfigDrafts[groupToFix.name] ??
+      helperGroupByName.get(groupToFix.name)?.config ??
+      fallbackGroupConfig(helperDefaultTestUrl);
+    const allowedSet = new Set(targetConfig.allowedNodeSources ?? []);
+
+    const allowedMembers = groupToFix.all.filter((memberName) => {
+      const member = proxyByName.get(memberName);
+      return sourceRestrictionAllowsNode(
+        memberName,
+        Boolean(member && isProxyGroup(member)),
+        allowedSet,
+        targetConfig.allowUnlabeledNodes,
+        nodeSourceByNodeName,
+        true
+      );
+    });
+
+    if (allowedMembers.length === 0) {
+      return;
+    }
+
+    const sorted = [...allowedMembers].sort((a, b) => {
+      const scoreA = activeHelperScoreByName.get(a)?.score ?? -1;
+      const scoreB = activeHelperScoreByName.get(b)?.score ?? -1;
+      if (scoreA !== scoreB) {
+        return scoreB - scoreA;
+      }
+      const delayA = proxies.proxies.find((p) => p.name === a)?.delay ?? 99999;
+      const delayB = proxies.proxies.find((p) => p.name === b)?.delay ?? 99999;
+      return delayA - delayB;
+    });
+
+    const bestNode = sorted[0];
+    if (bestNode) {
+      if (helperServiceAvailable) {
+        await helper.applyNode(groupToFix.name, bestNode).then(() => proxies.refresh());
+      } else {
+        await proxies.switchProxy(groupToFix.name, bestNode);
+      }
+    }
   };
 
   const saveGroupConfigFor = (groupName: string, currentConfig: HelperGroupConfig, patch: Partial<HelperGroupConfig>) => {
@@ -2210,6 +2477,18 @@ export function App() {
 
   const saveActiveGroupConfig = async () => {
     if (!activeStrategyGroup || !helperServiceAvailable) {
+      return;
+    }
+    if (
+      activeSourceRestrictionEnabled &&
+      activeAllowedNodeSources.length === 0 &&
+      !activeGroupConfig.allowUnlabeledNodes
+    ) {
+      setGroupConfigSaveStatus({
+        groupName: activeStrategyGroup.name,
+        tone: 'bad',
+        text: 'Select a source'
+      });
       return;
     }
 
@@ -2248,6 +2527,8 @@ export function App() {
       tone: 'ok',
       text: 'Saved'
     });
+    setSourceRestrictionDropdownOpen(false);
+    await Promise.all([proxies.refresh(), useHelperStore.getState().loadGroups()]);
   };
 
   const runGroupProbe = async (group: ProxyRecord | null) => {
@@ -2744,6 +3025,85 @@ export function App() {
             </section>
           </div>
         ) : null}
+
+        {/* ==========================================================================
+            Modern Floating Error Toast Dialog
+            ========================================================================== */}
+        <aside aria-label="Error alerts" className="error-toast-portal" role="region">
+          {detection && !detection.ok && !dismissedErrorKeys.has('controller-detection') ? (
+            <div className="error-toast-card" role="alert">
+              <div className="error-toast-header">
+                <div className="error-toast-title-row">
+                  <AlertCircle className="error-toast-icon" size={15} />
+                  <strong className="error-toast-title">{detection.failure.title}</strong>
+                </div>
+                <button
+                  aria-label="关闭提示"
+                  className="error-toast-close"
+                  onClick={() =>
+                    setDismissedErrorKeys((prev) => new Set([...prev, 'controller-detection']))
+                  }
+                  type="button"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+              <div className="error-toast-body">{detection.failure.detail}</div>
+              <div className="error-toast-actions">
+                {activeRoute !== 'controller' ? (
+                  <button
+                    className="error-toast-btn primary"
+                    onClick={() => {
+                      setActiveRoute('controller');
+                      setDismissedErrorKeys((prev) => new Set([...prev, 'controller-detection']));
+                    }}
+                    type="button"
+                  >
+                    前往设置
+                  </button>
+                ) : null}
+                <button
+                  className="error-toast-btn secondary"
+                  onClick={() => void detect()}
+                  type="button"
+                >
+                  重试检测
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {proxies.error && !dismissedErrorKeys.has(`proxy-error-${proxies.error}`) ? (
+            <div className="error-toast-card" role="alert">
+              <div className="error-toast-header">
+                <div className="error-toast-title-row">
+                  <AlertCircle className="error-toast-icon" size={15} />
+                  <strong className="error-toast-title">节点代理同步异常</strong>
+                </div>
+                <button
+                  aria-label="关闭提示"
+                  className="error-toast-close"
+                  onClick={() =>
+                    setDismissedErrorKeys((prev) => new Set([...prev, `proxy-error-${proxies.error}`]))
+                  }
+                  type="button"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+              <div className="error-toast-body">{proxies.error}</div>
+              <div className="error-toast-actions">
+                <button
+                  className="error-toast-btn primary"
+                  onClick={() => void proxies.refresh()}
+                  type="button"
+                >
+                  重试刷新
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </aside>
 
         {activeRoute === 'overview' ? (
           <>
@@ -3452,6 +3812,19 @@ export function App() {
                     >
                       {helperButtonLabel('traffic', 'Save traffic', 'Saving...')}
                     </button>
+                    <button
+                      aria-label="Refresh node sources"
+                      className={`ghost-action status-${helperStatusAction === 'node-sources' ? helperActionStatus?.tone ?? 'neutral' : 'neutral'}`}
+                      disabled={helperActionBusy}
+                      onClick={() => void refreshNodeSourcesWithFeedback()}
+                      title={helperButtonTitle('node-sources')}
+                      type="button"
+                    >
+                      {helperButtonLabel('node-sources', 'Refresh sources', 'Refreshing...', 'Refreshed')}
+                    </button>
+                  </div>
+                  <div className="settings-scope-note">
+                    Subscription URLs refresh only on this button. Restart restores saved links and rematches configured nodes.
                   </div>
                 </div>
                 <div className="settings-note-grid compact-health">
@@ -3468,7 +3841,39 @@ export function App() {
                       : 'off',
                     networkUsageModuleEnabled ? 'blue' : 'neutral'
                   )}
+                  {healthRow(
+                    'Node sources',
+                    `${helper.nodeSources.length} sources / ${nodeSourceNodeCount} linked`,
+                    nodeSourceIssueCount > 0 ? 'warn' : helper.nodeSources.length > 0 ? 'blue' : 'neutral'
+                  )}
                 </div>
+                {helper.nodeSources.length > 0 ? (
+                  <div className="settings-node-source-list" aria-label="Loaded node sources">
+                    {helper.nodeSources.map((source) => (
+                      <div className="settings-node-source-item" key={source.name}>
+                        <div className="source-item-title">
+                          <span
+                            className="source-option-dot"
+                            style={nodeSourceTagStyleByName.get(source.name)}
+                            aria-hidden="true"
+                          />
+                          <strong title={source.name}>{source.name}</strong>
+                        </div>
+                        <div className="source-item-meta">
+                          <span>{source.nodeCount} 节点</span>
+                          <span title={source.lastSyncedAt ?? undefined}>
+                            {formatRelativeTime(source.lastSyncedAt)}
+                          </span>
+                          {source.lastError ? (
+                            <span className="source-item-error" title={source.lastError}>
+                              异常
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 {helper.error ? <div className="settings-inline-error">{helper.error}</div> : null}
               </article>
             </div>
@@ -3637,13 +4042,6 @@ export function App() {
               </article>
             </div>
           </form>
-
-          {detection && !detection.ok ? (
-            <div className="diagnostic-card">
-              <strong>{detection.failure.title}</strong>
-              <span>{detection.failure.detail}</span>
-            </div>
-          ) : null}
         </section>
         ) : null}
 
@@ -3655,8 +4053,6 @@ export function App() {
             <article><span>Healthy nodes</span><strong>{healthyProxyCount} / {allProxyNodes.length}</strong></article>
             <article><span>Default test URL</span><strong>{helperDefaultTestUrl}</strong></article>
           </section>
-
-          {proxies.error ? <div className="proxy-error" title={proxies.error}>{proxies.error}</div> : null}
 
           <section className="proxy-control-layout" aria-label="Proxy strategy workspace">
             <div className="proxy-board">
@@ -3752,6 +4148,30 @@ export function App() {
                   const isActive = activeStrategyGroup?.name === proxy.name;
                   const isCollapsed = collapsedStrategyGroups.has(proxy.name);
                   const canAutoSwitch = isSelectableProxyGroup(proxy) && !execution.autoSwitchManagedBySingBox;
+                  const fullStrategyGroup = proxyByName.get(proxy.name) ?? proxy;
+                  const rowSourceRestrictionEnabled = Boolean(
+                    rowConfig.sourceRestrictionEnabled && isSelectableProxyGroup(fullStrategyGroup)
+                  );
+                  const rowAllowedSourcesSet = new Set(rowConfig.allowedNodeSources ?? []);
+                  const rowSourceEligibleCount = fullStrategyGroup.all.filter((memberName) => {
+                    const member = proxyByName.get(memberName);
+                    return sourceRestrictionAllowsNode(
+                      memberName,
+                      Boolean(member && isProxyGroup(member)),
+                      rowAllowedSourcesSet,
+                      rowConfig.allowUnlabeledNodes,
+                      nodeSourceByNodeName,
+                      rowSourceRestrictionEnabled
+                    );
+                  }).length;
+                  const rowCurrentSourceAllowed = sourceRestrictionAllowsNode(
+                    fullStrategyGroup.now,
+                    Boolean(proxyByName.get(fullStrategyGroup.now)?.all.length),
+                    rowAllowedSourcesSet,
+                    rowConfig.allowUnlabeledNodes,
+                    nodeSourceByNodeName,
+                    rowSourceRestrictionEnabled
+                  );
                   const rowActivity = describeProbeActivity({ mode: rowConfig.mode, groupProbing: isProbing || isNativeTesting });
                   const groupMembers = proxy.all
                     .map(
@@ -3814,7 +4234,16 @@ export function App() {
                         </div>
                         <div className="strategy-card-current">
                           <span>Current</span>
-                          <strong>{proxy.now || '--'}</strong>
+                          <strong
+                            className={rowSourceRestrictionEnabled && !rowCurrentSourceAllowed ? 'source-violation' : ''}
+                            title={
+                              rowSourceRestrictionEnabled && !rowCurrentSourceAllowed
+                                ? '当前节点不在允许来源内'
+                                : undefined
+                            }
+                          >
+                            {proxy.now || '--'}
+                          </strong>
                           <small>{selectedProxy?.type ?? 'unknown'}</small>
                         </div>
                         <div className="strategy-card-meta">
@@ -3854,6 +4283,28 @@ export function App() {
                                 ? 'auto switch'
                                 : 'manual'}
                           </span>
+                          {rowSourceRestrictionEnabled ? (
+                            <span
+                              className={`status-chip source-limit ${rowCurrentSourceAllowed ? 'blue' : 'bad'}`}
+                              title={`${rowSourceEligibleCount} / ${fullStrategyGroup.all.length} 个节点符合来源限制`}
+                            >
+                              {rowCurrentSourceAllowed ? 'sources' : 'source violation'} {rowSourceEligibleCount}/{fullStrategyGroup.all.length}
+                              {!rowCurrentSourceAllowed ? (
+                                <button
+                                  className="source-violation-action"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void fixActiveSourceViolation(fullStrategyGroup);
+                                  }}
+                                  title="一键切回允许来源的最佳节点"
+                                  type="button"
+                                >
+                                  <Zap size={9} />
+                                  <span>修复</span>
+                                </button>
+                              ) : null}
+                            </span>
+                          ) : null}
                           <span className="status-chip neutral">{Math.round(rowConfig.probeIntervalSec / 60)} min</span>
                         </div>
                         <div className="strategy-card-actions">
@@ -3909,14 +4360,28 @@ export function App() {
                             {visibleMembers.map((member) => {
                           const isCurrent = member.name === proxy.now;
                           const isSwitchingGroup = proxies.switchingGroups.includes(proxy.name);
+                          const isApplyingGroup = helper.applyingGroups.includes(proxy.name);
                           const isTesting = proxies.testingProxies.includes(member.name);
                           const isHelperNodeProbing = activeProbeNodeNames.has(member.name);
-                          const canSelect = isSelectableProxyGroup(proxy) && !isSwitchingGroup;
+                          const nodeSourceName = nodeSourceByNodeName.get(member.name);
+                          const isAllowedBySource = sourceRestrictionAllowsNode(
+                            member.name,
+                            isProxyGroup(member),
+                            rowAllowedSourcesSet,
+                            rowConfig.allowUnlabeledNodes,
+                            nodeSourceByNodeName,
+                            rowSourceRestrictionEnabled
+                          );
+                          const canSelect =
+                            isSelectableProxyGroup(proxy) &&
+                            !isSwitchingGroup &&
+                            !isApplyingGroup &&
+                            isAllowedBySource &&
+                            (!rowSourceRestrictionEnabled || helperServiceAvailable);
                           const score = execution.mode === 'helper-score' ? groupScoreByName.get(member.name) : undefined;
                           const displayDelay = proxyDelayByName.get(member.name) ?? member.delay;
                           const nodeDelay = execution.mode === 'helper-score' ? scoreDelayOrFallback(score, displayDelay) : displayDelay;
                           const scoreTone = score ? nodeScoreTone(score, displayDelay) : 'none';
-                          const nodeSourceName = nodeSourceByNodeName.get(member.name);
                           const nodeDelayTone = delayTone(nodeDelay);
                           const cardTone = rowConfig.mode === 'score' && score ? scoreTone : nodeDelayTone;
                           const nodeActivity = describeProbeActivity({
@@ -3925,30 +4390,42 @@ export function App() {
                             nodeTesting: isTesting
                           });
                           const isScoring = nodeActivity?.kind === 'scoring';
+                          const baseTooltip = formatNodeCardTooltip(
+                            member.name,
+                            member.type,
+                            nodeSourceName,
+                            nodeDelay,
+                            score,
+                            {
+                              showGemini:
+                                helper.testingSettings?.geminiLocationGroup === proxy.name &&
+                                Boolean(rowConfig.geminiLocationProbeEnabled),
+                              nodeRisk: normalizeNodeRiskChecks(rowConfig.nodeRisk)
+                            }
+                          );
+                          const sourceRestrictionReason = !isAllowedBySource
+                            ? isProxyGroup(member)
+                              ? '来源限制：嵌套策略组无法保证唯一来源'
+                              : nodeSourceName
+                                ? `来源限制：${nodeSourceName} 不在允许范围内`
+                                : '来源限制：未标记节点不在允许范围内'
+                            : null;
 
                           return (
                             <article
                               aria-busy={nodeActivity ? true : undefined}
                               aria-disabled={!canSelect || isCurrent}
-                              className={`strategy-node-card ${cardTone} ${isCurrent ? 'active' : ''} ${nodeActivity?.className ?? ''}`}
+                              className={`strategy-node-card ${cardTone} ${isCurrent ? 'active' : ''} ${!isAllowedBySource ? 'source-locked' : ''} ${nodeActivity?.className ?? ''}`}
                               key={member.name}
-                              title={formatNodeCardTooltip(
-                                member.name,
-                                member.type,
-                                nodeSourceName,
-                                nodeDelay,
-                                score,
-                                {
-                                  showGemini:
-                                    helper.testingSettings?.geminiLocationGroup === proxy.name &&
-                                    Boolean(rowConfig.geminiLocationProbeEnabled),
-                                  nodeRisk: normalizeNodeRiskChecks(rowConfig.nodeRisk)
-                                }
-                              )}
+                              title={sourceRestrictionReason ? `${baseTooltip}\n${sourceRestrictionReason}` : baseTooltip}
                               onClick={() => {
                                 setActiveStrategyGroupName(proxy.name);
                                 if (canSelect && !isCurrent) {
-                                  void proxies.switchProxy(proxy.name, member.name);
+                                  if (rowSourceRestrictionEnabled) {
+                                    void helper.applyNode(proxy.name, member.name).then(() => proxies.refresh());
+                                  } else {
+                                    void proxies.switchProxy(proxy.name, member.name);
+                                  }
                                 }
                               }}
                             >
@@ -3962,8 +4439,22 @@ export function App() {
                               <div className="node-foot">
                                 <div className="node-meta">
                                   {nodeSourceName ? (
-                                    <span className="node-source-tag" title={`来源: ${nodeSourceName}`}>
+                                    <span
+                                      className="node-source-tag"
+                                      style={nodeSourceTagStyleByName.get(nodeSourceName)}
+                                      title={`来源: ${nodeSourceName}`}
+                                    >
                                       {nodeSourceName}
+                                    </span>
+                                  ) : rowSourceRestrictionEnabled ? (
+                                    <span className="node-source-tag unlabeled" title="来源: 未标记">
+                                      未标记
+                                    </span>
+                                  ) : null}
+                                  {!isAllowedBySource ? (
+                                    <span className="node-source-lock" title={sourceRestrictionReason ?? undefined}>
+                                      <Lock size={8} aria-hidden="true" />
+                                      锁定
                                     </span>
                                   ) : null}
                                   {rowConfig.mode === 'score' ? (
@@ -4046,6 +4537,11 @@ export function App() {
                             {activeInspectorModel.type}
                           </span>
                           <span className="inspector-members-count">{activeInspectorModel.membersLabel}</span>
+                          {activeSourceRestrictionEnabled ? (
+                            <span className="source-restriction-count">
+                              来源 {activeSourceEligibleCount}/{activeStrategyGroup.all.length}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
                       <span className={`mode-chip ${activeGroupConfig.mode === 'score' ? 'score' : 'delay'}`}>
@@ -4082,6 +4578,19 @@ export function App() {
                   ) : null}
                   {activeHelperScores?.applyError ? (
                     <div className="inspector-warning bad">{activeHelperScores.applyError}</div>
+                  ) : null}
+                  {activeSourceRestrictionEnabled && !activeCurrentSourceAllowed ? (
+                    <div className="inspector-warning bad">
+                      <div>当前节点不在允许来源内；这是外部切换或来源配置变化造成的越界状态。</div>
+                      <button
+                        className="source-violation-action"
+                        onClick={() => void fixActiveSourceViolation()}
+                        type="button"
+                      >
+                        <Zap size={11} />
+                        <span>一键切回允许来源的最佳节点</span>
+                      </button>
+                    </div>
                   ) : null}
 
                   <form className="inspector-form" onSubmit={(event) => event.preventDefault()}>
@@ -4180,6 +4689,130 @@ export function App() {
                           }
                         />
                       </div>
+                    </div>
+
+                    <div className={`inspector-group-card source-restriction-card ${activeSourceRestrictionEnabled ? 'on' : ''}`}>
+                      <div className="inspector-card-header">
+                        <GitBranch size={12} />
+                        <span>节点来源范围 / Sources</span>
+                      </div>
+
+                      {activeCanRestrictSources ? (
+                        <>
+                          <label className={`automation-option ${activeSourceRestrictionEnabled ? 'on' : ''}`}>
+                            <input
+                              aria-label="限制可选节点来源"
+                              checked={activeSourceRestrictionEnabled}
+                              disabled={!helperServiceAvailable}
+                              type="checkbox"
+                              onChange={(event) => toggleActiveSourceRestriction(event.target.checked)}
+                            />
+                            <span
+                              className={`automation-switch ${activeSourceRestrictionEnabled ? 'on' : ''}`}
+                              aria-hidden="true"
+                            />
+                            <span>
+                              <strong>限制可选节点来源</strong>
+                              <small>手选、测速、推荐与自动切换共用此范围</small>
+                            </span>
+                          </label>
+
+                          {activeSourceRestrictionEnabled ? (
+                            <div className="source-restriction-select" ref={sourceRestrictionMenuRef}>
+                              <button
+                                aria-expanded={sourceRestrictionDropdownOpen}
+                                aria-haspopup="true"
+                                aria-label="选择允许的节点来源"
+                                className="source-restriction-trigger"
+                                disabled={!helperServiceAvailable}
+                                onClick={() => setSourceRestrictionDropdownOpen((open) => !open)}
+                                type="button"
+                              >
+                                <span>{activeSourceSelectionLabel}</span>
+                                <ChevronDown size={12} aria-hidden="true" />
+                              </button>
+
+                              {sourceRestrictionDropdownOpen ? (
+                                <div
+                                  aria-label="允许的节点来源"
+                                  className="source-restriction-menu"
+                                  role="group"
+                                >
+                                  <div className="source-restriction-menu-head">
+                                    <span>允许来源</span>
+                                    <div>
+                                      <button onClick={selectAllActiveNodeSources} type="button">全选</button>
+                                      <button onClick={clearActiveNodeSources} type="button">清空</button>
+                                    </div>
+                                  </div>
+                                  <div className="source-restriction-options">
+                                    {helper.nodeSources.map((source) => (
+                                      <label className="source-restriction-option" key={source.name}>
+                                        <input
+                                          aria-label={`允许来源 ${source.name}`}
+                                          checked={activeAllowedNodeSources.includes(source.name)}
+                                          type="checkbox"
+                                          onChange={(event) =>
+                                            toggleActiveAllowedNodeSource(source.name, event.target.checked)
+                                          }
+                                        />
+                                        <span
+                                          className="source-option-dot"
+                                          style={nodeSourceTagStyleByName.get(source.name)}
+                                          aria-hidden="true"
+                                        />
+                                        <span title={source.name}>{source.name}</span>
+                                        <small>{source.nodeCount}</small>
+                                      </label>
+                                    ))}
+                                    {activeMissingAllowedSources.map((sourceName) => (
+                                      <label className="source-restriction-option missing" key={`missing-${sourceName}`}>
+                                        <input
+                                          aria-label={`移除失效来源 ${sourceName}`}
+                                          checked
+                                          type="checkbox"
+                                          onChange={() => toggleActiveAllowedNodeSource(sourceName, false)}
+                                        />
+                                        <span className="source-option-dot" aria-hidden="true" />
+                                        <span title={sourceName}>{sourceName}</span>
+                                        <small>已失效</small>
+                                      </label>
+                                    ))}
+                                    <label className="source-restriction-option unlabeled">
+                                      <input
+                                        aria-label="允许未标记节点"
+                                        checked={Boolean(activeGroupConfig.allowUnlabeledNodes)}
+                                        type="checkbox"
+                                        onChange={(event) =>
+                                          draftGroupConfigFor(activeStrategyGroup.name, activeGroupConfig, {
+                                            allowUnlabeledNodes: event.target.checked
+                                          })
+                                        }
+                                      />
+                                      <span className="source-option-dot" aria-hidden="true" />
+                                      <span>未标记</span>
+                                      <small>无来源标签</small>
+                                    </label>
+                                  </div>
+                                </div>
+                              ) : null}
+                              {activeSourceSelectionCount === 0 ? (
+                                <div className="source-restriction-warning">
+                                  至少选择一个来源或“未标记”后才能保存。
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </>
+                      ) : (
+                        <div className="automation-option disabled">
+                          <span className="automation-switch" aria-hidden="true" />
+                          <span>
+                            <strong>仅 Selector 支持来源限制</strong>
+                            <small>URLTest / Fallback 由 sing-box 原生管理节点选择</small>
+                          </span>
+                        </div>
+                      )}
                     </div>
 
                     <div className="inspector-group-card">

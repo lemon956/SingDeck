@@ -96,6 +96,8 @@ describe('App page visibility behavior', () => {
       eventStreamConnected: false,
       groups: [],
       nodeSources: [],
+      nodeSourcesRefreshing: false,
+      nodeSourcesRefreshError: null,
       scoresByGroup: {},
       trafficSettings: null,
       networkUsageSettings: { enabled: false, retentionDays: 7 },

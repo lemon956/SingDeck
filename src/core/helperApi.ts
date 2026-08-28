@@ -31,6 +31,9 @@ export type HelperGroupConfig = {
   probeIntervalSec: number;
   geminiLocationProbeEnabled?: boolean;
   nodeRisk?: HelperNodeRiskChecks;
+  sourceRestrictionEnabled?: boolean;
+  allowedNodeSources?: string[];
+  allowUnlabeledNodes?: boolean;
 };
 
 export type HelperTestingSettings = {

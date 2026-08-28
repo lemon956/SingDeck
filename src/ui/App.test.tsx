@@ -97,6 +97,8 @@ function setupProxyWorkspace() {
       }
     ],
     nodeSources: [],
+    nodeSourcesRefreshing: false,
+    nodeSourcesRefreshError: null,
     scoresByGroup: {
       select: {
         group: 'select',
@@ -682,6 +684,85 @@ describe('App proxy workspace', () => {
     );
   });
 
+  it('configures a Selector source restriction with a multi-select dropdown', async () => {
+    const saveGroupConfig = vi.fn(async () => {});
+    useHelperStore.setState({
+      saveGroupConfig,
+      nodeSources: [
+        {
+          name: 'provider-hk',
+          url: 'https://example.com/hk',
+          associate: true,
+          lastSyncedAt: null,
+          lastError: null,
+          nodeCount: 1,
+          nodes: ['hk-1']
+        },
+        {
+          name: 'provider-jp',
+          url: 'https://example.com/jp',
+          associate: true,
+          lastSyncedAt: null,
+          lastError: null,
+          nodeCount: 1,
+          nodes: ['jp-1']
+        }
+      ]
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('checkbox', { name: '限制可选节点来源' }));
+
+    expect(screen.getByRole('button', { name: '选择允许的节点来源' })).toHaveTextContent(
+      '2 个来源 + 未标记'
+    );
+    fireEvent.click(screen.getByRole('checkbox', { name: '允许来源 provider-jp' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '允许未标记节点' }));
+    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }));
+
+    await waitFor(() =>
+      expect(saveGroupConfig).toHaveBeenCalledWith(
+        'select',
+        expect.objectContaining({
+          sourceRestrictionEnabled: true,
+          allowedNodeSources: ['provider-hk'],
+          allowUnlabeledNodes: false
+        })
+      )
+    );
+  });
+
+  it('keeps source restriction read-only for native URLTest groups', () => {
+    useProxyStore.setState((state) => ({
+      proxies: state.proxies.map((proxy) =>
+        proxy.name === 'select' ? { ...proxy, type: 'URLTest' } : proxy
+      )
+    }));
+    useHelperStore.setState((state) => ({
+      groups: state.groups.map((group) =>
+        group.name === 'select' ? { ...group, kind: 'URLTest' } : group
+      )
+    }));
+
+    render(<App />);
+
+    expect(screen.queryByRole('checkbox', { name: '限制可选节点来源' })).not.toBeInTheDocument();
+    expect(screen.getByText('仅 Selector 支持来源限制')).toBeInTheDocument();
+  });
+
+  it('does not save an enabled source restriction with no selected category', () => {
+    const saveGroupConfig = vi.fn(async () => {});
+    useHelperStore.setState({ saveGroupConfig });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('checkbox', { name: '限制可选节点来源' }));
+    fireEvent.click(screen.getByRole('button', { name: '清空' }));
+    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }));
+
+    expect(saveGroupConfig).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Save settings/i })).toHaveTextContent('Select a source');
+  });
+
   it('starts with strategy groups collapsed and supports expanding or collapsing all groups', () => {
     const { container } = render(<App />);
 
@@ -972,6 +1053,113 @@ describe('App proxy workspace', () => {
 
     expect(within(wall).getAllByText('hk-1').length).toBeGreaterThan(0);
     expect(nodeCards.some((node) => within(node).queryByText('jp-1'))).toBe(false);
+  });
+
+  it('uses stable distinct source colors and locks disallowed node cards', () => {
+    const applyNode = vi.fn(async () => {});
+    const switchProxy = vi.fn(async () => {});
+    useProxyStore.setState({ switchProxy });
+    useHelperStore.setState((state) => ({
+      applyNode,
+      groups: state.groups.map((group) => ({
+        ...group,
+        config: {
+          ...group.config,
+          sourceRestrictionEnabled: true,
+          allowedNodeSources: ['provider-hk'],
+          allowUnlabeledNodes: false
+        }
+      })),
+      nodeSources: [
+        {
+          name: 'provider-hk',
+          url: 'https://example.com/hk',
+          associate: true,
+          lastSyncedAt: null,
+          lastError: null,
+          nodeCount: 1,
+          nodes: ['hk-1']
+        },
+        {
+          name: 'provider-jp',
+          url: 'https://example.com/jp',
+          associate: true,
+          lastSyncedAt: null,
+          lastError: null,
+          nodeCount: 1,
+          nodes: ['jp-1']
+        }
+      ]
+    }));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /Expand all strategy groups/i }));
+
+    const hkTag = screen.getByTitle('来源: provider-hk');
+    const jpTag = screen.getByTitle('来源: provider-jp');
+    expect(hkTag.style.getPropertyValue('--source-color')).not.toBe(
+      jpTag.style.getPropertyValue('--source-color')
+    );
+    const jpCard = jpTag.closest('.strategy-node-card') as HTMLElement;
+    expect(jpCard).toHaveClass('source-locked');
+    expect(jpCard).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(jpCard);
+    expect(applyNode).not.toHaveBeenCalled();
+    expect(switchProxy).not.toHaveBeenCalled();
+    expect(screen.getByText('sources 1/2')).toBeInTheDocument();
+  });
+
+  it('marks an externally selected disallowed node and routes allowed selection through helper apply', async () => {
+    const applyNode = vi.fn(async () => {});
+    const switchProxy = vi.fn(async () => {});
+    useProxyStore.setState((state) => ({
+      switchProxy,
+      proxies: state.proxies.map((proxy) =>
+        proxy.name === 'select' ? { ...proxy, now: 'jp-1' } : proxy
+      )
+    }));
+    useHelperStore.setState((state) => ({
+      applyNode,
+      groups: state.groups.map((group) => ({
+        ...group,
+        now: 'jp-1',
+        config: {
+          ...group.config,
+          sourceRestrictionEnabled: true,
+          allowedNodeSources: ['provider-hk'],
+          allowUnlabeledNodes: false
+        }
+      })),
+      nodeSources: [
+        {
+          name: 'provider-hk',
+          url: 'https://example.com/hk',
+          associate: true,
+          lastSyncedAt: null,
+          lastError: null,
+          nodeCount: 1,
+          nodes: ['hk-1']
+        },
+        {
+          name: 'provider-jp',
+          url: 'https://example.com/jp',
+          associate: true,
+          lastSyncedAt: null,
+          lastError: null,
+          nodeCount: 1,
+          nodes: ['jp-1']
+        }
+      ]
+    }));
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /Expand all strategy groups/i }));
+    expect(screen.getByText(/当前节点不在允许来源内；/)).toBeInTheDocument();
+    const hkCard = screen.getByTitle('来源: provider-hk').closest('.strategy-node-card') as HTMLElement;
+    fireEvent.click(hkCard);
+
+    await waitFor(() => expect(applyNode).toHaveBeenCalledWith('select', 'hk-1'));
+    expect(switchProxy).not.toHaveBeenCalled();
   });
 
   it('keeps source filtering out of group probe requests', async () => {
@@ -1605,6 +1793,73 @@ describe('App proxy workspace', () => {
     expect(saveNetworkUsageSettings).toHaveBeenCalledWith({ enabled: true, retentionDays: 7, sampleIntervalSec: 5 });
   });
 
+  it('refreshes subscription node sources from the Settings helper card', async () => {
+    window.location.hash = '#/controller';
+    const refreshNodeSources = vi.fn(async () => {
+      useHelperStore.setState({
+        nodeSources: [
+          {
+            name: 'ss-id',
+            url: 'https://example.com/sub',
+            associate: true,
+            lastSyncedAt: '2026-08-28T12:00:00+08:00',
+            lastError: null,
+            nodeCount: 2,
+            nodes: ['hk-1', 'hk-2']
+          }
+        ],
+        nodeSourcesRefreshError: null
+      });
+    });
+    useHelperStore.setState({
+      refreshNodeSources,
+      loadNodeSources: vi.fn(async () => undefined)
+    });
+
+    render(<App />);
+
+    const refreshButton = screen.getByRole('button', { name: 'Refresh node sources' });
+    fireEvent.click(refreshButton);
+
+    await waitFor(() => expect(refreshNodeSources).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(refreshButton).toHaveTextContent('Refreshed'));
+    expect(refreshButton).toHaveAttribute('title', 'Refreshed 1 subscription source(s).');
+    expect(screen.getByText('1 sources / 2 linked')).toBeInTheDocument();
+  });
+
+  it('shows a source refresh issue while keeping cached source counts visible', async () => {
+    window.location.hash = '#/controller';
+    const refreshNodeSources = vi.fn(async () => {
+      useHelperStore.setState({
+        nodeSources: [
+          {
+            name: 'ss-id',
+            url: 'https://example.com/sub',
+            associate: true,
+            lastSyncedAt: '2026-08-27T12:00:00+08:00',
+            lastError: 'fetch node source "ss-id": HTTP status 429 Too Many Requests',
+            nodeCount: 1,
+            nodes: ['hk-1']
+          }
+        ],
+        nodeSourcesRefreshError: null
+      });
+    });
+    useHelperStore.setState({
+      refreshNodeSources,
+      loadNodeSources: vi.fn(async () => undefined)
+    });
+
+    render(<App />);
+
+    const refreshButton = screen.getByRole('button', { name: 'Refresh node sources' });
+    fireEvent.click(refreshButton);
+
+    await waitFor(() => expect(refreshButton).toHaveTextContent('Issue'));
+    expect(refreshButton.title).toContain('Cached subscription associations were kept');
+    expect(screen.getByText('1 sources / 1 linked')).toHaveClass('warn');
+  });
+
   it('configures the Gemini inspection group from Settings without a name convention', async () => {
     window.location.hash = '#/controller';
     const saveGeminiLocationGroup = vi.fn(async () => {});
@@ -1884,5 +2139,162 @@ describe('App connection safeguards', () => {
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close all' }));
     expect(closeAllConnections).toHaveBeenCalledTimes(1);
+  });
+
+  it('displays floating ErrorToastDialog when detection fails and dismisses on close button click', () => {
+    useControllerStore.setState({
+      detection: {
+        ok: false,
+        failure: {
+          title: 'Controller check failed',
+          detail: 'Connection refused at 127.0.0.1:9090',
+          kind: 'network'
+        }
+      }
+    });
+
+    render(<App />);
+
+    const toastRegion = screen.getByRole('region', { name: /Error alerts/i });
+    expect(within(toastRegion).getByText('Controller check failed')).toBeInTheDocument();
+    expect(within(toastRegion).getByText('Connection refused at 127.0.0.1:9090')).toBeInTheDocument();
+
+    const closeBtn = within(toastRegion).getByRole('button', { name: '关闭提示' });
+    fireEvent.click(closeBtn);
+
+    expect(within(toastRegion).queryByText('Controller check failed')).not.toBeInTheDocument();
+  });
+
+  it('closes source restriction dropdown on Escape key', () => {
+    window.location.hash = '#/proxies';
+    useHelperStore.setState({
+      nodeSources: [
+        {
+          name: 'sub-hk',
+          url: 'https://example.com/sub',
+          associate: true,
+          lastSyncedAt: '2026-08-28T12:00:00Z',
+          lastError: null,
+          nodeCount: 2,
+          nodes: ['hk-1', 'hk-2']
+        }
+      ],
+      groups: [
+        {
+          name: 'select',
+          kind: 'Selector',
+          now: 'jp-1',
+          all: ['jp-1', 'hk-1'],
+          recommended: null,
+          applyError: null,
+          config: {
+            mode: 'delay',
+            scheme: 'Balanced',
+            autoSwitch: false,
+            autoProbe: false,
+            probeIntervalSec: 900,
+            testUrl: 'http://cp.cloudflare.com',
+            testUrlOverridden: false,
+            geminiLocationProbeEnabled: false,
+            sourceRestrictionEnabled: true,
+            allowedNodeSources: ['sub-hk'],
+            allowUnlabeledNodes: false
+          }
+        }
+      ]
+    });
+
+    render(<App />);
+
+    const selectTrigger = screen.getByRole('button', { name: '选择允许的节点来源' });
+    fireEvent.click(selectTrigger);
+
+    expect(screen.getByRole('group', { name: '允许的节点来源' })).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(screen.queryByRole('group', { name: '允许的节点来源' })).not.toBeInTheDocument();
+  });
+
+  it('provides quick-fix action to switch to best allowed node on source violation', async () => {
+    window.location.hash = '#/proxies';
+    const switchProxyMock = vi.fn(async () => {});
+    useProxyStore.setState({
+      switchProxy: switchProxyMock,
+      proxies: [
+        { name: 'select', type: 'Selector', now: 'jp-1', all: ['jp-1', 'hk-1'], delay: 100 },
+        { name: 'jp-1', type: 'Shadowsocks', now: '', all: [], delay: 120 },
+        { name: 'hk-1', type: 'Shadowsocks', now: '', all: [], delay: 80 }
+      ]
+    });
+
+    useHelperStore.setState({
+      nodeSources: [
+        {
+          name: 'sub-hk',
+          url: 'https://example.com/sub',
+          associate: true,
+          lastSyncedAt: '2026-08-28T12:00:00Z',
+          lastError: null,
+          nodeCount: 1,
+          nodes: ['hk-1']
+        }
+      ],
+      groups: [
+        {
+          name: 'select',
+          kind: 'Selector',
+          now: 'jp-1',
+          all: ['jp-1', 'hk-1'],
+          recommended: null,
+          applyError: null,
+          config: {
+            mode: 'delay',
+            scheme: 'Balanced',
+            autoSwitch: false,
+            autoProbe: false,
+            probeIntervalSec: 900,
+            testUrl: 'http://cp.cloudflare.com',
+            testUrlOverridden: false,
+            geminiLocationProbeEnabled: false,
+            sourceRestrictionEnabled: true,
+            allowedNodeSources: ['sub-hk'],
+            allowUnlabeledNodes: false
+          }
+        }
+      ]
+    });
+
+    render(<App />);
+
+    const quickFixBtn = screen.getByRole('button', { name: /一键切回允许来源的最佳节点/i });
+    expect(quickFixBtn).toBeInTheDocument();
+
+    fireEvent.click(quickFixBtn);
+
+    expect(useHelperStore.getState().applyingGroups).toBeDefined();
+  });
+
+  it('renders node source list with relative time in settings tab', () => {
+    window.location.hash = '#/controller';
+    useHelperStore.setState({
+      nodeSources: [
+        {
+          name: 'my-premium-sub',
+          url: 'https://example.com/sub',
+          associate: true,
+          lastSyncedAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+          lastError: null,
+          nodeCount: 15,
+          nodes: ['node-1', 'node-2']
+        }
+      ]
+    });
+
+    render(<App />);
+
+    expect(screen.getByText('my-premium-sub')).toBeInTheDocument();
+    expect(screen.getByText('15 节点')).toBeInTheDocument();
+    expect(screen.getByText('5 分钟前')).toBeInTheDocument();
   });
 });
