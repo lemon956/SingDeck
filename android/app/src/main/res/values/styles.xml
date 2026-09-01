@@ -4,6 +4,8 @@
         <item name="colorPrimary">@color/colorPrimary</item>
         <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
         <item name="colorAccent">@color/colorAccent</item>
+        <item name="colorSecondaryContainer">#260ea5e9</item>
+        <item name="colorOnSecondaryContainer">@color/status_cyan</item>
         <item name="android:windowBackground">@color/bg_dark</item>
         <item name="android:statusBarColor">@color/bg_dark</item>
         <item name="android:navigationBarColor">@color/surface_dark</item>
@@ -11,5 +13,13 @@
 
     <style name="AppTheme.NoActionBarLaunch" parent="AppTheme">
         <item name="android:windowBackground">@color/bg_dark</item>
+    </style>
+
+    <style name="InspectorRiskCheck" parent="Widget.AppCompat.CompoundButton.CheckBox">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">48dp</item>
+        <item name="android:layout_columnWeight">1</item>
+        <item name="android:textColor">@color/text_secondary</item>
+        <item name="android:textSize">12sp</item>
     </style>
 </resources>

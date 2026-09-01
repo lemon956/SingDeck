@@ -42,6 +42,7 @@ import {
 } from '../core/strategyWallLayout';
 import {
   HelperApiClient,
+  buildMobileConfigDownloadUrl,
   buildSingBoxRemoteProfileUri,
   type HelperConfigSource,
   type HelperGroupConfig,
@@ -1186,6 +1187,7 @@ export function App() {
   const [configQrUrl, setConfigQrUrl] = useState('');
   const [configQrDataUrl, setConfigQrDataUrl] = useState('');
   const [configQrCopied, setConfigQrCopied] = useState(false);
+  const [configQrIncludeSettings, setConfigQrIncludeSettings] = useState(false);
   const [helperActionStatus, setHelperActionStatus] = useState<InlineStatus | null>(null);
   const [helperPendingAction, setHelperPendingAction] = useState<string | null>(null);
   const [helperStatusAction, setHelperStatusAction] = useState<string | null>(null);
@@ -1660,7 +1662,8 @@ export function App() {
   };
   const helperButtonTitle = (action: string) =>
     helperStatusAction === action && helperActionStatus ? helperActionStatus.text : undefined;
-  const singBoxRemoteProfileUri = buildSingBoxRemoteProfileUri(configQrUrl, 'SingDeck');
+  const configQrDownloadUrl = buildMobileConfigDownloadUrl(configQrUrl, configQrIncludeSettings);
+  const singBoxRemoteProfileUri = buildSingBoxRemoteProfileUri(configQrDownloadUrl, 'SingDeck');
   const configQrResolving = configQrOpening && !configQrUrl.trim();
   const configQrUrlNeedsLan = !configQrResolving && (!configQrUrl.trim() || isLoopbackUrl(configQrUrl));
   const helperGroupByName = useMemo(() => new Map(helper.groups.map((group) => [group.name, group])), [helper.groups]);
@@ -2613,6 +2616,7 @@ export function App() {
     setConfigQrOpen(true);
     setConfigQrUrl('');
     setConfigQrCopied(false);
+    setConfigQrIncludeSettings(false);
     try {
       await helper.saveConfigPath();
       await helper.checkHealth();
@@ -2630,11 +2634,11 @@ export function App() {
   };
 
   const copyConfigQrUrl = async () => {
-    if (!configQrUrl.trim()) {
+    if (!configQrDownloadUrl.trim()) {
       return;
     }
     try {
-      await navigator.clipboard.writeText(configQrUrl);
+      await navigator.clipboard.writeText(configQrDownloadUrl);
       setConfigQrCopied(true);
       window.setTimeout(() => setConfigQrCopied(false), 1400);
     } catch {
@@ -3190,13 +3194,38 @@ export function App() {
                 </button>
               </div>
               <div className="qr-body">
+                <label className="qr-import-mode">
+                  <span className="qr-import-mode-copy">
+                    <strong>Include settings</strong>
+                    <small>
+                      {configQrIncludeSettings
+                        ? 'Config, strategy settings, and node source associations'
+                        : 'Config content only'}
+                    </small>
+                  </span>
+                  <span className="qr-switch-control">
+                    <input
+                      aria-label="Include settings"
+                      checked={configQrIncludeSettings}
+                      onChange={(event) => setConfigQrIncludeSettings(event.target.checked)}
+                      role="switch"
+                      type="checkbox"
+                    />
+                    <span aria-hidden="true" className="qr-switch-track">
+                      <span />
+                    </span>
+                  </span>
+                </label>
                 <div className={`qr-code-box ${configQrUrlNeedsLan ? 'blocked' : ''}`}>
                   {configQrResolving ? (
                     <span className="qr-code-hint">Preparing URL</span>
                   ) : configQrUrlNeedsLan ? (
                     <span className="qr-code-hint">LAN helper URL required</span>
                   ) : configQrDataUrl ? (
-                    <img src={configQrDataUrl} alt="sing-box config download QR" />
+                    <img
+                      src={configQrDataUrl}
+                      alt={configQrIncludeSettings ? 'sing-box config and settings download QR' : 'sing-box config download QR'}
+                    />
                   ) : (
                     <span className="qr-code-hint">Generating...</span>
                   )}
@@ -3204,7 +3233,13 @@ export function App() {
                 <div className="qr-meta">
                   <div className={`qr-state ${configQrUrlNeedsLan ? 'warn' : 'ok'}`}>
                     <span aria-hidden="true" />
-                    {configQrResolving ? 'Preparing URL' : configQrUrlNeedsLan ? 'Needs LAN URL' : 'Ready to scan'}
+                    {configQrResolving
+                      ? 'Preparing URL'
+                      : configQrUrlNeedsLan
+                        ? 'Needs LAN URL'
+                        : configQrIncludeSettings
+                          ? 'Ready · Config + settings'
+                          : 'Ready · Config only'}
                   </div>
                   <label className="qr-url-field">
                     <span>Download URL</span>
@@ -3217,7 +3252,7 @@ export function App() {
                   </label>
                   <button
                     className="ghost-action compact-icon-action qr-copy"
-                    disabled={!configQrUrl.trim()}
+                    disabled={!configQrDownloadUrl.trim()}
                     onClick={() => void copyConfigQrUrl()}
                     type="button"
                   >

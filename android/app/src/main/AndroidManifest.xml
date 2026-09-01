@@ -43,6 +43,15 @@
 
         </activity>
 
+        <!-- Portrait Square Framing QR Scanner Activity -->
+        <activity
+            android:name=".ui.scanner.PortraitCaptureActivity"
+            android:screenOrientation="portrait"
+            android:stateNotNeeded="true"
+            android:theme="@style/AppTheme.NoActionBarLaunch"
+            android:windowSoftInputMode="stateAlwaysHidden"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

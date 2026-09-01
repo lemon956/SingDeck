@@ -8,7 +8,11 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
+import io.singdeck.app.model.MobileBootstrap;
 import io.singdeck.app.model.Profile;
 
 public class ProfileBackupCodecTest {
@@ -20,7 +24,19 @@ public class ProfileBackupCodecTest {
         invalid.valid = false;
         invalid.validationError = "removed option";
 
-        String encoded = ProfileBackupCodec.encode("one", Arrays.asList(valid, invalid));
+        MobileBootstrap bootstrap = new MobileBootstrap();
+        MobileBootstrap.NodeSource source = new MobileBootstrap.NodeSource();
+        source.name = "Self";
+        source.configuredNodes = Collections.singletonList("Reality-1");
+        bootstrap.nodeSources = Collections.singletonList(source);
+        Map<String, MobileBootstrap> inspectorProfiles = new LinkedHashMap<>();
+        inspectorProfiles.put("one", bootstrap);
+
+        String encoded = ProfileBackupCodec.encode(
+                "one",
+                Arrays.asList(valid, invalid),
+                inspectorProfiles
+        );
         ProfileBackupCodec.DecodedBackup decoded = ProfileBackupCodec.decode(encoded);
 
         assertEquals(ProfileBackupCodec.CURRENT_VERSION, decoded.version);
@@ -29,6 +45,21 @@ public class ProfileBackupCodecTest {
         assertEquals(content, decoded.profiles.get(0).content);
         assertFalse(decoded.profiles.get(1).valid);
         assertEquals("removed option", decoded.profiles.get(1).validationError);
+        assertEquals(
+                "Reality-1",
+                decoded.inspectorProfiles.get("one").nodeSources.get(0).configuredNodes.get(0)
+        );
+    }
+
+    @Test
+    public void readsVersionOneObjectWithoutInspectorState() {
+        ProfileBackupCodec.DecodedBackup decoded = ProfileBackupCodec.decode(
+                "{\"version\":1,\"activeProfileId\":\"one\",\"profiles\":[]}"
+        );
+
+        assertEquals(1, decoded.version);
+        assertEquals("one", decoded.activeProfileId);
+        assertTrue(decoded.inspectorProfiles.isEmpty());
     }
 
     @Test

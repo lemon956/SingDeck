@@ -914,6 +914,11 @@ describe('App proxy workspace', () => {
 
     expect(screen.getByRole('dialog', { name: 'Config QR code' })).toBeInTheDocument();
     expect(screen.getAllByText('Preparing URL').length).toBeGreaterThan(0);
+    const includeSettings = screen.getByRole('switch', { name: 'Include settings' });
+    expect(includeSettings).not.toBeChecked();
+    fireEvent.click(includeSettings);
+    expect(includeSettings).toBeChecked();
+    expect(screen.getByText('Config, strategy settings, and node source associations')).toBeInTheDocument();
   });
 
   it('shows helper checking before the first helper health result', () => {

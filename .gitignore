@@ -4,3 +4,6 @@ dist
 helper/target
 .DS_Store
 singdeck-helper.db
+singdeck-helper.db-*
+cache.db
+.claude/settings.local.json

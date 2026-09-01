@@ -3,7 +3,6 @@ package io.singdeck.app.ui.connections;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.ImageButton;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -11,19 +10,20 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import io.singdeck.app.R;
 import io.singdeck.app.model.ConnectionItem;
 
 public class ConnectionAdapter extends RecyclerView.Adapter<ConnectionAdapter.ViewHolder> {
     private List<ConnectionItem> connections = new ArrayList<>();
-    private final OnCloseConnectionListener listener;
+    private final OnConnectionClickListener listener;
 
-    public interface OnCloseConnectionListener {
-        void onClose(ConnectionItem item);
+    public interface OnConnectionClickListener {
+        void onConnectionClick(ConnectionItem item);
     }
 
-    public ConnectionAdapter(OnCloseConnectionListener listener) {
+    public ConnectionAdapter(OnConnectionClickListener listener) {
         this.listener = listener;
     }
 
@@ -42,19 +42,23 @@ public class ConnectionAdapter extends RecyclerView.Adapter<ConnectionAdapter.Vi
     @Override
     public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
         ConnectionItem item = connections.get(position);
-        holder.tvConnHost.setText(item.host);
-        String detail = item.chain == null ? item.outbound : item.chain;
-        if (item.process != null && !item.process.isEmpty()) {
-            detail = item.process + " · " + detail;
-        }
-        holder.tvConnChain.setText(detail);
+
+        holder.tvConnHost.setText(item.host != null ? item.host : "未知连接");
+
+        String network = (item.network != null && !item.network.isEmpty()) ? item.network.toUpperCase() : "TCP";
+        holder.tvConnNetwork.setText(network);
+
+        String chain = item.chain != null && !item.chain.isEmpty() ? item.chain : (item.outbound != null ? item.outbound : "DIRECT");
+        holder.tvConnChain.setText(chain);
+
         holder.tvConnTraffic.setText(
                 "↓ " + formatBytes(item.downloadBytes) + "  ↑ " + formatBytes(item.uploadBytes)
         );
-        holder.btnKillConn.setContentDescription("关闭连接 " + item.host);
 
-        holder.btnKillConn.setOnClickListener(v -> {
-            if (listener != null) listener.onClose(item);
+        holder.itemView.setContentDescription("查看连接详情 " + item.host);
+
+        holder.itemView.setOnClickListener(v -> {
+            if (listener != null) listener.onConnectionClick(item);
         });
     }
 
@@ -68,23 +72,26 @@ public class ConnectionAdapter extends RecyclerView.Adapter<ConnectionAdapter.Vi
             return bytes + " B";
         }
         if (bytes < 1024L * 1024L) {
-            return (bytes / 1024) + " KiB";
+            return String.format(Locale.US, "%.1f KB", bytes / 1024.0);
         }
-        return String.format(java.util.Locale.US, "%.1f MiB", bytes / (1024.0 * 1024.0));
+        if (bytes < 1024L * 1024L * 1024L) {
+            return String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0));
+        }
+        return String.format(Locale.US, "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
     }
 
     static class ViewHolder extends RecyclerView.ViewHolder {
         TextView tvConnHost;
+        TextView tvConnNetwork;
         TextView tvConnChain;
         TextView tvConnTraffic;
-        ImageButton btnKillConn;
 
         ViewHolder(View itemView) {
             super(itemView);
             tvConnHost = itemView.findViewById(R.id.tv_conn_host);
+            tvConnNetwork = itemView.findViewById(R.id.tv_conn_network);
             tvConnChain = itemView.findViewById(R.id.tv_conn_chain);
             tvConnTraffic = itemView.findViewById(R.id.tv_conn_traffic);
-            btnKillConn = itemView.findViewById(R.id.btn_kill_conn);
         }
     }
 }

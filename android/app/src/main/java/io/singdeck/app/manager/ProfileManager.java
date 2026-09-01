@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.AtomicFile;
+import android.util.Log;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -31,6 +32,10 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import io.nekohasekai.libbox.Libbox;
+import io.nekohasekai.libbox.StringBox;
+import io.singdeck.app.LibboxRuntime;
+import io.singdeck.app.model.MobileBootstrap;
 import io.singdeck.app.model.NodeItem;
 import io.singdeck.app.model.OutboundGroup;
 import io.singdeck.app.model.Profile;
@@ -43,6 +48,7 @@ import io.singdeck.app.model.Profile;
  * screen resolve configuration content through this class.</p>
  */
 public final class ProfileManager {
+    private static final String TAG = "ProfileManager";
     private static final String PREF_NAME = "singdeck_native_profiles";
     private static final String KEY_LEGACY_PROFILES = "profiles_json";
     private static final String KEY_METADATA = "profile_metadata_json";
@@ -63,6 +69,7 @@ public final class ProfileManager {
     private final Gson gson = new Gson();
     private final ExecutorService executor = Executors.newFixedThreadPool(3);
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final InspectorRepository inspectorRepository;
 
     private final List<Profile> profiles = new ArrayList<>();
     private final List<OnProfileChangeListener> listeners = new ArrayList<>();
@@ -80,6 +87,36 @@ public final class ProfileManager {
         void onError(String message);
     }
 
+    public interface OnRemoteImportCallback {
+        void onSuccess(RemoteImportResult result);
+
+        void onError(String message);
+    }
+
+    public static final class RemoteImportResult {
+        public final Profile profile;
+        public final MobileBootstrap bootstrap;
+        public final String warning;
+
+        RemoteImportResult(Profile profile, MobileBootstrap bootstrap, String warning) {
+            this.profile = profile;
+            this.bootstrap = bootstrap;
+            this.warning = warning;
+        }
+    }
+
+    private static final class RemotePayload {
+        final String config;
+        final MobileBootstrap bootstrap;
+        final String warning;
+
+        RemotePayload(String config, MobileBootstrap bootstrap, String warning) {
+            this.config = config;
+            this.bootstrap = bootstrap;
+            this.warning = warning;
+        }
+    }
+
     public static final class RestoreResult {
         public final int importedCount;
         public final int skippedCount;
@@ -94,6 +131,7 @@ public final class ProfileManager {
         this.context = context.getApplicationContext();
         prefs = this.context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
         profilesDirectory = new File(this.context.getFilesDir(), "profiles");
+        inspectorRepository = InspectorRepository.getInstance(this.context);
         if (!profilesDirectory.exists() && !profilesDirectory.mkdirs()) {
             throw new IllegalStateException("无法创建配置存储目录");
         }
@@ -156,11 +194,13 @@ public final class ProfileManager {
 
     public synchronized String createBackupJson() {
         List<Profile> backupProfiles = new ArrayList<>();
+        Map<String, MobileBootstrap> inspectorProfiles = new LinkedHashMap<>();
         for (Profile profile : profiles) {
             Profile copy = copyProfile(profile, true);
             backupProfiles.add(copy);
+            inspectorProfiles.put(profile.id, inspectorRepository.exportBootstrap(profile.id));
         }
-        return ProfileBackupCodec.encode(getActiveProfileId(), backupProfiles);
+        return ProfileBackupCodec.encode(getActiveProfileId(), backupProfiles, inspectorProfiles);
     }
 
     public RestoreResult restoreBackupJson(String backupJson, boolean replaceExisting) {
@@ -173,6 +213,7 @@ public final class ProfileManager {
         }
 
         List<Profile> prepared = new ArrayList<>();
+        Map<String, MobileBootstrap> inspectorByRestoredId = new LinkedHashMap<>();
         String restoredActiveId = null;
         for (Profile source : backup.profiles) {
             if (source == null || source.content == null || source.content.trim().isEmpty()) {
@@ -207,6 +248,12 @@ public final class ProfileManager {
                     ? source.lastUpdatedAt
                     : System.currentTimeMillis();
             prepared.add(restored);
+            if (source.id != null && backup.inspectorProfiles.containsKey(source.id)) {
+                MobileBootstrap bootstrap = backup.inspectorProfiles.get(source.id);
+                if (bootstrap != null) {
+                    inspectorByRestoredId.put(restored.id, bootstrap);
+                }
+            }
             if (restored.valid
                     && ((backup.activeProfileId != null && backup.activeProfileId.equals(source.id))
                     || (backup.activeProfileId == null && source.active))) {
@@ -241,6 +288,16 @@ public final class ProfileManager {
                     writeConfigLocked(profile.id, profile.content);
                     written.add(profile);
                 }
+                for (Profile profile : prepared) {
+                    MobileBootstrap bootstrap = inspectorByRestoredId.get(profile.id);
+                    if (bootstrap != null) {
+                        inspectorRepository.importBootstrap(
+                                profile.id,
+                                bootstrap,
+                                nodeNamesInContent(profile.content)
+                        );
+                    }
+                }
                 if (replaceExisting) {
                     profiles.clear();
                 }
@@ -254,9 +311,17 @@ public final class ProfileManager {
                 saveMetadataLocked();
                 parseActiveProfileContentLocked();
             } catch (RuntimeException error) {
+                for (Profile profile : written) {
+                    inspectorRepository.deleteProfile(profile.id);
+                }
                 profiles.clear();
                 profiles.addAll(previousProfiles);
                 setActiveProfileLocked(previousActiveId);
+                try {
+                    saveMetadataLocked();
+                } catch (RuntimeException rollbackError) {
+                    error.addSuppressed(rollbackError);
+                }
                 parseActiveProfileContentLocked();
                 for (Profile profile : written) {
                     File file = profileFile(profile.id);
@@ -270,6 +335,7 @@ public final class ProfileManager {
 
         if (replaceExisting) {
             for (Profile previous : previousProfiles) {
+                inspectorRepository.deleteProfile(previous.id);
                 File oldFile = profileFile(previous.id);
                 if (oldFile.exists()) {
                     oldFile.delete();
@@ -326,6 +392,53 @@ public final class ProfileManager {
                 }
             } catch (Exception error) {
                 postError(callback, safeMessage(error));
+            }
+        });
+    }
+
+    public void importRemoteProfile(MobileImportLink link, OnRemoteImportCallback callback) {
+        executor.submit(() -> {
+            try {
+                RemotePayload payload = downloadRemotePayload(link);
+                String normalized = formatRemoteConfig(payload.config);
+                String prepared = prepareAndValidate(normalized, link.name);
+                Profile profile = new Profile(
+                        UUID.randomUUID().toString(),
+                        normalizedName(link.name),
+                        "url",
+                        normalizedUrl(link.configUrl),
+                        prepared,
+                        true
+                );
+                profile.nodeCount = countNodesInContent(prepared);
+                if (payload.bootstrap != null) {
+                    inspectorRepository.importBootstrap(
+                            profile.id,
+                            payload.bootstrap,
+                            nodeNamesInContent(prepared)
+                    );
+                }
+                synchronized (ProfileManager.this) {
+                    try {
+                        persistNewProfileLocked(profile, true);
+                    } catch (RuntimeException error) {
+                        inspectorRepository.deleteProfile(profile.id);
+                        throw error;
+                    }
+                }
+                notifyListeners();
+                if (callback != null) {
+                    RemoteImportResult result = new RemoteImportResult(
+                            profile,
+                            payload.bootstrap,
+                            payload.warning
+                    );
+                    mainHandler.post(() -> callback.onSuccess(result));
+                }
+            } catch (Exception error) {
+                if (callback != null) {
+                    mainHandler.post(() -> callback.onError(safeMessage(error)));
+                }
             }
         });
     }
@@ -430,6 +543,7 @@ public final class ProfileManager {
         if (orphanedFile.exists() && !orphanedFile.delete()) {
             orphanedFile.deleteOnExit();
         }
+        inspectorRepository.deleteProfile(id);
         notifyListeners();
     }
 
@@ -776,10 +890,53 @@ public final class ProfileManager {
                 throw new IllegalStateException("HTTP 响应错误：" + code);
             }
             try (InputStream input = connection.getInputStream()) {
-                return new String(readLimited(input), StandardCharsets.UTF_8).trim();
+                return new String(readLimited(input), StandardCharsets.UTF_8);
             }
         } finally {
             connection.disconnect();
+        }
+    }
+
+    private RemotePayload downloadRemotePayload(MobileImportLink link) throws Exception {
+        String config = download(link.configUrl);
+        if (!link.includeSettings) {
+            return new RemotePayload(config, null, null);
+        }
+
+        Exception lastError = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            if (attempt > 0) {
+                config = download(link.configUrl);
+            }
+            try {
+                String bootstrapJson = download(link.bootstrapUrl);
+                MobileBootstrap bootstrap = MobileBootstrapVerifier.parseAndVerify(
+                        config,
+                        bootstrapJson
+                );
+                return new RemotePayload(config, bootstrap, null);
+            } catch (Exception error) {
+                lastError = error;
+            }
+        }
+        return new RemotePayload(
+                config,
+                null,
+                "伴随设置同步失败：" + safeMessage(lastError)
+        );
+    }
+
+    private String formatRemoteConfig(String rawConfig) {
+        try {
+            LibboxRuntime.initialize(context);
+            StringBox formatted = Libbox.formatConfig(rawConfig);
+            String value = formatted == null ? null : formatted.getValue();
+            if (value == null || value.trim().isEmpty()) {
+                throw new IllegalArgumentException("sing-box 未返回格式化配置");
+            }
+            return value;
+        } catch (Exception error) {
+            throw new IllegalArgumentException("远程 Config 规范化失败：" + safeMessage(error), error);
         }
     }
 
@@ -837,6 +994,37 @@ public final class ProfileManager {
         }
     }
 
+    private List<String> nodeNamesInContent(String content) {
+        List<String> names = new ArrayList<>();
+        if (content == null || content.trim().isEmpty()) {
+            return names;
+        }
+        try {
+            JsonObject root = gson.fromJson(content, JsonObject.class);
+            if (root == null || !root.has("outbounds") || !root.get("outbounds").isJsonArray()) {
+                return names;
+            }
+            for (JsonElement element : root.getAsJsonArray("outbounds")) {
+                if (!element.isJsonObject()) {
+                    continue;
+                }
+                JsonObject outbound = element.getAsJsonObject();
+                String type = stringValue(outbound, "type");
+                String tag = stringValue(outbound, "tag");
+                if (!tag.isEmpty()
+                        && !"selector".equalsIgnoreCase(type)
+                        && !"urltest".equalsIgnoreCase(type)
+                        && !"direct".equalsIgnoreCase(type)
+                        && !"block".equalsIgnoreCase(type)
+                        && !"dns".equalsIgnoreCase(type)) {
+                    names.add(tag);
+                }
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return names;
+    }
+
     private void parseActiveProfileContentLocked() {
         cachedGroups.clear();
         cachedNodes.clear();
@@ -885,6 +1073,15 @@ public final class ProfileManager {
                 }
             }
         } catch (Exception ignored) {
+        } finally {
+            try {
+                inspectorRepository.reconcileSourceLinks(
+                        active.id,
+                        nodeNamesInContent(active.content)
+                );
+            } catch (RuntimeException error) {
+                Log.w(TAG, "Unable to reconcile Inspector node sources", error);
+            }
         }
     }
 

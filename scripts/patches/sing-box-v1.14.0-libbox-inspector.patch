@@ -1,0 +1,130 @@
+diff --git a/experimental/libbox/http.go b/experimental/libbox/http.go
+index c9ee378..ea4d77d 100644
+--- a/experimental/libbox/http.go
++++ b/experimental/libbox/http.go
+@@ -17,6 +17,7 @@ import (
+ 	"os"
+ 	"strconv"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/sagernet/sing-box/common/certificate"
+ 	C "github.com/sagernet/sing-box/constant"
+@@ -36,6 +37,9 @@ type HTTPClient interface {
+ 	PinnedTLS12()
+ 	PinnedSHA256(sumHex string)
+ 	TrySocks5(port int32)
++	UseSocks5(port int32, username string, password string)
++	SetTimeout(timeoutMillis int64)
++	SetFollowRedirects(follow bool)
+ 	KeepAlive()
+ 	NewRequest() HTTPRequest
+ 	Close()
+@@ -50,10 +54,14 @@ type HTTPRequest interface {
+ 	RandomUserAgent()
+ 	SetUserAgent(userAgent string)
+ 	Execute() (HTTPResponse, error)
++	ExecuteRaw() (HTTPResponse, error)
+ }
+ 
+ type HTTPResponse interface {
+ 	GetContent() (*StringBox, error)
++	GetStatusCode() int32
++	GetHeader(key string) string
++	GetFinalURL() string
+ 	WriteTo(path string) error
+ 	WriteToWithProgress(path string, handler HTTPResponseWriteToProgressHandler) error
+ }
+@@ -147,6 +155,42 @@ func (c *httpClient) TrySocks5(port int32) {
+ 	}
+ }
+ 
++func (c *httpClient) UseSocks5(port int32, username string, password string) {
++	dialer := new(net.Dialer)
++	c.transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
++		socksConn, err := dialer.DialContext(ctx, "tcp", "127.0.0.1:"+strconv.Itoa(int(port)))
++		if err != nil {
++			return nil, err
++		}
++		_, err = socks.ClientHandshake5(
++			socksConn,
++			socks5.CommandConnect,
++			M.ParseSocksaddr(addr),
++			username,
++			password,
++		)
++		if err != nil {
++			_ = socksConn.Close()
++			return nil, err
++		}
++		return socksConn, nil
++	}
++}
++
++func (c *httpClient) SetTimeout(timeoutMillis int64) {
++	c.client.Timeout = time.Duration(timeoutMillis) * time.Millisecond
++}
++
++func (c *httpClient) SetFollowRedirects(follow bool) {
++	if follow {
++		c.client.CheckRedirect = nil
++	} else {
++		c.client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
++			return http.ErrUseLastResponse
++		}
++	}
++}
++
+ func (c *httpClient) KeepAlive() {
+ 	c.transport.DisableKeepAlives = false
+ }
+@@ -211,15 +255,23 @@ func (r *httpRequest) SetContentString(content string) {
+ }
+ 
+ func (r *httpRequest) Execute() (HTTPResponse, error) {
+-	response, err := r.client.Do(&r.request)
++	httpResp, err := r.ExecuteRaw()
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	httpResp := &httpResponse{Response: response}
++	response := httpResp.(*httpResponse)
+ 	if response.StatusCode != http.StatusOK {
+-		return nil, errors.New(httpResp.errorString())
++		return nil, errors.New(response.errorString())
++	}
++	return response, nil
++}
++
++func (r *httpRequest) ExecuteRaw() (HTTPResponse, error) {
++	response, err := r.client.Do(&r.request)
++	if err != nil {
++		return nil, err
+ 	}
+-	return httpResp, nil
++	return &httpResponse{Response: response}, nil
+ }
+ 
+ type httpResponse struct {
+@@ -249,6 +301,21 @@ func (h *httpResponse) GetContent() (*StringBox, error) {
+ 	return wrapString(string(h.content)), nil
+ }
+ 
++func (h *httpResponse) GetStatusCode() int32 {
++	return int32(h.StatusCode)
++}
++
++func (h *httpResponse) GetHeader(key string) string {
++	return h.Header.Get(key)
++}
++
++func (h *httpResponse) GetFinalURL() string {
++	if h.Request == nil || h.Request.URL == nil {
++		return ""
++	}
++	return h.Request.URL.String()
++}
++
+ func (h *httpResponse) WriteTo(path string) error {
+ 	defer h.Body.Close()
+ 	file, err := os.Create(path)

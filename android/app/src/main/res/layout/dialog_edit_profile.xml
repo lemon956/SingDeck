@@ -3,8 +3,8 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:padding="16dp"
-    android:background="@color/surface_dark">
+    android:padding="20dp"
+    android:background="@drawable/bg_card_dark">
 
     <TextView
         android:id="@+id/tv_dialog_title"
@@ -12,60 +12,74 @@
         android:layout_height="wrap_content"
         android:text="编辑 Sing-box 配置文件"
         android:textColor="@color/text_primary"
-        android:textSize="15sp"
+        android:textSize="16sp"
         android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="3dp"
+        android:text="支持查看与定制 inbounds、outbounds 及 route.rules 规则表"
+        android:textColor="@color/text_muted"
+        android:textSize="11sp" />
 
     <EditText
         android:id="@+id/et_profile_name"
         android:layout_width="match_parent"
-        android:layout_height="40dp"
-        android:layout_marginTop="10dp"
-        android:hint="配置名称"
+        android:layout_height="44dp"
+        android:layout_marginTop="12dp"
+        android:hint="配置方案名称"
         android:textColor="@color/text_primary"
         android:textColorHint="@color/text_muted"
         android:textSize="13sp"
-        android:paddingStart="10dp"
-        android:paddingEnd="10dp"
-        android:background="@drawable/bg_badge_idle"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:background="@drawable/bg_input_field"
         android:singleLine="true" />
 
     <EditText
         android:id="@+id/et_profile_content"
         android:layout_width="match_parent"
-        android:layout_height="220dp"
+        android:layout_height="260dp"
         android:layout_marginTop="10dp"
         android:gravity="top|start"
-        android:hint="{\n  &quot;inbounds&quot;: [...],\n  &quot;outbounds&quot;: [...]\n}"
+        android:hint="{\n  &quot;inbounds&quot;: [...],\n  &quot;outbounds&quot;: [...],\n  &quot;route&quot;: { ... }\n}"
         android:textColor="@color/text_primary"
         android:textColorHint="@color/text_muted"
-        android:textSize="11sp"
+        android:textSize="12sp"
         android:typeface="monospace"
-        android:padding="10dp"
-        android:background="@drawable/bg_badge_idle" />
+        android:padding="12dp"
+        android:background="@drawable/bg_input_field" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="14dp"
         android:orientation="horizontal"
         android:gravity="end">
 
         <Button
             android:id="@+id/btn_dialog_cancel"
             android:layout_width="wrap_content"
-            android:layout_height="36dp"
+            android:layout_height="42dp"
             android:text="取消"
             android:textColor="@color/text_muted"
-            android:background="@drawable/bg_badge_idle" />
+            android:textSize="12sp"
+            android:background="@drawable/bg_btn_secondary"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp" />
 
         <Button
             android:id="@+id/btn_dialog_save"
             android:layout_width="wrap_content"
-            android:layout_height="36dp"
-            android:layout_marginStart="8dp"
-            android:text="保存并生效"
+            android:layout_height="42dp"
+            android:layout_marginStart="10dp"
+            android:text="保存并立即生效"
             android:textColor="@color/text_primary"
+            android:textSize="12sp"
             android:textStyle="bold"
-            android:background="@drawable/bg_btn_primary" />
+            android:background="@drawable/bg_btn_primary"
+            android:paddingStart="18dp"
+            android:paddingEnd="18dp" />
     </LinearLayout>
 </LinearLayout>

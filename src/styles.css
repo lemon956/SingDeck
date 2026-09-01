@@ -3904,6 +3904,87 @@ details.risk-cluster-container[open] > summary::before {
   gap: 12px;
 }
 
+.qr-import-mode {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+  cursor: pointer;
+}
+
+.qr-import-mode-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.qr-import-mode-copy strong {
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.qr-import-mode-copy small {
+  color: var(--quiet);
+  font-size: 9.5px;
+  line-height: 1.35;
+}
+
+.qr-switch-control {
+  position: relative;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 22px;
+}
+
+.qr-switch-control input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.qr-switch-track {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--panel);
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.qr-switch-track span {
+  display: block;
+  width: 16px;
+  height: 16px;
+  margin: 2px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+.qr-switch-control input:checked + .qr-switch-track {
+  border-color: color-mix(in srgb, var(--green) 75%, var(--line-strong));
+  background: color-mix(in srgb, var(--green) 18%, var(--panel));
+}
+
+.qr-switch-control input:checked + .qr-switch-track span {
+  transform: translateX(16px);
+  background: var(--green);
+}
+
+.qr-switch-control input:focus-visible + .qr-switch-track {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
 .qr-code-box {
   display: grid;
   place-items: center;

@@ -45,6 +45,8 @@ public class SpeedWaveformView extends View {
         init();
     }
 
+    private boolean isRunning = false;
+
     private void init() {
         downLinePaint.setColor(0xFF38BDF8); // Cyan
         downLinePaint.setStrokeWidth(3.5f);
@@ -63,7 +65,22 @@ public class SpeedWaveformView extends View {
         gridPaint.setStyle(Paint.Style.STROKE);
     }
 
+    public void setRunning(boolean running) {
+        this.isRunning = running;
+        if (!running) {
+            clear();
+        }
+        invalidate();
+    }
+
+    public void clear() {
+        Collections.fill(downHistory, 0.0);
+        Collections.fill(upHistory, 0.0);
+        invalidate();
+    }
+
     public void addSample(double downKbps, double upKbps) {
+        this.isRunning = true;
         downHistory.remove(0);
         downHistory.add(downKbps);
 
@@ -76,6 +93,10 @@ public class SpeedWaveformView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
+
+        if (!isRunning) {
+            return;
+        }
 
         int width = getWidth();
         int height = getHeight();

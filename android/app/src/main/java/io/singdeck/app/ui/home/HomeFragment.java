@@ -293,11 +293,13 @@ public class HomeFragment extends Fragment {
                     tvDownloadSpeed.setText(formatRate(snapshot.downloadSpeed));
                     tvUploadSpeed.setText(formatRate(snapshot.uploadSpeed));
                     if (waveformSpeed != null) {
+                        waveformSpeed.setVisibility(View.VISIBLE);
                         waveformSpeed.addSample(down, up);
                     }
                 } else {
                     if (waveformSpeed != null) {
-                        waveformSpeed.addSample(0.0, 0.0);
+                        waveformSpeed.setRunning(false);
+                        waveformSpeed.setVisibility(View.GONE);
                     }
                 }
 

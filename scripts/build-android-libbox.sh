@@ -118,6 +118,15 @@ prepare_source() {
   local actual_commit
   actual_commit="$(git -C "$source_dir" rev-parse HEAD)"
   [[ "$actual_commit" == "$SING_BOX_COMMIT" ]] || die "unexpected sing-box commit: $actual_commit"
+
+  local inspector_patch="$REPO_DIR/scripts/patches/sing-box-v1.14.0-libbox-inspector.patch"
+  [[ -f "$inspector_patch" ]] || die "missing libbox inspector patch: $inspector_patch"
+  if git -C "$source_dir" apply --reverse --check "$inspector_patch" >/dev/null 2>&1; then
+    git -C "$source_dir" apply --reverse "$inspector_patch"
+  fi
+  git -C "$source_dir" diff --quiet -- || die "sing-box cache contains unexpected local changes: $source_dir"
+  git -C "$source_dir" apply --check "$inspector_patch"
+  git -C "$source_dir" apply "$inspector_patch"
   printf '%s' "$source_dir"
 }
 
@@ -164,6 +173,8 @@ main() {
 
   (
     cd "$source_dir"
+    [[ -z "$(gofmt -d experimental/libbox/http.go)" ]] \
+      || die "patched libbox HTTP API is not gofmt-clean"
     go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.13
     go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.13
     go run ./cmd/internal/build_libbox -target android -platform android/arm64

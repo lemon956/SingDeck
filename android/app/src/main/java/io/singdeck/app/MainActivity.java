@@ -32,6 +32,7 @@ public class MainActivity extends AppCompatActivity {
 
         viewPager.setAdapter(new MainPagerAdapter(this));
         viewPager.setOffscreenPageLimit(3);
+        viewPager.setUserInputEnabled(false); // Disable swipe between tabs to protect inner horizontal scrolling
 
         // Sync ViewPager2 with BottomNavigationView
         viewPager.registerOnPageChangeCallback(new ViewPager2.OnPageChangeCallback() {

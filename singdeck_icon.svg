@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Dark Background Gradient -->
+    <radialGradient id="bg" cx="50%" cy="35%" r="70%">
+      <stop offset="0%" stop-color="#15243d" />
+      <stop offset="45%" stop-color="#0a101d" />
+      <stop offset="100%" stop-color="#04060a" />
+    </radialGradient>
+
+    <!-- Global Cyber Orbit Glow -->
+    <radialGradient id="worldGlow" cx="50%" cy="40%" r="50%">
+      <stop offset="0%" stop-color="#00E5FF" stop-opacity="0.3" />
+      <stop offset="70%" stop-color="#0284C7" stop-opacity="0.08" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Ladder Rail Gradient (Vertical Energy Climb) -->
+    <linearGradient id="ladderRail" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#0284C7" />
+      <stop offset="40%" stop-color="#00E5FF" />
+      <stop offset="85%" stop-color="#34D399" />
+      <stop offset="100%" stop-color="#FFFFFF" />
+    </linearGradient>
+
+    <!-- Step Glowing Linear Gradient -->
+    <linearGradient id="stepGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00E5FF" />
+      <stop offset="50%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#10B981" />
+    </linearGradient>
+
+    <!-- Top Speed Surge -->
+    <linearGradient id="surge" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#34D399" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#00E5FF" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+
+  <!-- Dark Rounded Squircle App Icon Base -->
+  <rect width="512" height="512" rx="128" fill="url(#bg)" />
+
+  <!-- Global Cyber Orbital Halo (自由网络空间光环) -->
+  <circle cx="256" cy="220" r="150" fill="url(#worldGlow)" />
+  <circle cx="256" cy="220" r="160" fill="none" stroke="#00E5FF" stroke-opacity="0.18" stroke-width="2.5" />
+  <ellipse cx="256" cy="220" rx="175" ry="55" fill="none" stroke="#38BDF8" stroke-opacity="0.35" stroke-width="3" transform="rotate(-15 256 220)" />
+
+  <!-- 🧱 Cyber Digital Firewall (代表被跨越的数字高墙 / 防火墙) -->
+  <g opacity="0.45">
+    <!-- Wall Base -->
+    <rect x="96" y="270" width="320" height="150" rx="12" fill="#0c182a" stroke="#1e3a5f" stroke-width="2" />
+    <!-- Wall Brick Grid Lines -->
+    <line x1="96" y1="320" x2="416" y2="320" stroke="#1e3a5f" stroke-width="2" />
+    <line x1="96" y1="370" x2="416" y2="370" stroke="#1e3a5f" stroke-width="2" />
+    
+    <line x1="176" y1="270" x2="176" y2="320" stroke="#1e3a5f" stroke-width="2" />
+    <line x1="256" y1="270" x2="256" y2="320" stroke="#1e3a5f" stroke-width="2" />
+    <line x1="336" y1="270" x2="336" y2="320" stroke="#1e3a5f" stroke-width="2" />
+    
+    <line x1="136" y1="320" x2="136" y2="370" stroke="#1e3a5f" stroke-width="2" />
+    <line x1="216" y1="320" x2="216" y2="370" stroke="#1e3a5f" stroke-width="2" />
+    <line x1="296" y1="320" x2="296" y2="370" stroke="#1e3a5f" stroke-width="2" />
+    <line x1="376" y1="320" x2="376" y2="370" stroke="#1e3a5f" stroke-width="2" />
+
+    <line x1="176" y1="370" x2="176" y2="420" stroke="#1e3a5f" stroke-width="2" />
+    <line x1="256" y1="370" x2="256" y2="420" stroke="#1e3a5f" stroke-width="2" />
+    <line x1="336" y1="370" x2="336" y2="420" stroke="#1e3a5f" stroke-width="2" />
+  </g>
+
+  <!-- 🪜 THE LADDER (跨越高墙的 3D 霓虹天梯 - 一眼即知是梯子) -->
+  
+  <!-- Ladder Ascending Speed Beams (梯子顶部穿向自由云端的加速光芒) -->
+  <line x1="210" y1="100" x2="190" y2="30" stroke="url(#surge)" stroke-width="4" stroke-linecap="round" />
+  <line x1="256" y1="80"  x2="256" y2="15" stroke="url(#surge)" stroke-width="5" stroke-linecap="round" />
+  <line x1="302" y1="100" x2="322" y2="30" stroke="url(#surge)" stroke-width="4" stroke-linecap="round" />
+
+  <!-- Left Ladder Rail (梯子左侧立柱) -->
+  <line x1="176" y1="420" x2="216" y2="100" stroke="url(#ladderRail)" stroke-width="16" stroke-linecap="round" />
+  <line x1="176" y1="420" x2="216" y2="100" stroke="#FFFFFF" stroke-opacity="0.8" stroke-width="4" stroke-linecap="round" />
+
+  <!-- Right Ladder Rail (梯子右侧立柱) -->
+  <line x1="336" y1="420" x2="296" y2="100" stroke="url(#ladderRail)" stroke-width="16" stroke-linecap="round" />
+  <line x1="336" y1="420" x2="296" y2="100" stroke="#FFFFFF" stroke-opacity="0.8" stroke-width="4" stroke-linecap="round" />
+
+  <!-- 4 Heavy Glowing Horizontal Steps / Rungs (梯子 4 根横木踏板 - 极度清晰) -->
+  <!-- Step 1 (Bottom Step) -->
+  <rect x="180" y="362" width="152" height="14" rx="7" fill="url(#stepGrad)" />
+  <rect x="184" y="364" width="144" height="4" rx="2" fill="#FFFFFF" fill-opacity="0.9" />
+
+  <!-- Step 2 (Lower-Middle Step) -->
+  <rect x="190" y="292" width="132" height="14" rx="7" fill="url(#stepGrad)" />
+  <rect x="194" y="294" width="124" height="4" rx="2" fill="#FFFFFF" fill-opacity="0.9" />
+
+  <!-- Step 3 (Crossing Over Wall Top Step - 跃出墙头最高处) -->
+  <rect x="200" y="222" width="112" height="14" rx="7" fill="url(#stepGrad)" />
+  <rect x="204" y="224" width="104" height="4" rx="2" fill="#FFFFFF" fill-opacity="0.9" />
+
+  <!-- Step 4 (Sky Free Step - 登顶自由之境) -->
+  <rect x="210" y="152" width="92" height="14" rx="7" fill="url(#stepGrad)" />
+  <rect x="214" y="154" width="84" height="4" rx="2" fill="#FFFFFF" fill-opacity="0.9" />
+
+  <!-- Glowing Joint Nodes on the Rails (科技节点晶体) -->
+  <circle cx="187" cy="369" r="6" fill="#00E5FF" />
+  <circle cx="325" cy="369" r="6" fill="#10B981" />
+
+  <circle cx="197" cy="299" r="6" fill="#00E5FF" />
+  <circle cx="315" cy="299" r="6" fill="#10B981" />
+
+  <circle cx="207" cy="229" r="7" fill="#FFFFFF" />
+  <circle cx="305" cy="229" r="7" fill="#FFFFFF" />
+
+  <circle cx="217" cy="159" r="7" fill="#34D399" />
+  <circle cx="295" cy="159" r="7" fill="#34D399" />
+
+  <!-- Ladder Top Nodes (梯子顶端射出光芒的端点) -->
+  <circle cx="216" cy="100" r="9" fill="#00E5FF" stroke="#FFFFFF" stroke-width="2" />
+  <circle cx="296" cy="100" r="9" fill="#10B981" stroke="#FFFFFF" stroke-width="2" />
+</svg>

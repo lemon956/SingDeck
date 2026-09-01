@@ -1,13 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/card_connection"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
+    android:layout_height="66dp"
     android:layout_marginBottom="6dp"
     android:orientation="horizontal"
     android:gravity="center_vertical"
-    android:padding="10dp"
-    android:background="@drawable/bg_card_dark">
+    android:paddingStart="14dp"
+    android:paddingEnd="14dp"
+    android:background="@drawable/bg_card_dark"
+    android:clickable="true"
+    android:focusable="true">
 
+    <!-- Left: Target Host & Protocol/Outbound Pills (Strictly Single-Line with Ellipsis) -->
     <LinearLayout
         android:layout_width="0dp"
         android:layout_height="wrap_content"
@@ -16,46 +22,82 @@
 
         <TextView
             android:id="@+id/tv_conn_host"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="api.github.com:443"
             android:textColor="@color/text_primary"
-            android:textSize="12sp"
+            android:textSize="13sp"
             android:textStyle="bold"
-            android:ellipsize="middle"
-            android:maxLines="1" />
+            android:singleLine="true"
+            android:maxLines="1"
+            android:ellipsize="end" />
 
         <LinearLayout
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:orientation="horizontal">
+            android:layout_marginTop="4dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:id="@+id/tv_conn_network"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="TCP"
+                android:textColor="@color/text_secondary"
+                android:textSize="9sp"
+                android:textStyle="bold"
+                android:paddingStart="5dp"
+                android:paddingEnd="5dp"
+                android:paddingTop="1dp"
+                android:paddingBottom="1dp"
+                android:background="@drawable/bg_badge_idle" />
 
             <TextView
                 android:id="@+id/tv_conn_chain"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:maxWidth="160dp"
                 android:text="PROXY ➔ 香港 01"
                 android:textColor="@color/status_cyan"
-                android:textSize="11sp" />
-
-            <TextView
-                android:id="@+id/tv_conn_traffic"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:text="↓ 128 KB  ↑ 12 KB"
-                android:textColor="@color/text_muted"
-                android:textSize="11sp" />
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:singleLine="true"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp"
+                android:paddingTop="1dp"
+                android:paddingBottom="1dp"
+                android:background="@drawable/bg_badge_engine" />
         </LinearLayout>
     </LinearLayout>
 
-    <ImageButton
-        android:id="@+id/btn_kill_conn"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:layout_marginStart="6dp"
-        android:src="@android:drawable/ic_menu_close_clear_cancel"
-        android:contentDescription="关闭此连接"
-        android:background="@drawable/bg_badge_idle" />
+    <!-- Right: Traffic Stats & Navigation Arrow (Fixed layout, never wraps) -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
+        android:gravity="end|center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/tv_conn_traffic"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="↓ 128 KB  ↑ 12 KB"
+            android:textColor="@color/text_muted"
+            android:textSize="11sp"
+            android:singleLine="true"
+            android:maxLines="1" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:text="➔"
+            android:textColor="@color/text_hint"
+            android:textSize="11sp" />
+    </LinearLayout>
 </LinearLayout>

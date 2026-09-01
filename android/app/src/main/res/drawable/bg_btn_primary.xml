@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="@color/colorPrimary" />
-    <corners android:radius="8dp" />
-</shape>
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="@color/btn_overlay_pressed">
+    <item>
+        <shape>
+            <gradient
+                android:angle="45"
+                android:startColor="#0284c7"
+                android:endColor="#0ea5e9" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+</ripple>

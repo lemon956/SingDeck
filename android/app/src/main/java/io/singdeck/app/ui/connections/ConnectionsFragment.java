@@ -52,7 +52,7 @@ public class ConnectionsFragment extends Fragment {
         RecyclerView rvConnections = view.findViewById(R.id.rv_connections);
 
         rvConnections.setLayoutManager(new LinearLayoutManager(requireContext()));
-        connectionAdapter = new ConnectionAdapter(item -> closeConnection(item.id, item.host));
+        connectionAdapter = new ConnectionAdapter(this::showConnectionDetail);
         rvConnections.setAdapter(connectionAdapter);
         btnCloseAllConnections.setOnClickListener(view1 -> closeAllConnections());
         etSearchConnections.addTextChangedListener(new TextWatcher() {
@@ -131,6 +131,13 @@ public class ConnectionsFragment extends Fragment {
 
     private boolean contains(String value, String query) {
         return value != null && value.toLowerCase(Locale.ROOT).contains(query);
+    }
+
+    private void showConnectionDetail(ConnectionItem item) {
+        if (!isAdded() || !viewActive || item == null) return;
+        ConnectionDetailBottomSheet sheet = ConnectionDetailBottomSheet.newInstance(item);
+        sheet.setActionListener(this::closeConnection);
+        sheet.show(getParentFragmentManager(), "connection_detail");
     }
 
     private void closeConnection(String connectionId, String host) {

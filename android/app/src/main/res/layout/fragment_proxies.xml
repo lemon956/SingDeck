@@ -3,31 +3,41 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
+    android:orientation="horizontal"
     android:background="@color/bg_dark">
 
-    <!-- 1. Outbound Groups Horizontal Tabs -->
+    <LinearLayout
+        android:id="@+id/proxies_main_content"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+    <!-- 1. Outbound Strategy Groups Horizontal Tabs -->
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv_group_tabs"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
         android:clipToPadding="false"
         android:orientation="horizontal" />
 
-    <!-- 2. Active Group Summary Card -->
+    <!-- 2. Active Group Summary Hero Banner -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginStart="16dp"
         android:layout_marginEnd="16dp"
-        android:layout_marginTop="4dp"
+        android:layout_marginTop="2dp"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:padding="12dp"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="12dp"
         android:background="@drawable/bg_card_dark">
 
         <LinearLayout
@@ -48,8 +58,10 @@
                     android:layout_height="wrap_content"
                     android:text="PROXY"
                     android:textColor="@color/text_primary"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
+                    android:textSize="15sp"
+                    android:textStyle="bold"
+                    android:ellipsize="end"
+                    android:maxLines="1" />
 
                 <TextView
                     android:id="@+id/tv_active_group_type"
@@ -58,38 +70,41 @@
                     android:layout_marginStart="6dp"
                     android:text="Selector"
                     android:textColor="@color/status_cyan"
-                    android:textSize="11sp"
-                    android:paddingStart="5dp"
-                    android:paddingEnd="5dp"
-                    android:paddingTop="1dp"
-                    android:paddingBottom="1dp"
-                    android:background="@drawable/bg_badge_idle" />
+                    android:textSize="10sp"
+                    android:paddingStart="6dp"
+                    android:paddingEnd="6dp"
+                    android:paddingTop="2dp"
+                    android:paddingBottom="2dp"
+                    android:background="@drawable/bg_badge_engine" />
             </LinearLayout>
 
             <TextView
                 android:id="@+id/tv_cur_active_node"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="当前生效: 香港 01"
+                android:layout_marginTop="3dp"
+                android:text="当前生效: 香港 01 - IEPL"
                 android:textColor="@color/text_secondary"
-                android:textSize="11sp" />
+                android:textSize="11sp"
+                android:ellipsize="middle"
+                android:maxLines="1" />
         </LinearLayout>
 
         <Button
             android:id="@+id/btn_test_all_nodes"
             android:layout_width="wrap_content"
-            android:layout_height="34dp"
+            android:layout_height="48dp"
+            android:minWidth="90dp"
             android:text="⚡ 一键测速"
             android:textColor="@color/text_primary"
-            android:textSize="11sp"
+            android:textSize="12sp"
             android:textStyle="bold"
             android:background="@drawable/bg_btn_primary"
-            android:paddingStart="12dp"
-            android:paddingEnd="12dp" />
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp" />
     </LinearLayout>
 
-    <!-- 3. Tooling Bar (Search, Layout Toggle, Sort, Refresh) -->
+    <!-- 3. Tooling Control Bar (Search, Layout Toggle, Sort, Refresh) -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -102,47 +117,56 @@
         <EditText
             android:id="@+id/et_search_nodes"
             android:layout_width="0dp"
-            android:layout_height="36dp"
-            android:minHeight="48dp"
+            android:layout_height="42dp"
             android:layout_weight="1"
             android:hint="搜索节点..."
             android:textColor="@color/text_primary"
             android:textColorHint="@color/text_muted"
-            android:textSize="12sp"
-            android:paddingStart="10dp"
-            android:paddingEnd="10dp"
-            android:background="@drawable/bg_badge_idle"
+            android:textSize="13sp"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:background="@drawable/bg_input_field"
             android:singleLine="true" />
 
         <ImageButton
             android:id="@+id/btn_toggle_layout"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
+            android:layout_width="42dp"
+            android:layout_height="42dp"
             android:layout_marginStart="6dp"
             android:src="@android:drawable/ic_menu_agenda"
             app:tint="@color/text_secondary"
-            android:contentDescription="切换节点列表布局"
-            android:background="@drawable/bg_badge_idle" />
+            android:contentDescription="切换网格或单列视图"
+            android:background="@drawable/bg_btn_secondary" />
 
         <ImageButton
             android:id="@+id/btn_sort_nodes"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
+            android:layout_width="42dp"
+            android:layout_height="42dp"
             android:layout_marginStart="6dp"
             android:src="@android:drawable/ic_menu_sort_by_size"
             app:tint="@color/text_secondary"
             android:contentDescription="切换节点排序方式"
-            android:background="@drawable/bg_badge_idle" />
+            android:background="@drawable/bg_btn_secondary" />
 
         <ImageButton
             android:id="@+id/btn_refresh_proxies"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
+            android:layout_width="42dp"
+            android:layout_height="42dp"
             android:layout_marginStart="6dp"
             android:src="@android:drawable/ic_popup_sync"
             app:tint="@color/text_secondary"
-            android:contentDescription="刷新核心节点状态"
-            android:background="@drawable/bg_badge_idle" />
+            android:contentDescription="刷新节点延迟状态"
+            android:background="@drawable/bg_btn_secondary" />
+
+        <ImageButton
+            android:id="@+id/btn_open_inspector"
+            android:layout_width="42dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="6dp"
+            android:src="@android:drawable/ic_menu_manage"
+            app:tint="@color/status_cyan"
+            android:contentDescription="打开原生 Proxies Inspector"
+            android:background="@drawable/bg_btn_secondary" />
     </LinearLayout>
 
     <!-- 4. Candidate Nodes RecyclerView with native Swipe and Pull-to-refresh -->
@@ -152,14 +176,23 @@
         android:layout_height="0dp"
         android:layout_weight="1"
         android:layout_marginTop="8dp"
-        android:paddingStart="16dp"
-        android:paddingEnd="16dp">
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp">
 
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/rv_nodes_grid"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:clipToPadding="false"
-            android:paddingBottom="16dp" />
+            android:paddingBottom="20dp" />
     </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+    </LinearLayout>
+
+    <FrameLayout
+        android:id="@+id/inspector_side_host"
+        android:layout_width="360dp"
+        android:layout_height="match_parent"
+        android:layout_marginStart="1dp"
+        android:background="@color/surface_dark"
+        android:visibility="gone" />
 </LinearLayout>

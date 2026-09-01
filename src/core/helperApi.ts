@@ -590,6 +590,29 @@ export function normalizeHelperUrl(value: string): string {
   return normalizeControllerUrl(value) || DEFAULT_HELPER_URL;
 }
 
+export function buildMobileConfigDownloadUrl(downloadUrl: string, includeSettings: boolean): string {
+  const value = downloadUrl.trim();
+  if (!value) {
+    return '';
+  }
+
+  if (!includeSettings && !/[?&]singdeck_settings=/.test(value)) {
+    return value;
+  }
+
+  try {
+    const url = new URL(value);
+    if (includeSettings) {
+      url.searchParams.set('singdeck_settings', '1');
+    } else {
+      url.searchParams.delete('singdeck_settings');
+    }
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
 export function buildSingBoxRemoteProfileUri(downloadUrl: string, name = 'SingDeck'): string {
   const url = downloadUrl.trim();
   if (!url) {

@@ -28,6 +28,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import io.nekohasekai.libbox.CommandClient;
@@ -54,11 +56,19 @@ import io.nekohasekai.libbox.StatusMessage;
 import io.nekohasekai.libbox.SystemProxyStatus;
 import io.nekohasekai.libbox.TunOptions;
 import io.singdeck.app.manager.ProfileManager;
+import io.singdeck.app.manager.InspectorRepository;
+import io.singdeck.app.manager.NodeEligibilityPolicy;
+import io.singdeck.app.manager.NativeInspectionEngine;
+import io.singdeck.app.manager.ProbeScoringEngine;
+import io.singdeck.app.manager.RuleSetHttpClientCompat;
+import io.singdeck.app.manager.RuntimeConfigOverlay;
+import io.singdeck.app.manager.RuntimeGroupSelectionReconciler;
 import io.singdeck.app.manager.SingBoxConfigValidator;
 import io.singdeck.app.manager.SplitTunnelManager;
 import io.singdeck.app.model.ConnectionItem;
 import io.singdeck.app.model.CoreRuntimeSnapshot;
 import io.singdeck.app.model.NodeItem;
+import io.singdeck.app.model.MobileBootstrap;
 
 public class SingDeckVpnService extends VpnService
         implements AndroidPlatformInterface.VpnHost, CommandServerHandler {
@@ -99,10 +109,14 @@ public class SingDeckVpnService extends VpnService
     private static final ConcurrentHashMap<Long, String> OPERATION_RESULTS = new ConcurrentHashMap<>();
     private static final String OPERATION_OK = "\u0000";
     private static final Object RUNTIME_SNAPSHOT_LOCK = new Object();
+    private static final RuntimeGroupSelectionReconciler GROUP_SELECTION_RECONCILER =
+            new RuntimeGroupSelectionReconciler();
     private static List<io.singdeck.app.model.OutboundGroup> runtimeGroups = Collections.emptyList();
     private static Map<String, NodeItem> runtimeNodes = Collections.emptyMap();
     private static List<ConnectionItem> runtimeConnections = Collections.emptyList();
     private static long runtimeUpdatedAt;
+    private static volatile RuntimeConfigOverlay.ProxyEndpoint inspectionProxy;
+    private static volatile String inspectionDegradedReason = "";
 
     private final Object tunLock = new Object();
     private final ExecutorService coreExecutor = Executors.newSingleThreadExecutor(runnable -> {
@@ -123,6 +137,8 @@ public class SingDeckVpnService extends VpnService
     private volatile boolean closing;
     private volatile boolean systemProxyAvailable;
     private volatile boolean systemProxyEnabled;
+    private volatile boolean autoProbePaused;
+    private ScheduledExecutorService autoProbeScheduler;
 
     public static boolean isVpnRunning() {
         return STATE_RUNNING.equals(serviceState);
@@ -164,6 +180,14 @@ public class SingDeckVpnService extends VpnService
         return totalDownload;
     }
 
+    public static RuntimeConfigOverlay.ProxyEndpoint getInspectionProxy() {
+        return inspectionProxy;
+    }
+
+    public static String getInspectionDegradedReason() {
+        return inspectionDegradedReason;
+    }
+
     public static CoreRuntimeSnapshot getRuntimeSnapshot() {
         synchronized (RUNTIME_SNAPSHOT_LOCK) {
             return new CoreRuntimeSnapshot(
@@ -197,8 +221,29 @@ public class SingDeckVpnService extends VpnService
         return OPERATION_OK.equals(result) ? "" : result;
     }
 
-    private static void setActiveOutbound(String outbound) {
-        activeOutbound = outbound == null || outbound.trim().isEmpty() ? "DIRECT" : outbound;
+    private static void recordSelectedOutbound(String group, String outbound) {
+        String selected = outbound == null || outbound.trim().isEmpty() ? "DIRECT" : outbound;
+        synchronized (RUNTIME_SNAPSHOT_LOCK) {
+            runtimeGroups = GROUP_SELECTION_RECONCILER.recordSuccessfulSelection(
+                    runtimeGroups,
+                    group,
+                    selected,
+                    System.currentTimeMillis()
+            );
+            activeOutbound = selected;
+            runtimeUpdatedAt = System.currentTimeMillis();
+        }
+    }
+
+    private static boolean isRuntimeGroupTag(String tag) {
+        synchronized (RUNTIME_SNAPSHOT_LOCK) {
+            for (io.singdeck.app.model.OutboundGroup group : runtimeGroups) {
+                if (group.name.equals(tag)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     @Override
@@ -277,11 +322,14 @@ public class SingDeckVpnService extends VpnService
     }
 
     private void startOrReloadCore(StartRequest request) {
+        autoProbePaused = true;
         boolean hadRunningCore = commandServer != null && !currentConfig.trim().isEmpty();
         String previousProfileId = currentProfileId;
         String previousConfig = currentConfig;
         String previousSplitMode = currentSplitMode;
         List<String> previousPackages = new ArrayList<>(currentPackages);
+        RuntimeConfigOverlay.ProxyEndpoint previousInspectionProxy = inspectionProxy;
+        String previousInspectionDegradedReason = inspectionDegradedReason;
         boolean mutationAttempted = false;
 
         try {
@@ -303,6 +351,28 @@ public class SingDeckVpnService extends VpnService
             }
 
             SingBoxConfigValidator.validate(this, config);
+            String baseRuntimeConfig = RuleSetHttpClientCompat.normalizeForRuntime(config);
+            if (!baseRuntimeConfig.equals(config)) {
+                SingBoxConfigValidator.validate(this, baseRuntimeConfig);
+                Log.i(TAG, "Applied sing-box 1.14 rule-set HTTP client compatibility");
+            }
+            String runtimeConfig = baseRuntimeConfig;
+            RuntimeConfigOverlay.ProxyEndpoint nextInspectionProxy = null;
+            String nextInspectionDegradedReason = "";
+            if (request.configAlreadyEnhanced) {
+                nextInspectionProxy = inspectionProxy;
+                nextInspectionDegradedReason = inspectionDegradedReason;
+            } else {
+                try {
+                    RuntimeConfigOverlay.Result overlay = RuntimeConfigOverlay.create(baseRuntimeConfig);
+                    SingBoxConfigValidator.validate(this, overlay.runtimeConfig);
+                    runtimeConfig = overlay.runtimeConfig;
+                    nextInspectionProxy = overlay.endpoint;
+                } catch (Throwable overlayError) {
+                    nextInspectionDegradedReason = safeMessage(overlayError);
+                    Log.w(TAG, "Inspector runtime overlay is unavailable; continuing without it");
+                }
+            }
             closing = false;
             if (platformInterface == null) {
                 platformInterface = new AndroidPlatformInterface(this, this);
@@ -318,24 +388,37 @@ public class SingDeckVpnService extends VpnService
                 previousTunGeneration = tunGeneration;
             }
             mutationAttempted = true;
-            commandServer.startOrReloadService(config, overrideOptions);
-
-            synchronized (tunLock) {
-                if (tunFileDescriptor == null || tunGeneration <= previousTunGeneration) {
-                    throw new Exception("sing-box 配置没有建立新的 Android TUN 入站");
+            try {
+                commandServer.startOrReloadService(runtimeConfig, overrideOptions);
+                requireFreshTun(previousTunGeneration);
+            } catch (Throwable enhancedStartError) {
+                if (nextInspectionProxy == null || request.configAlreadyEnhanced) {
+                    throw enhancedStartError;
                 }
+                Log.w(TAG, "Inspector-enhanced config failed; retrying the original profile");
+                nextInspectionDegradedReason = safeMessage(enhancedStartError);
+                nextInspectionProxy = null;
+                synchronized (tunLock) {
+                    previousTunGeneration = tunGeneration;
+                }
+                commandServer.startOrReloadService(baseRuntimeConfig, overrideOptions);
+                requireFreshTun(previousTunGeneration);
+                runtimeConfig = baseRuntimeConfig;
             }
 
             currentProfileId = profileId == null ? "" : profileId;
-            currentConfig = config;
+            currentConfig = runtimeConfig;
             currentSplitMode = request.splitMode;
             currentPackages = Collections.unmodifiableList(new ArrayList<>(request.packages));
+            inspectionProxy = nextInspectionProxy;
+            inspectionDegradedReason = nextInspectionDegradedReason;
             runningProfileId = currentProfileId;
             if (startedAt == 0) {
                 startedAt = System.currentTimeMillis();
             }
             updateState(STATE_RUNNING, "");
             startStatusClient();
+            startAutoProbeScheduler();
             completeOperation(request.operationId, "");
             notifyRunning("sing-box " + LibboxRuntime.getCoreVersion());
             Log.i(TAG, "sing-box service started with Android TUN");
@@ -356,7 +439,9 @@ public class SingDeckVpnService extends VpnService
                             previousProfileId,
                             previousConfig,
                             previousSplitMode,
-                            previousPackages
+                            previousPackages,
+                            previousInspectionProxy,
+                            previousInspectionDegradedReason
                     );
                     completeOperation(request.operationId, message + "；已恢复之前运行的配置");
                     return;
@@ -366,6 +451,8 @@ public class SingDeckVpnService extends VpnService
                 }
             }
             failStart(message, request.operationId);
+        } finally {
+            autoProbePaused = false;
         }
     }
 
@@ -385,7 +472,9 @@ public class SingDeckVpnService extends VpnService
             String profileId,
             String config,
             String splitMode,
-            List<String> packages
+            List<String> packages,
+            RuntimeConfigOverlay.ProxyEndpoint previousInspectionProxy,
+            String previousInspectionDegradedReason
     ) throws Exception {
         if (commandServer == null || config == null || config.trim().isEmpty()) {
             throw new Exception("没有可回滚的运行配置");
@@ -394,20 +483,35 @@ public class SingDeckVpnService extends VpnService
         synchronized (tunLock) {
             previousTunGeneration = tunGeneration;
         }
-        commandServer.startOrReloadService(config, createOverrideOptions(splitMode, packages));
+        String rollbackConfig = RuleSetHttpClientCompat.normalizeForRuntime(config);
+        commandServer.startOrReloadService(
+                rollbackConfig,
+                createOverrideOptions(splitMode, packages)
+        );
         synchronized (tunLock) {
             if (tunFileDescriptor == null || tunGeneration <= previousTunGeneration) {
                 throw new Exception("回滚配置没有重新建立 Android TUN 入站");
             }
         }
         currentProfileId = profileId == null ? "" : profileId;
-        currentConfig = config;
+        currentConfig = rollbackConfig;
         currentSplitMode = splitMode;
         currentPackages = Collections.unmodifiableList(new ArrayList<>(packages));
+        inspectionProxy = previousInspectionProxy;
+        inspectionDegradedReason = previousInspectionDegradedReason;
         runningProfileId = currentProfileId;
         updateState(STATE_RUNNING, "");
         startStatusClient();
+        startAutoProbeScheduler();
         notifyRunning("重载失败，已恢复之前的配置");
+    }
+
+    private void requireFreshTun(long previousTunGeneration) throws Exception {
+        synchronized (tunLock) {
+            if (tunFileDescriptor == null || tunGeneration <= previousTunGeneration) {
+                throw new Exception("sing-box 配置没有建立新的 Android TUN 入站");
+            }
+        }
     }
 
     private void notifyRunning(String content) {
@@ -449,8 +553,33 @@ public class SingDeckVpnService extends VpnService
             return;
         }
         try {
+            io.singdeck.app.model.OutboundGroup runtimeGroup = null;
+            for (io.singdeck.app.model.OutboundGroup candidate : getRuntimeSnapshot().groups) {
+                if (group.equals(candidate.name)) {
+                    runtimeGroup = candidate;
+                    break;
+                }
+            }
+            if (runtimeGroup == null || !"selector".equalsIgnoreCase(runtimeGroup.type)) {
+                completeOperation(operationId, "只有 Selector 策略组支持手动切换");
+                return;
+            }
+            if (!runtimeGroup.all.contains(outbound)) {
+                completeOperation(operationId, "节点不属于当前策略组");
+                return;
+            }
+            InspectorRepository inspector = InspectorRepository.getInstance(this);
+            if (!NodeEligibilityPolicy.isAllowed(
+                    inspector.getGroupSettings(runningProfileId, group),
+                    outbound,
+                    inspector.getSourceOwners(runningProfileId),
+                    isRuntimeGroupTag(outbound)
+            )) {
+                completeOperation(operationId, "该节点不在当前策略组允许的来源范围内");
+                return;
+            }
             Libbox.newStandaloneCommandClient().selectOutbound(group, outbound);
-            setActiveOutbound(outbound);
+            recordSelectedOutbound(group, outbound);
             completeOperation(operationId, "");
         } catch (Exception exception) {
             Log.e(TAG, "Unable to select outbound " + group + " -> " + outbound, exception);
@@ -724,7 +853,8 @@ public class SingDeckVpnService extends VpnService
                 currentConfig,
                 currentSplitMode,
                 currentPackages,
-                0
+                0,
+                true
         );
         coreExecutor.execute(() -> startOrReloadCore(request));
     }
@@ -754,6 +884,8 @@ public class SingDeckVpnService extends VpnService
 
     private void stopCore(boolean clearError, long operationId) {
         closing = true;
+        autoProbePaused = true;
+        stopAutoProbeScheduler();
         updateState(STATE_STOPPING, clearError ? "" : lastError);
         closeCoreResources();
         startedAt = 0;
@@ -770,6 +902,8 @@ public class SingDeckVpnService extends VpnService
         clearRuntimeCollections();
         systemProxyAvailable = false;
         systemProxyEnabled = false;
+        inspectionProxy = null;
+        inspectionDegradedReason = "";
         updateState(STATE_STOPPED, clearError ? "" : lastError);
         completeOperation(operationId, "");
         stopForeground(true);
@@ -779,6 +913,8 @@ public class SingDeckVpnService extends VpnService
 
     private void failStart(String error, long operationId) {
         closing = true;
+        autoProbePaused = true;
+        stopAutoProbeScheduler();
         closeCoreResources();
         startedAt = 0;
         uploadSpeed = 0;
@@ -794,6 +930,8 @@ public class SingDeckVpnService extends VpnService
         clearRuntimeCollections();
         systemProxyAvailable = false;
         systemProxyEnabled = false;
+        inspectionProxy = null;
+        inspectionDegradedReason = "";
         updateState(STATE_ERROR, emptyFallback(error, "sing-box 启动失败"));
         completeOperation(operationId, lastError);
         stopForeground(true);
@@ -846,6 +984,8 @@ public class SingDeckVpnService extends VpnService
     @Override
     public void onDestroy() {
         closing = true;
+        autoProbePaused = true;
+        stopAutoProbeScheduler();
         closeCoreResources();
         coreExecutor.shutdownNow();
         startedAt = 0;
@@ -862,6 +1002,8 @@ public class SingDeckVpnService extends VpnService
         clearRuntimeCollections();
         systemProxyAvailable = false;
         systemProxyEnabled = false;
+        inspectionProxy = null;
+        inspectionDegradedReason = "";
         if (!STATE_ERROR.equals(serviceState)) {
             updateState(STATE_STOPPED, "");
         }
@@ -879,7 +1021,7 @@ public class SingDeckVpnService extends VpnService
             packages = SplitTunnelManager.getInstance(this).getSelectedPackagesList();
         }
         long operationId = intent.getLongExtra(EXTRA_OPERATION_ID, 0);
-        return new StartRequest(profileId, null, splitMode, packages, operationId);
+        return new StartRequest(profileId, null, splitMode, packages, operationId, false);
     }
 
     private void createNotificationChannel() {
@@ -942,6 +1084,7 @@ public class SingDeckVpnService extends VpnService
 
     private static void clearRuntimeCollections() {
         synchronized (RUNTIME_SNAPSHOT_LOCK) {
+            GROUP_SELECTION_RECONCILER.clear();
             runtimeGroups = Collections.emptyList();
             runtimeNodes = Collections.emptyMap();
             runtimeConnections = Collections.emptyList();
@@ -969,25 +1112,140 @@ public class SingDeckVpnService extends VpnService
         return emptyFallback(throwable.getMessage(), throwable.getClass().getSimpleName());
     }
 
+    private synchronized void startAutoProbeScheduler() {
+        if (autoProbeScheduler != null && !autoProbeScheduler.isShutdown()) {
+            return;
+        }
+        autoProbeScheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "SingDeck-AutoProbe");
+            thread.setDaemon(true);
+            return thread;
+        });
+        autoProbeScheduler.scheduleWithFixedDelay(
+                this::runAutoProbeTick,
+                10,
+                30,
+                TimeUnit.SECONDS
+        );
+    }
+
+    private synchronized void stopAutoProbeScheduler() {
+        ScheduledExecutorService scheduler = autoProbeScheduler;
+        autoProbeScheduler = null;
+        if (scheduler != null) {
+            scheduler.shutdownNow();
+        }
+    }
+
+    private void runAutoProbeTick() {
+        if (autoProbePaused || closing || !STATE_RUNNING.equals(serviceState)) {
+            return;
+        }
+        String profileId = runningProfileId;
+        if (profileId == null || profileId.isEmpty()) {
+            return;
+        }
+        try {
+            InspectorRepository repository = InspectorRepository.getInstance(this);
+            CoreRuntimeSnapshot snapshot = getRuntimeSnapshot();
+            Set<String> nestedGroups = new LinkedHashSet<>();
+            for (io.singdeck.app.model.OutboundGroup group : snapshot.groups) {
+                nestedGroups.add(group.name);
+            }
+            Map<String, String> owners = repository.getSourceOwners(profileId);
+            for (io.singdeck.app.model.OutboundGroup group : snapshot.groups) {
+                if (autoProbePaused || Thread.currentThread().isInterrupted()) {
+                    return;
+                }
+                MobileBootstrap.GroupSettings settings = repository.getGroupSettings(
+                        profileId,
+                        group.name
+                );
+                if (!settings.autoProbe) {
+                    continue;
+                }
+                long now = System.currentTimeMillis();
+                if (!repository.tryClaimAutoProbe(
+                        profileId,
+                        group.name,
+                        now,
+                        Math.max(60, settings.probeIntervalSec) * 1_000L
+                )) {
+                    continue;
+                }
+                List<String> eligible = new ArrayList<>();
+                for (String node : group.all) {
+                    if (NodeEligibilityPolicy.isAllowed(
+                            settings,
+                            node,
+                            owners,
+                            nestedGroups.contains(node)
+                    )) {
+                        eligible.add(node);
+                    }
+                }
+                for (String node : eligible) {
+                    if (autoProbePaused || Thread.currentThread().isInterrupted()) {
+                        return;
+                    }
+                    try {
+                        NativeInspectionEngine.inspectNode(
+                                getApplicationContext(),
+                                profileId,
+                                group.name,
+                                node,
+                                false,
+                                false
+                        );
+                    } catch (Exception error) {
+                        Log.w(TAG, "Scheduled node probe failed for " + group.name);
+                    }
+                }
+                if (settings.autoSwitch
+                        && "selector".equalsIgnoreCase(group.type)
+                        && !eligible.isEmpty()) {
+                    List<ProbeScoringEngine.NodeScore> scores = repository.getScores(
+                            profileId,
+                            group.name,
+                            eligible,
+                            System.currentTimeMillis()
+                    );
+                    for (ProbeScoringEngine.NodeScore score : scores) {
+                        if (score.success) {
+                            Libbox.newStandaloneCommandClient().selectOutbound(group.name, score.node);
+                            recordSelectedOutbound(group.name, score.node);
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable error) {
+            Log.w(TAG, "Scheduled Inspector tick failed");
+        }
+    }
+
     private static final class StartRequest {
         private final String profileId;
         private final String configOverride;
         private final String splitMode;
         private final List<String> packages;
         private final long operationId;
+        private final boolean configAlreadyEnhanced;
 
         private StartRequest(
                 String profileId,
                 String configOverride,
                 String splitMode,
                 List<String> packages,
-                long operationId
+                long operationId,
+                boolean configAlreadyEnhanced
         ) {
             this.profileId = profileId == null ? "" : profileId;
             this.configOverride = configOverride;
             this.splitMode = splitMode == null ? "global" : splitMode;
             this.packages = packages == null ? Collections.emptyList() : new ArrayList<>(packages);
             this.operationId = operationId;
+            this.configAlreadyEnhanced = configAlreadyEnhanced;
         }
     }
 
@@ -1031,6 +1289,9 @@ public class SingDeckVpnService extends VpnService
                 while (iterator != null && iterator.hasNext()) {
                     Connection connection = iterator.next();
                     if (connection == null) {
+                        continue;
+                    }
+                    if (RuntimeConfigOverlay.isHiddenTag(connection.getInbound())) {
                         continue;
                     }
                     String host;
@@ -1080,17 +1341,22 @@ public class SingDeckVpnService extends VpnService
         public void writeGroups(OutboundGroupIterator groups) {
             List<io.singdeck.app.model.OutboundGroup> groupSnapshot = new ArrayList<>();
             Map<String, NodeItem> nodeSnapshot = new LinkedHashMap<>();
-            String firstSelected = "";
             while (groups != null && groups.hasNext()) {
                 OutboundGroup group = groups.next();
                 if (group == null) {
+                    continue;
+                }
+                if (RuntimeConfigOverlay.isHiddenTag(group.getTag())) {
                     continue;
                 }
                 List<String> members = new ArrayList<>();
                 OutboundGroupItemIterator items = group.getItems();
                 while (items != null && items.hasNext()) {
                     OutboundGroupItem item = items.next();
-                    if (item == null || item.getTag() == null || item.getTag().isEmpty()) {
+                    if (item == null
+                            || item.getTag() == null
+                            || item.getTag().isEmpty()
+                            || RuntimeConfigOverlay.isHiddenTag(item.getTag())) {
                         continue;
                     }
                     members.add(item.getTag());
@@ -1103,15 +1369,22 @@ public class SingDeckVpnService extends VpnService
                         selected,
                         members
                 ));
-                if (firstSelected.isEmpty() && group.getSelectable() && !selected.isEmpty()) {
-                    firstSelected = selected;
-                }
-            }
-            if (!firstSelected.isEmpty()) {
-                activeOutbound = firstSelected;
             }
             synchronized (RUNTIME_SNAPSHOT_LOCK) {
-                runtimeGroups = groupSnapshot;
+                List<io.singdeck.app.model.OutboundGroup> reconciledGroups =
+                        GROUP_SELECTION_RECONCILER.reconcileStream(
+                                groupSnapshot,
+                                System.currentTimeMillis()
+                        );
+                for (io.singdeck.app.model.OutboundGroup group : reconciledGroups) {
+                    if ("selector".equalsIgnoreCase(group.type)
+                            && group.now != null
+                            && !group.now.isEmpty()) {
+                        activeOutbound = group.now;
+                        break;
+                    }
+                }
+                runtimeGroups = reconciledGroups;
                 runtimeNodes = nodeSnapshot;
                 runtimeUpdatedAt = System.currentTimeMillis();
             }
@@ -1125,7 +1398,10 @@ public class SingDeckVpnService extends VpnService
             Map<String, NodeItem> outboundSnapshot = new LinkedHashMap<>();
             while (outbounds != null && outbounds.hasNext()) {
                 OutboundGroupItem item = outbounds.next();
-                if (item != null && item.getTag() != null && !item.getTag().isEmpty()) {
+                if (item != null
+                        && item.getTag() != null
+                        && !item.getTag().isEmpty()
+                        && !RuntimeConfigOverlay.isHiddenTag(item.getTag())) {
                     outboundSnapshot.put(item.getTag(), nodeFromRuntime(item));
                 }
             }

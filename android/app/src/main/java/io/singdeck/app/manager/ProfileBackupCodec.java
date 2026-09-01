@@ -7,15 +7,18 @@ import com.google.gson.reflect.TypeToken;
 
 import java.lang.reflect.Type;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
+import io.singdeck.app.model.MobileBootstrap;
 import io.singdeck.app.model.Profile;
 
 /**
  * Pure-Java versioned backup codec shared by Android persistence and JVM tests.
  */
 public final class ProfileBackupCodec {
-    public static final int CURRENT_VERSION = 1;
+    public static final int CURRENT_VERSION = 2;
     private static final Gson GSON = new Gson();
 
     private ProfileBackupCodec() {
@@ -25,13 +28,25 @@ public final class ProfileBackupCodec {
         public int version;
         public String activeProfileId;
         public List<Profile> profiles = new ArrayList<>();
+        public Map<String, MobileBootstrap> inspectorProfiles = new LinkedHashMap<>();
     }
 
     public static String encode(String activeProfileId, List<Profile> profiles) {
+        return encode(activeProfileId, profiles, null);
+    }
+
+    public static String encode(
+            String activeProfileId,
+            List<Profile> profiles,
+            Map<String, MobileBootstrap> inspectorProfiles
+    ) {
         DecodedBackup backup = new DecodedBackup();
         backup.version = CURRENT_VERSION;
         backup.activeProfileId = activeProfileId;
         backup.profiles = profiles == null ? new ArrayList<>() : new ArrayList<>(profiles);
+        backup.inspectorProfiles = inspectorProfiles == null
+                ? new LinkedHashMap<>()
+                : new LinkedHashMap<>(inspectorProfiles);
         return GSON.toJson(backup);
     }
 
@@ -62,11 +77,14 @@ public final class ProfileBackupCodec {
                 throw new IllegalArgumentException("备份根节点必须是 JSON 对象");
             }
             DecodedBackup backup = GSON.fromJson(root, DecodedBackup.class);
-            if (backup == null || backup.version != CURRENT_VERSION) {
+            if (backup == null || (backup.version != 1 && backup.version != CURRENT_VERSION)) {
                 throw new IllegalArgumentException("不支持的备份版本");
             }
             if (backup.profiles == null) {
                 backup.profiles = new ArrayList<>();
+            }
+            if (backup.inspectorProfiles == null) {
+                backup.inspectorProfiles = new LinkedHashMap<>();
             }
             return backup;
         } catch (IllegalArgumentException error) {

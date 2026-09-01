@@ -9,6 +9,7 @@ on:
     paths:
       - 'android/**'
       - 'scripts/build-android-libbox.sh'
+      - 'scripts/patches/sing-box-v1.14.0-libbox-inspector.patch'
       - 'scripts/check-android.sh'
       - 'src/core/androidLibboxIntegration.test.ts'
       - 'package.json'
@@ -18,6 +19,7 @@ on:
     paths:
       - 'android/**'
       - 'scripts/build-android-libbox.sh'
+      - 'scripts/patches/sing-box-v1.14.0-libbox-inspector.patch'
       - 'scripts/check-android.sh'
       - 'src/core/androidLibboxIntegration.test.ts'
       - 'package.json'
@@ -78,7 +80,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: android/app/libs/libbox.aar
-          key: libbox-android-arm64-${{ hashFiles('scripts/build-android-libbox.sh', 'android/app/build.gradle') }}
+          key: libbox-android-arm64-${{ hashFiles('scripts/build-android-libbox.sh', 'scripts/patches/sing-box-v1.14.0-libbox-inspector.patch', 'android/app/build.gradle') }}
 
       - name: Build pinned libbox
         if: steps.libbox-cache.outputs.cache-hit != 'true'

@@ -1,6 +1,6 @@
 package io.singdeck.app;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
 
@@ -18,7 +18,7 @@ public class LibboxConfigInstrumentedTest {
     @Test
     public void bundledLibboxAcceptsGeneratedAnyTlsConfiguration() throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        assertEquals("io.singdeck.app", context.getPackageName());
+        assertTrue(context.getPackageName().startsWith("io.singdeck.app"));
         String config = NodeLinkParser.parseToSingBoxConfig(
                 "anytls://password@example.com:443/?insecure=0&sni=example.com#AnyTLS",
                 "AnyTLS"

@@ -3,75 +3,125 @@
     android:id="@+id/card_node"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_margin="4dp"
+    android:layout_margin="5dp"
     android:orientation="vertical"
-    android:padding="10dp"
+    android:paddingStart="12dp"
+    android:paddingEnd="12dp"
+    android:paddingTop="12dp"
+    android:paddingBottom="12dp"
     android:background="@drawable/bg_card_dark"
-    android:minHeight="72dp"
     android:clickable="true"
     android:focusable="true">
 
+    <!-- Top Row: Status Indicator (Left) + Latency Pill (Right) -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:gravity="center_vertical">
 
-        <RadioButton
-            android:id="@+id/rb_selected"
-            android:layout_width="20dp"
-            android:layout_height="20dp"
-            android:clickable="false"
-            android:focusable="false" />
+        <View
+            android:id="@+id/view_status_dot"
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:background="@drawable/bg_dot_unselected" />
 
-        <LinearLayout
+        <TextView
+            android:id="@+id/tv_selection_label"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:layout_marginStart="6dp"
-            android:orientation="vertical">
+            android:text="已生效"
+            android:textColor="@color/status_cyan"
+            android:textSize="10sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
 
-            <TextView
-                android:id="@+id/tv_node_name"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="香港 01 - IEPL"
-                android:textColor="@color/text_primary"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                android:ellipsize="end"
-                android:maxLines="1" />
+        <Space
+            android:id="@+id/space_spacer"
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
 
-            <TextView
-                android:id="@+id/tv_node_protocol"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="VLESS"
-                android:textColor="@color/text_muted"
-                android:textSize="11sp"
-                android:paddingStart="4dp"
-                android:paddingEnd="4dp"
-                android:background="@drawable/bg_badge_idle" />
-        </LinearLayout>
-
+        <!-- Latency pill with clear touch target and rounded corners -->
         <TextView
             android:id="@+id/tv_node_delay"
             android:layout_width="wrap_content"
-            android:layout_height="48dp"
-            android:minWidth="48dp"
-            android:layout_marginStart="4dp"
+            android:layout_height="26dp"
+            android:minWidth="56dp"
             android:text="45ms"
             android:textColor="@color/status_green"
             android:textSize="11sp"
+            android:textStyle="bold"
+            android:gravity="center"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:background="@drawable/bg_badge_running"
+            android:clickable="true"
+            android:focusable="true" />
+    </LinearLayout>
+
+    <!-- Middle: Full-width Node Name (High contrast pure white, wraps to 2 lines, never truncated) -->
+    <TextView
+        android:id="@+id/tv_node_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:layout_marginBottom="8dp"
+        android:text="美国 01 - BGP 专线"
+        android:textColor="@color/text_primary"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        android:lineSpacingExtra="2dp"
+        android:maxLines="2"
+        android:ellipsize="end" />
+
+    <!-- Bottom Row: Protocol Badge & Source -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/tv_node_protocol"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="VLESS"
+            android:textColor="@color/text_secondary"
+            android:textSize="9sp"
             android:textStyle="bold"
             android:paddingStart="6dp"
             android:paddingEnd="6dp"
             android:paddingTop="2dp"
             android:paddingBottom="2dp"
-            android:background="@drawable/bg_badge_running"
-            android:gravity="center"
-            android:clickable="true"
-            android:focusable="true" />
+            android:background="@drawable/bg_badge_idle" />
+
+        <TextView
+            android:id="@+id/tv_node_source"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:text="SUB"
+            android:textColor="@color/text_primary"
+            android:textSize="9sp"
+            android:textStyle="bold"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/tv_node_score"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:text="95"
+            android:textColor="@color/status_cyan"
+            android:textSize="9sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
     </LinearLayout>
 </LinearLayout>

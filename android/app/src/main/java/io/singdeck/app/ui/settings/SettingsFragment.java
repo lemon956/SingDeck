@@ -46,6 +46,7 @@ import io.singdeck.app.R;
 import io.singdeck.app.SingDeckVpnService;
 import io.singdeck.app.manager.ProfileManager;
 import io.singdeck.app.manager.QrCodeHelper;
+import io.singdeck.app.manager.MobileImportLink;
 import io.singdeck.app.manager.SplitTunnelManager;
 import io.singdeck.app.model.Profile;
 
@@ -280,9 +281,10 @@ public class SettingsFragment extends Fragment {
 
     private void launchCameraScanner() {
         ScanOptions options = new ScanOptions();
-        options.setPrompt("请将订阅或节点二维码对准取景框");
+        options.setCaptureActivity(io.singdeck.app.ui.scanner.PortraitCaptureActivity.class);
+        options.setOrientationLocked(true);
+        options.setPrompt("请将订阅或节点二维码对准正方形取景框");
         options.setBeepEnabled(true);
-        options.setOrientationLocked(false);
         options.setBarcodeImageEnabled(false);
         barcodeLauncher.launch(options);
     }
@@ -313,7 +315,28 @@ public class SettingsFragment extends Fragment {
         String trimmed = raw.trim();
         String name = sourceName + "-" + (System.currentTimeMillis() % 10000);
         setImportButtonsEnabled(false);
+        if (MobileImportLink.isRemoteProfileLink(trimmed)) {
+            final MobileImportLink link;
+            try {
+                link = MobileImportLink.parse(trimmed);
+            } catch (IllegalArgumentException error) {
+                setImportButtonsEnabled(true);
+                toast(error.getMessage(), true);
+                return;
+            }
+            importRemoteProfile(link);
+            return;
+        }
         if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            if (trimmed.contains("singdeck_settings=1")) {
+                try {
+                    importRemoteProfile(MobileImportLink.fromConfigUrl(trimmed, name));
+                } catch (IllegalArgumentException error) {
+                    setImportButtonsEnabled(true);
+                    toast(error.getMessage(), true);
+                }
+                return;
+            }
             profileManager.fetchAndAddSubscriptionUrl(
                     trimmed,
                     name,
@@ -352,6 +375,38 @@ public class SettingsFragment extends Fragment {
                 });
             } catch (RuntimeException error) {
                 postImportError(error);
+            }
+        });
+    }
+
+    private void importRemoteProfile(MobileImportLink link) {
+        profileManager.importRemoteProfile(link, new ProfileManager.OnRemoteImportCallback() {
+            @Override
+            public void onSuccess(ProfileManager.RemoteImportResult result) {
+                if (!isAdded() || !viewActive) {
+                    return;
+                }
+                setImportButtonsEnabled(true);
+                if (result.warning == null) {
+                    toast(
+                            result.bootstrap == null
+                                    ? "Config 导入并激活（未自动连接）"
+                                    : "Config 与设置导入并激活（未自动连接）",
+                            false
+                    );
+                } else {
+                    toast("Config 已导入；" + result.warning, true);
+                }
+                offerReconnectIfRunning(result.profile.id, "导入远程配置");
+            }
+
+            @Override
+            public void onError(String message) {
+                if (!isAdded() || !viewActive) {
+                    return;
+                }
+                setImportButtonsEnabled(true);
+                toast(message, true);
             }
         });
     }

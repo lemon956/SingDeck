@@ -27,6 +27,7 @@ use chrono::{DateTime, Local, TimeZone};
 use reqwest::Client;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -65,6 +66,7 @@ const SELECTOR_RESTORE_ATTEMPTS: usize = 3;
 const SELECTOR_RESTORE_RETRY_MS: u64 = 100;
 const NODE_RISK_PROVIDER_TIMEOUT_MS: u64 = 8_000;
 const DATABASE_SLOW_OPERATION_MS: u128 = 250;
+const MOBILE_BOOTSTRAP_SCHEMA: &str = "singdeck.mobile-bootstrap.v1";
 
 static SELECTOR_SWEEP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -517,6 +519,36 @@ struct NodeSourceView {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct MobileBootstrapResponse {
+    schema: &'static str,
+    config_sha256: String,
+    testing_settings: TestingSettings,
+    groups: Vec<MobileBootstrapGroup>,
+    node_sources: Vec<MobileBootstrapNodeSource>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileBootstrapGroup {
+    name: String,
+    kind: String,
+    config: GroupConfig,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileBootstrapNodeSource {
+    name: String,
+    url: Option<String>,
+    associate: bool,
+    configured_nodes: Vec<String>,
+    linked_nodes: Vec<String>,
+    last_synced_at: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ActiveProbeView {
     group: String,
     started_at: String,
@@ -796,6 +828,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/groups/:group/apply", post(apply_group))
         .route("/api/v1/config", get(read_config))
         .route("/api/v1/config/raw", get(read_config_raw))
+        .route("/api/v1/mobile/bootstrap", get(mobile_bootstrap))
         .route(
             "/api/v1/config/source",
             get(config_source).put(save_config_source),
@@ -1157,13 +1190,17 @@ async fn save_controller(
 async fn testing_settings(
     State(state): State<AppState>,
 ) -> Result<Json<TestingSettings>, AppError> {
-    Ok(Json(TestingSettings {
-        default_test_url: load_default_test_url(&state)?,
-        delay_test_timeout_ms: load_delay_test_timeout_ms(&state)?,
-        min_probe_interval_sec: load_min_probe_interval_sec(&state)?,
-        probe_concurrency: load_probe_concurrency(&state)?,
-        gemini_location_group: load_gemini_location_group(&state)?,
-    }))
+    Ok(Json(load_testing_settings(&state)?))
+}
+
+fn load_testing_settings(state: &AppState) -> Result<TestingSettings> {
+    Ok(TestingSettings {
+        default_test_url: load_default_test_url(state)?,
+        delay_test_timeout_ms: load_delay_test_timeout_ms(state)?,
+        min_probe_interval_sec: load_min_probe_interval_sec(state)?,
+        probe_concurrency: load_probe_concurrency(state)?,
+        gemini_location_group: load_gemini_location_group(state)?,
+    })
 }
 
 async fn save_testing_settings(
@@ -2546,6 +2583,111 @@ async fn read_config_raw(State(state): State<AppState>) -> Result<Response, AppE
         config.content,
     )
         .into_response())
+}
+
+async fn mobile_bootstrap(
+    State(state): State<AppState>,
+) -> Result<Json<MobileBootstrapResponse>, AppError> {
+    let Json(config) = read_config(State(state.clone())).await?;
+    if let Some(error) = config.error {
+        return Err(AppError::bad_request(error));
+    }
+    if config.content.is_empty() {
+        return Err(AppError::bad_request("config content is empty"));
+    }
+
+    let groups = mobile_bootstrap_groups(&state, &config.content)?;
+    let node_sources = match config.source.as_deref() {
+        Some(path) => mobile_bootstrap_node_sources(&state, Path::new(path))?,
+        None => Vec::new(),
+    };
+    let config_sha256 = format!("{:x}", Sha256::digest(config.content.as_bytes()));
+
+    Ok(Json(MobileBootstrapResponse {
+        schema: MOBILE_BOOTSTRAP_SCHEMA,
+        config_sha256,
+        testing_settings: load_testing_settings(&state)?,
+        groups,
+        node_sources,
+    }))
+}
+
+fn mobile_bootstrap_groups(
+    state: &AppState,
+    config_content: &str,
+) -> Result<Vec<MobileBootstrapGroup>> {
+    let config: serde_json::Value = serde_json::from_str(&normalize_jsonc(config_content))
+        .context("parse configured sing-box config for mobile bootstrap")?;
+    let outbounds = config
+        .get("outbounds")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("configured sing-box config has no outbounds array"))?;
+    let mut groups = Vec::new();
+    for outbound in outbounds {
+        let kind = outbound
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let normalized_kind = kind
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if !matches!(
+            normalized_kind.as_str(),
+            "selector" | "urltest" | "fallback"
+        ) {
+            continue;
+        }
+        let name = outbound
+            .get("tag")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if name.is_empty() {
+            continue;
+        }
+        groups.push(MobileBootstrapGroup {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            config: load_group_config(state, name)?,
+        });
+    }
+    Ok(groups)
+}
+
+fn mobile_bootstrap_node_sources(
+    state: &AppState,
+    config_path: &Path,
+) -> Result<Vec<MobileBootstrapNodeSource>> {
+    let configured = read_node_source_config_for_config_path(config_path)?;
+    let persisted = load_node_sources_response(state)?
+        .sources
+        .into_iter()
+        .map(|source| (source.name.clone(), source))
+        .collect::<HashMap<_, _>>();
+
+    Ok(configured
+        .sources
+        .into_iter()
+        .filter_map(|source| {
+            let name = source.name.trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let saved = persisted.get(&name);
+            Some(MobileBootstrapNodeSource {
+                name,
+                url: (!source.url.trim().is_empty()).then(|| source.url.trim().to_string()),
+                associate: source.associate,
+                configured_nodes: source.nodes,
+                linked_nodes: saved.map(|item| item.nodes.clone()).unwrap_or_default(),
+                last_synced_at: saved.and_then(|item| item.last_synced_at.clone()),
+                last_error: saved.and_then(|item| item.last_error.clone()),
+            })
+        })
+        .collect())
 }
 
 async fn read_traffic(
@@ -8230,6 +8372,72 @@ mod tests {
 
         let Json(source) = config_source(State(state)).await.unwrap();
         assert_eq!(source.path, "/etc/sing-box/config.json");
+    }
+
+    #[tokio::test]
+    async fn mobile_bootstrap_exports_config_bound_group_and_source_settings() {
+        let state = test_app_state();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.jsonc");
+        let sidecar_path = temp_dir.path().join("singdeck.jsonc");
+        let config_content = r#"{
+          // Keep the raw bytes stable for the mobile hash.
+          "outbounds": [
+            { "type": "selector", "tag": "Proxy", "outbounds": ["Reality-1"] },
+            { "type": "anytls", "tag": "Reality-1", "server": "example.com", "server_port": 443 },
+          ],
+        }"#;
+        fs::write(&config_path, config_content).unwrap();
+        fs::write(
+            &sidecar_path,
+            r#"{
+              "nodeSources": [
+                { "name": "Self", "associate": true, "nodes": ["Reality-1"] }
+              ]
+            }"#,
+        )
+        .unwrap();
+        save_string_kv(&state, "config_path", config_path.to_str().unwrap()).unwrap();
+
+        let mut group_config = GroupConfig::default();
+        group_config.mode = ScoreMode::Delay;
+        group_config.auto_probe = false;
+        group_config.allowed_node_sources = vec!["Self".to_string()];
+        save_group_config_row(&state, "Proxy", &group_config).unwrap();
+        save_node_source_links(
+            &state,
+            &NodeSourceConfigEntry {
+                name: "Self".to_string(),
+                url: String::new(),
+                associate: true,
+                nodes: vec!["Reality-1".to_string()],
+            },
+            &["Reality-1".to_string()],
+            None,
+        )
+        .unwrap();
+
+        let Json(response) = mobile_bootstrap(State(state)).await.unwrap();
+        assert_eq!(response.schema, MOBILE_BOOTSTRAP_SCHEMA);
+        assert_eq!(
+            response.config_sha256,
+            format!("{:x}", Sha256::digest(config_content.as_bytes()))
+        );
+        assert_eq!(response.groups.len(), 1);
+        assert_eq!(response.groups[0].name, "Proxy");
+        assert_eq!(response.groups[0].kind, "selector");
+        assert_eq!(response.groups[0].config.mode, ScoreMode::Delay);
+        assert_eq!(response.groups[0].config.allowed_node_sources, vec!["Self"]);
+        assert_eq!(response.node_sources.len(), 1);
+        assert_eq!(response.node_sources[0].name, "Self");
+        assert_eq!(response.node_sources[0].url, None);
+        assert_eq!(response.node_sources[0].configured_nodes, vec!["Reality-1"]);
+        assert_eq!(response.node_sources[0].linked_nodes, vec!["Reality-1"]);
+        assert!(response.node_sources[0].last_synced_at.is_some());
+
+        let json = serde_json::to_value(response).unwrap();
+        assert!(json.get("browserProfile").is_none());
+        assert!(json.get("secret").is_none());
     }
 
     #[test]

@@ -10,10 +10,12 @@ describe('Android libbox integration contract', () => {
   it('resolves a profile ID and hands a validated config and fresh TUN to libbox', () => {
     expect(serviceSource).toContain('profileManager.getProfileContent(profileId)');
     expect(serviceSource).toContain('SingBoxConfigValidator.validate(this, config);');
-    expect(serviceSource).toContain('commandServer.startOrReloadService(config, overrideOptions);');
+    expect(serviceSource).toContain('commandServer.startOrReloadService(runtimeConfig, overrideOptions);');
     expect(serviceSource).toContain('tunGeneration <= previousTunGeneration');
     expect(serviceSource).toContain('return newTun.getFd();');
     expect(serviceSource).toContain('Libbox.newStandaloneCommandClient().selectOutbound(group, outbound);');
+    expect(serviceSource).toContain('只有 Selector 策略组支持手动切换');
+    expect(serviceSource).toContain('runtimeGroup.all.contains(outbound)');
     expect(serviceSource).not.toContain('EXTRA_CONFIG');
     expect(serviceSource).not.toContain('PREF_CONFIG');
   });
@@ -44,5 +46,66 @@ describe('Android libbox integration contract', () => {
     expect(buildScript).toContain('-target android -platform android/arm64');
     expect(gradle).toContain("abiFilters 'arm64-v8a'");
     expect(gradle).toContain("implementation files('libs/libbox.aar')");
+  });
+
+  it('uses a strict, authenticated local inspector path without leaking hidden runtime tags', () => {
+    const buildScript = readFileSync('scripts/build-android-libbox.sh', 'utf8');
+    const patch = readFileSync(
+      'scripts/patches/sing-box-v1.14.0-libbox-inspector.patch',
+      'utf8'
+    );
+    const overlay = readFileSync(
+      'android/app/src/main/java/io/singdeck/app/manager/RuntimeConfigOverlay.java',
+      'utf8'
+    );
+
+    expect(patch).toContain('UseSocks5(port int32, username string, password string)');
+    expect(patch).toContain('return nil, err');
+    expect(patch).toContain('SetTimeout(timeoutMillis int64)');
+    expect(patch).toContain('ExecuteRaw() (HTTPResponse, error)');
+    expect(buildScript).toContain('git -C "$source_dir" apply --check "$inspector_patch"');
+    expect(buildScript).toContain('gofmt -d experimental/libbox/http.go');
+    expect(overlay).toContain('"listen", "127.0.0.1"');
+    expect(overlay).toContain('INSPECTOR_OUTBOUND');
+    expect(serviceSource).toContain('RuntimeConfigOverlay.isHiddenTag(group.getTag())');
+    expect(serviceSource).toContain('continuing without it');
+  });
+
+  it('implements the Proxies Inspector as native Android UI and fail-closed requests', () => {
+    const inspectorLayout = readFileSync(
+      'android/app/src/main/res/layout/panel_proxies_inspector.xml',
+      'utf8'
+    );
+    const strictClient = readFileSync(
+      'android/app/src/main/java/io/singdeck/app/manager/StrictOutboundHttpClient.java',
+      'utf8'
+    );
+    const inspectionEngine = readFileSync(
+      'android/app/src/main/java/io/singdeck/app/manager/NativeInspectionEngine.java',
+      'utf8'
+    );
+
+    expect(inspectorLayout).toContain('@+id/switch_source_restriction');
+    expect(inspectorLayout).toContain('@+id/btn_inspector_risk');
+    expect(inspectorLayout).toContain('@+id/tv_inspector_result');
+    expect(inspectorLayout).not.toContain('<WebView');
+    expect(strictClient).toContain('client.useSocks5(');
+    expect(strictClient).not.toContain('HttpURLConnection');
+    expect(inspectionEngine).toContain('PROBE_LOCK');
+    expect(inspectionEngine).toContain('NodeEligibilityPolicy.isAllowed');
+  });
+
+  it('runs auto probes only while the VPN runtime is active and persists claims', () => {
+    const repository = readFileSync(
+      'android/app/src/main/java/io/singdeck/app/manager/InspectorRepository.java',
+      'utf8'
+    );
+
+    expect(serviceSource).toContain('scheduleWithFixedDelay');
+    expect(serviceSource).toContain('stopAutoProbeScheduler');
+    expect(serviceSource).toContain('autoProbePaused = true');
+    expect(serviceSource).toContain('tryClaimAutoProbe(');
+    expect(repository).toContain('CREATE TABLE scheduler_state');
+    expect(repository).toContain('SQLiteDatabase.CONFLICT_REPLACE');
   });
 });

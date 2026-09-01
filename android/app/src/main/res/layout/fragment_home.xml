@@ -12,61 +12,78 @@
         android:orientation="vertical"
         android:padding="16dp">
 
-        <!-- Master VPN Power Card -->
+        <!-- Master VPN Hero Control Card -->
         <LinearLayout
             android:id="@+id/card_vpn_master"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:gravity="center"
-            android:padding="20dp"
+            android:paddingStart="18dp"
+            android:paddingEnd="18dp"
+            android:paddingTop="24dp"
+            android:paddingBottom="20dp"
             android:background="@drawable/bg_card_dark">
 
+            <!-- Circular Interactive Power Switch -->
             <FrameLayout
                 android:id="@+id/btn_power"
-                android:layout_width="100dp"
-                android:layout_height="100dp"
+                android:layout_width="104dp"
+                android:layout_height="104dp"
                 android:background="@drawable/bg_circle_power"
-                android:contentDescription="连接或断开 SingDeck VPN"
+                android:contentDescription="连接或断开 SingDeck 代理服务"
                 android:clickable="true"
                 android:focusable="true">
 
                 <ImageView
                     android:id="@+id/iv_power_icon"
-                    android:layout_width="40dp"
-                    android:layout_height="40dp"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
                     android:layout_gravity="center"
                     android:src="@android:drawable/ic_lock_power_off"
                     android:contentDescription="@null"
                     app:tint="@color/text_muted" />
             </FrameLayout>
 
+            <!-- VPN State Text -->
             <TextView
                 android:id="@+id/tv_vpn_state"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
+                android:layout_marginTop="16dp"
                 android:text="点击开启代理加速"
                 android:textColor="@color/text_primary"
-                android:textSize="15sp"
-                android:textStyle="bold" />
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.01" />
 
+            <!-- Active Profile / Node Pill -->
             <TextView
                 android:id="@+id/tv_active_node_info"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:text="未连接"
-                android:textColor="@color/text_muted"
-                android:textSize="12sp" />
+                android:layout_marginTop="6dp"
+                android:text="未连接 · 请先选择配置"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp"
+                android:background="@drawable/bg_badge_idle"
+                android:ellipsize="middle"
+                android:maxLines="1" />
 
-            <!-- Speeds & Timer Row -->
+            <!-- Real-time Speed & Duration Dashboard Row -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="20dp"
                 android:orientation="horizontal"
-                android:gravity="center">
+                android:gravity="center"
+                android:padding="12dp"
+                android:background="@drawable/bg_input_field">
 
                 <LinearLayout
                     android:layout_width="0dp"
@@ -78,23 +95,24 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="↓ 下载"
-                        android:textColor="@color/text_muted"
+                        android:text="↓ 实时下行"
+                        android:textColor="@color/text_secondary"
                         android:textSize="11sp" />
 
                     <TextView
                         android:id="@+id/tv_download_speed"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="0.0 B/s"
+                        android:layout_marginTop="2dp"
+                        android:text="0.0 KB/s"
                         android:textColor="@color/status_cyan"
-                        android:textSize="13sp"
+                        android:textSize="14sp"
                         android:textStyle="bold" />
                 </LinearLayout>
 
                 <View
                     android:layout_width="1dp"
-                    android:layout_height="24dp"
+                    android:layout_height="28dp"
                     android:background="@color/border_subtle" />
 
                 <LinearLayout
@@ -107,23 +125,24 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="↑ 上传"
-                        android:textColor="@color/text_muted"
+                        android:text="↑ 实时上行"
+                        android:textColor="@color/text_secondary"
                         android:textSize="11sp" />
 
                     <TextView
                         android:id="@+id/tv_upload_speed"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="0.0 B/s"
+                        android:layout_marginTop="2dp"
+                        android:text="0.0 KB/s"
                         android:textColor="@color/status_green"
-                        android:textSize="13sp"
+                        android:textSize="14sp"
                         android:textStyle="bold" />
                 </LinearLayout>
 
                 <View
                     android:layout_width="1dp"
-                    android:layout_height="24dp"
+                    android:layout_height="28dp"
                     android:background="@color/border_subtle" />
 
                 <LinearLayout
@@ -136,60 +155,77 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="⏱ 时长"
-                        android:textColor="@color/text_muted"
+                        android:text="⏱ 运行时间"
+                        android:textColor="@color/text_secondary"
                         android:textSize="11sp" />
 
                     <TextView
                         android:id="@+id/tv_duration"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
                         android:text="00:00:00"
                         android:textColor="@color/text_primary"
-                        android:textSize="13sp"
+                        android:textSize="14sp"
                         android:textStyle="bold" />
                 </LinearLayout>
             </LinearLayout>
 
-            <!-- Real-time Throughput Waveform Chart -->
+            <!-- Real-time Throughput Waveform Chart (Visible only when proxy is active) -->
             <io.singdeck.app.ui.widget.SpeedWaveformView
                 android:id="@+id/waveform_speed"
                 android:layout_width="match_parent"
-                android:layout_height="64dp"
-                android:layout_marginTop="16dp" />
+                android:layout_height="72dp"
+                android:layout_marginTop="16dp"
+                android:visibility="gone" />
         </LinearLayout>
 
-        <!-- Sing-box Outbound Strategy Groups Section -->
+        <!-- Sing-box Outbound Strategy Groups Section Header -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
+            android:layout_marginTop="22dp"
             android:orientation="horizontal"
             android:gravity="center_vertical">
 
-            <TextView
+            <LinearLayout
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Sing-box 出站策略组 (Outbounds)"
-                android:textColor="@color/text_secondary"
-                android:textSize="13sp"
-                android:textStyle="bold" />
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="出站策略组 (Outbound Groups)"
+                    android:textColor="@color/text_primary"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="1dp"
+                    android:text="点击策略卡片可快速切换对应候选节点"
+                    android:textColor="@color/text_muted"
+                    android:textSize="11sp" />
+            </LinearLayout>
 
             <TextView
                 android:id="@+id/btn_view_all_nodes"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="全部节点 ➔"
+                android:text="策略管理 ➔"
                 android:textColor="@color/status_cyan"
                 android:textSize="12sp"
                 android:textStyle="bold"
-                android:padding="12dp"
-                android:minHeight="48dp"
-                android:gravity="center"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp"
+                android:background="@drawable/bg_badge_engine"
                 android:clickable="true"
-                android:focusable="true"
-                android:contentDescription="查看全部代理节点" />
+                android:focusable="true" />
         </LinearLayout>
 
         <!-- RecyclerView for Outbound Strategy Groups -->
@@ -197,8 +233,35 @@
             android:id="@+id/rv_strategy_groups"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="10dp"
             android:nestedScrollingEnabled="false" />
+
+        <!-- Bottom Capability & Engine Declaration -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:layout_marginBottom="16dp"
+            android:orientation="vertical"
+            android:gravity="center">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Powered by sing-box 1.14.0"
+                android:textColor="@color/text_muted"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.04" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="Universal Tun2Socket Protocol Routing Core"
+                android:textColor="@color/text_hint"
+                android:textSize="10sp" />
+        </LinearLayout>
 
     </LinearLayout>
 </androidx.core.widget.NestedScrollView>

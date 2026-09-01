@@ -2,13 +2,14 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginBottom="8dp"
+    android:layout_marginBottom="10dp"
     android:orientation="vertical"
-    android:padding="12dp"
+    android:padding="14dp"
     android:background="@drawable/bg_card_dark"
     android:clickable="true"
     android:focusable="true">
 
+    <!-- Top: Group Tag, Type, Node count -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -17,19 +18,35 @@
 
         <TextView
             android:id="@+id/tv_group_name"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
             android:text="PROXY"
             android:textColor="@color/text_primary"
             android:textSize="14sp"
-            android:textStyle="bold" />
+            android:textStyle="bold"
+            android:ellipsize="end"
+            android:maxLines="1" />
 
         <TextView
             android:id="@+id/tv_group_type"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
             android:text="Selector"
+            android:textColor="@color/status_cyan"
+            android:textSize="10sp"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:background="@drawable/bg_badge_engine" />
+
+        <TextView
+            android:id="@+id/tv_group_node_count"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="12 节点"
             android:textColor="@color/text_muted"
             android:textSize="11sp"
             android:paddingStart="6dp"
@@ -37,25 +54,19 @@
             android:paddingTop="2dp"
             android:paddingBottom="2dp"
             android:background="@drawable/bg_badge_idle" />
-
-        <View
-            android:layout_width="0dp"
-            android:layout_height="1dp"
-            android:layout_weight="1" />
-
-        <TextView
-            android:id="@+id/tv_group_node_count"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="12 个可选节点"
-            android:textColor="@color/text_muted"
-            android:textSize="11sp" />
     </LinearLayout>
 
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="10dp"
+        android:layout_marginBottom="10dp"
+        android:background="@color/border_subtle" />
+
+    <!-- Bottom: Active Outbound Node & Protocol / Delay -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
         android:orientation="horizontal"
         android:gravity="center_vertical">
 
@@ -64,8 +75,8 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="香港 01 - IEPL"
-            android:textColor="@color/status_cyan"
+            android:text="香港 01 - IEPL 高速"
+            android:textColor="@color/colorPrimaryLight"
             android:textSize="13sp"
             android:textStyle="bold"
             android:ellipsize="end"
@@ -77,13 +88,13 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="6dp"
             android:text="VLESS"
-            android:textColor="@color/text_muted"
-            android:textSize="11sp"
+            android:textColor="@color/text_secondary"
+            android:textSize="10sp"
             android:textStyle="bold"
-            android:paddingStart="4dp"
-            android:paddingEnd="4dp"
-            android:paddingTop="1dp"
-            android:paddingBottom="1dp"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
             android:background="@drawable/bg_badge_idle" />
 
         <TextView
@@ -95,10 +106,10 @@
             android:textColor="@color/status_green"
             android:textSize="11sp"
             android:textStyle="bold"
-            android:paddingStart="6dp"
-            android:paddingEnd="6dp"
-            android:paddingTop="2dp"
-            android:paddingBottom="2dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingTop="3dp"
+            android:paddingBottom="3dp"
             android:background="@drawable/bg_badge_running" />
     </LinearLayout>
 </LinearLayout>

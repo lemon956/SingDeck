@@ -55,9 +55,11 @@ public class GroupTabAdapter extends RecyclerView.Adapter<GroupTabAdapter.ViewHo
         if (isSelected) {
             holder.container.setBackgroundResource(R.drawable.bg_btn_primary);
             holder.tvTabTitle.setTextColor(holder.itemView.getContext().getColor(R.color.text_primary));
+            holder.tvTabCount.setTextColor(holder.itemView.getContext().getColor(R.color.text_primary));
         } else {
             holder.container.setBackgroundResource(R.drawable.bg_badge_idle);
             holder.tvTabTitle.setTextColor(holder.itemView.getContext().getColor(R.color.text_secondary));
+            holder.tvTabCount.setTextColor(holder.itemView.getContext().getColor(R.color.text_muted));
         }
 
         holder.itemView.setOnClickListener(v -> {
