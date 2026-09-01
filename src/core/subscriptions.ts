@@ -6,7 +6,7 @@ export type OutboundDraft = {
   method?: string;
   password?: string;
   uuid?: string;
-  tls?: { enabled: boolean };
+  tls?: { enabled: boolean; server_name?: string; insecure?: boolean };
   outbounds?: string[];
 };
 
@@ -64,7 +64,8 @@ function parseProxyUrl(raw: string): OutboundDraft | null {
         tag,
         server: url.hostname,
         server_port: port,
-        password: decodeURIComponent(url.username)
+        password: decodeURIComponent(url.username),
+        tls: parseTlsOptions(url, true)
       };
     }
 
@@ -78,11 +79,32 @@ function parseProxyUrl(raw: string): OutboundDraft | null {
         tls: url.searchParams.get('security') === 'tls' ? { enabled: true } : undefined
       };
     }
+
+    if (url.protocol === 'anytls:') {
+      return {
+        type: 'anytls',
+        tag,
+        server: url.hostname,
+        server_port: port,
+        password: decodeURIComponent(url.username),
+        tls: parseTlsOptions(url, true)
+      };
+    }
   } catch {
     return null;
   }
 
   return null;
+}
+
+function parseTlsOptions(url: URL, enabled: boolean): OutboundDraft['tls'] {
+  const serverName = url.searchParams.get('sni') || url.searchParams.get('server_name') || undefined;
+  const insecureValue = url.searchParams.get('insecure');
+  return {
+    enabled,
+    ...(serverName ? { server_name: serverName } : {}),
+    ...(insecureValue !== null ? { insecure: insecureValue === '1' || insecureValue === 'true' } : {})
+  };
 }
 
 function parseShadowsocks(raw: string): OutboundDraft | null {

@@ -11,7 +11,9 @@
     "test": "vitest run",
     "helper:dev": "cargo run --manifest-path helper/Cargo.toml",
     "helper:test": "cargo test --manifest-path helper/Cargo.toml",
-    "check": "pnpm test && pnpm build"
+    "check": "pnpm test && pnpm build",
+    "android:libbox": "scripts/build-android-libbox.sh",
+    "android:check": "scripts/check-android.sh"
   },
   "dependencies": {
     "@types/qrcode": "^1.5.6",

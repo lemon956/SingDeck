@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SingDeck</string>
+    <string name="title_activity_main">SingDeck</string>
+    <string name="package_name">io.singdeck.app</string>
+    <string name="custom_url_scheme">io.singdeck.app</string>
+
+    <string name="tab_home">首页</string>
+    <string name="tab_proxies">节点策略</string>
+    <string name="tab_connections">连接</string>
+    <string name="tab_settings">设置</string>
+</resources>

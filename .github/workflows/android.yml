@@ -1,0 +1,103 @@
+name: Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'android/**'
+      - 'scripts/build-android-libbox.sh'
+      - 'scripts/check-android.sh'
+      - 'src/core/androidLibboxIntegration.test.ts'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/android.yml'
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'scripts/build-android-libbox.sh'
+      - 'scripts/check-android.sh'
+      - 'src/core/androidLibboxIntegration.test.ts'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/android.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify native Android app
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Android source contract
+        run: pnpm exec vitest run src/core/androidLibboxIntegration.test.ts
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Restore libbox
+        id: libbox-cache
+        uses: actions/cache@v4
+        with:
+          path: android/app/libs/libbox.aar
+          key: libbox-android-arm64-${{ hashFiles('scripts/build-android-libbox.sh', 'android/app/build.gradle') }}
+
+      - name: Build pinned libbox
+        if: steps.libbox-cache.outputs.cache-hit != 'true'
+        env:
+          SINGDECK_ANDROID_CACHE_DIR: ${{ runner.temp }}/singdeck-android-build-cache
+        run: SINGDECK_ANDROID_SDK_DIR="$ANDROID_HOME" scripts/build-android-libbox.sh
+
+      - name: Verify Android app
+        run: scripts/check-android.sh
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: singdeck-android-debug-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            android/app/build/reports/lint-results-debug.html
+            android/app/build/reports/tests/testDebugUnitTest/

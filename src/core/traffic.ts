@@ -11,6 +11,64 @@ export type TrafficProviderSummary = {
   stale: boolean;
 };
 
+export type SubscriptionUserInfo = {
+  uploadBytes: number;
+  downloadBytes: number;
+  totalBytes: number;
+  usedBytes: number;
+  expireAt: number | null; // seconds
+};
+
+/**
+ * Parses the standard `Subscription-Userinfo` HTTP header
+ * e.g., "upload=1073741824; download=21474836480; total=107374182400; expire=1767139200"
+ */
+export function parseSubscriptionUserInfo(headerValue: string | null | undefined): SubscriptionUserInfo | null {
+  if (!headerValue || typeof headerValue !== 'string') {
+    return null;
+  }
+
+  const parts = headerValue.split(';');
+  let upload = 0;
+  let download = 0;
+  let total = 0;
+  let expire: number | null = null;
+  let matched = false;
+
+  for (const part of parts) {
+    const [rawKey, rawVal] = part.split('=').map((s) => s.trim().toLowerCase());
+    if (!rawKey || !rawVal) continue;
+    const num = Number(rawVal);
+    if (Number.isNaN(num)) continue;
+
+    if (rawKey === 'upload') {
+      upload = num;
+      matched = true;
+    } else if (rawKey === 'download') {
+      download = num;
+      matched = true;
+    } else if (rawKey === 'total') {
+      total = num;
+      matched = true;
+    } else if (rawKey === 'expire') {
+      expire = num > 0 ? num : null;
+      matched = true;
+    }
+  }
+
+  if (!matched || total <= 0) {
+    return null;
+  }
+
+  return {
+    uploadBytes: upload,
+    downloadBytes: download,
+    totalBytes: total,
+    usedBytes: upload + download,
+    expireAt: expire
+  };
+}
+
 export function summarizeTrafficProvider(provider: HelperTrafficSnapshot): TrafficProviderSummary {
   return {
     total: formatNullableBytes(provider.totalBytes),

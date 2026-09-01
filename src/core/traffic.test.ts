@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { summarizeTrafficProvider } from './traffic';
+import { parseSubscriptionUserInfo, summarizeTrafficProvider } from './traffic';
 
 function localEpochSeconds(year: number, monthIndex: number, day: number): number {
   return new Date(year, monthIndex, day).getTime() / 1000;
@@ -102,6 +102,41 @@ describe('traffic provider summary', () => {
       reset: '--',
       payment: '6月21日（24天后）',
       stale: false
+    });
+  });
+
+  describe('parseSubscriptionUserInfo', () => {
+    it('parses standard Subscription-Userinfo header correctly', () => {
+      const header = 'upload=1073741824; download=21474836480; total=107374182400; expire=1767139200';
+      const result = parseSubscriptionUserInfo(header);
+
+      expect(result).toEqual({
+        uploadBytes: 1073741824,
+        downloadBytes: 21474836480,
+        totalBytes: 107374182400,
+        usedBytes: 22548578304,
+        expireAt: 1767139200
+      });
+    });
+
+    it('handles header without expire field or arbitrary spacing', () => {
+      const header = '  upload = 500 ; download = 1500 ; total = 10000 ';
+      const result = parseSubscriptionUserInfo(header);
+
+      expect(result).toEqual({
+        uploadBytes: 500,
+        downloadBytes: 1500,
+        totalBytes: 10000,
+        usedBytes: 2000,
+        expireAt: null
+      });
+    });
+
+    it('returns null for null, empty or invalid header value', () => {
+      expect(parseSubscriptionUserInfo(null)).toBeNull();
+      expect(parseSubscriptionUserInfo('')).toBeNull();
+      expect(parseSubscriptionUserInfo('invalid-content-header')).toBeNull();
+      expect(parseSubscriptionUserInfo('upload=abc; download=def')).toBeNull();
     });
   });
 });
