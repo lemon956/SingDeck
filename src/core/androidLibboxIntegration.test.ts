@@ -48,6 +48,22 @@ describe('Android libbox integration contract', () => {
     expect(gradle).toContain("implementation files('libs/libbox.aar')");
   });
 
+  it('publishes a versioned and signed Android APK from release tags', () => {
+    const gradle = readFileSync('android/app/build.gradle', 'utf8');
+    const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
+
+    expect(gradle).toContain("project.findProperty('singdeckVersionCode')");
+    expect(gradle).toContain("project.findProperty('singdeckVersionName')");
+    expect(releaseWorkflow).toContain('ANDROID_KEYSTORE_BASE64');
+    expect(releaseWorkflow).toContain(':app:assembleRelease');
+    expect(releaseWorkflow).toContain('apksigner" sign');
+    expect(releaseWorkflow).toContain('apksigner" verify');
+    expect(releaseWorkflow).toContain('--v4-signing-enabled false');
+    expect(releaseWorkflow).toContain(
+      'release-artifacts/singdeck-android-arm64-${GITHUB_REF_NAME}.apk'
+    );
+  });
+
   it('uses a strict, authenticated local inspector path without leaking hidden runtime tags', () => {
     const buildScript = readFileSync('scripts/build-android-libbox.sh', 'utf8');
     const patch = readFileSync(
