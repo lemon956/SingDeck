@@ -3243,22 +3243,28 @@ export function App() {
                   </div>
                   <label className="qr-url-field">
                     <span>Download URL</span>
-                    <input value={configQrUrl} onChange={(event) => setConfigQrUrl(event.target.value)} />
+                    <div className="qr-url-input-wrap">
+                      <input
+                        value={configQrUrl}
+                        onChange={(event) => setConfigQrUrl(event.target.value)}
+                        spellCheck={false}
+                      />
+                      <button
+                        className="ghost-action compact-icon-action qr-copy"
+                        disabled={!configQrDownloadUrl.trim()}
+                        onClick={() => void copyConfigQrUrl()}
+                        type="button"
+                      >
+                        <Copy size={14} />
+                        {configQrCopied ? 'Copied' : 'Copy URL'}
+                      </button>
+                    </div>
                     <small>
                       {configQrUrlNeedsLan
                         ? 'No reachable LAN URL. Start helper on 0.0.0.0:9531 or set SINGDECK_HELPER_PUBLIC_URL.'
                         : 'If the phone reports connection refused, allow TCP 9531 through the helper machine firewall.'}
                     </small>
                   </label>
-                  <button
-                    className="ghost-action compact-icon-action qr-copy"
-                    disabled={!configQrDownloadUrl.trim()}
-                    onClick={() => void copyConfigQrUrl()}
-                    type="button"
-                  >
-                    <Copy size={14} />
-                    {configQrCopied ? 'Copied' : 'Copy URL'}
-                  </button>
                 </div>
               </div>
             </section>
