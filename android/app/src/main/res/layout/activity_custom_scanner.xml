@@ -27,12 +27,15 @@
 
         <ImageButton
             android:id="@+id/btn_scanner_back"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
             android:src="@android:drawable/ic_menu_revert"
             app:tint="@color/text_primary"
             android:background="@drawable/bg_btn_secondary"
-            android:contentDescription="返回" />
+            android:contentDescription="返回"
+            android:tooltipText="返回" />
 
         <TextView
             android:layout_width="0dp"

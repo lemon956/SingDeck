@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="touch_target_min">48dp</dimen>
+    <integer name="node_grid_span">2</integer>
+    <bool name="is_tablet_width">true</bool>
+    <bool name="is_wide_console">false</bool>
+</resources>

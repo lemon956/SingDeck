@@ -117,7 +117,8 @@
         <EditText
             android:id="@+id/et_search_nodes"
             android:layout_width="0dp"
-            android:layout_height="42dp"
+            android:layout_height="48dp"
+            android:minHeight="48dp"
             android:layout_weight="1"
             android:hint="搜索节点..."
             android:textColor="@color/text_primary"
@@ -130,42 +131,54 @@
 
         <ImageButton
             android:id="@+id/btn_toggle_layout"
-            android:layout_width="42dp"
-            android:layout_height="42dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
             android:layout_marginStart="6dp"
             android:src="@android:drawable/ic_menu_agenda"
             app:tint="@color/text_secondary"
             android:contentDescription="切换网格或单列视图"
+            android:tooltipText="切换网格或单列视图"
             android:background="@drawable/bg_btn_secondary" />
 
         <ImageButton
             android:id="@+id/btn_sort_nodes"
-            android:layout_width="42dp"
-            android:layout_height="42dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
             android:layout_marginStart="6dp"
             android:src="@android:drawable/ic_menu_sort_by_size"
             app:tint="@color/text_secondary"
             android:contentDescription="切换节点排序方式"
+            android:tooltipText="切换节点排序方式"
             android:background="@drawable/bg_btn_secondary" />
 
         <ImageButton
             android:id="@+id/btn_refresh_proxies"
-            android:layout_width="42dp"
-            android:layout_height="42dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
             android:layout_marginStart="6dp"
             android:src="@android:drawable/ic_popup_sync"
             app:tint="@color/text_secondary"
             android:contentDescription="刷新节点延迟状态"
+            android:tooltipText="刷新节点延迟状态"
             android:background="@drawable/bg_btn_secondary" />
 
         <ImageButton
             android:id="@+id/btn_open_inspector"
-            android:layout_width="42dp"
-            android:layout_height="42dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
             android:layout_marginStart="6dp"
             android:src="@android:drawable/ic_menu_manage"
             app:tint="@color/status_cyan"
             android:contentDescription="打开原生 Proxies Inspector"
+            android:tooltipText="打开原生 Proxies Inspector"
             android:background="@drawable/bg_btn_secondary" />
     </LinearLayout>
 

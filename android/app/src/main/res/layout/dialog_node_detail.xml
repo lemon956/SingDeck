@@ -128,25 +128,27 @@
         <Button
             android:id="@+id/btn_copy_node_json"
             android:layout_width="wrap_content"
-            android:layout_height="42dp"
+            android:layout_height="48dp"
+            android:minHeight="48dp"
             android:text="复制节点 JSON"
             android:textColor="@color/text_secondary"
             android:textSize="12sp"
             android:background="@drawable/bg_btn_secondary"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp" />
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp" />
 
         <Button
             android:id="@+id/btn_select_this_node"
             android:layout_width="wrap_content"
-            android:layout_height="42dp"
+            android:layout_height="48dp"
+            android:minHeight="48dp"
             android:layout_marginStart="10dp"
             android:text="选择此节点出站"
             android:textColor="@color/text_primary"
             android:textSize="12sp"
             android:textStyle="bold"
             android:background="@drawable/bg_btn_primary"
-            android:paddingStart="16dp"
-            android:paddingEnd="16dp" />
+            android:paddingStart="18dp"
+            android:paddingEnd="18dp" />
     </LinearLayout>
 </LinearLayout>

@@ -84,41 +84,57 @@
 
         <ImageButton
             android:id="@+id/btn_export_profile"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
+            android:padding="12dp"
             android:src="@android:drawable/ic_menu_save"
             app:tint="@color/text_secondary"
             android:contentDescription="导出 Sing-box JSON 文件"
+            android:tooltipText="导出 Sing-box JSON 文件"
             android:background="@drawable/bg_btn_secondary"
             android:layout_marginStart="4dp" />
 
         <ImageButton
             android:id="@+id/btn_edit_profile"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
+            android:padding="12dp"
             android:src="@android:drawable/ic_menu_edit"
             app:tint="@color/text_secondary"
             android:contentDescription="编辑配置 JSON 源码"
+            android:tooltipText="编辑配置 JSON 源码"
             android:background="@drawable/bg_btn_secondary"
             android:layout_marginStart="6dp" />
 
         <ImageButton
             android:id="@+id/btn_refresh_profile"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
+            android:padding="12dp"
             android:src="@android:drawable/ic_popup_sync"
             app:tint="@color/status_cyan"
             android:contentDescription="刷新订阅"
+            android:tooltipText="刷新订阅"
             android:background="@drawable/bg_btn_secondary"
             android:layout_marginStart="6dp" />
 
         <ImageButton
             android:id="@+id/btn_delete_profile"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:minWidth="48dp"
+            android:minHeight="48dp"
+            android:padding="12dp"
             android:src="@android:drawable/ic_menu_delete"
             app:tint="@color/status_red"
             android:contentDescription="删除此方案"
+            android:tooltipText="删除此方案"
             android:background="@drawable/bg_btn_secondary"
             android:layout_marginStart="6dp" />
     </LinearLayout>
@@ -127,7 +143,8 @@
     <Button
         android:id="@+id/btn_activate_profile"
         android:layout_width="match_parent"
-        android:layout_height="40dp"
+        android:layout_height="48dp"
+        android:minHeight="48dp"
         android:layout_marginTop="10dp"
         android:text="切换使用此配置"
         android:textColor="@color/status_cyan"

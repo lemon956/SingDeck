@@ -52,7 +52,19 @@ public class ConnectionsFragment extends Fragment {
         RecyclerView rvConnections = view.findViewById(R.id.rv_connections);
 
         rvConnections.setLayoutManager(new LinearLayoutManager(requireContext()));
-        connectionAdapter = new ConnectionAdapter(this::showConnectionDetail);
+        connectionAdapter = new ConnectionAdapter(new ConnectionAdapter.OnConnectionClickListener() {
+            @Override
+            public void onConnectionClick(ConnectionItem item) {
+                showConnectionDetail(item);
+            }
+
+            @Override
+            public void onCloseConnection(ConnectionItem item) {
+                if (item != null) {
+                    closeConnection(item.id, item.host != null ? item.host : "连接");
+                }
+            }
+        });
         rvConnections.setAdapter(connectionAdapter);
         btnCloseAllConnections.setOnClickListener(view1 -> closeAllConnections());
         etSearchConnections.addTextChangedListener(new TextWatcher() {

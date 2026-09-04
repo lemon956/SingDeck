@@ -43,6 +43,8 @@ public class HomeFragment extends Fragment {
     private TextView btnViewAllNodes;
     private RecyclerView rvStrategyGroups;
     private io.singdeck.app.ui.widget.SpeedWaveformView waveformSpeed;
+    private TextView tvHomeRouteSummary;
+    private View btnViewRouteRules;
 
     private GroupAdapter groupAdapter;
     private ProfileManager profileManager;
@@ -82,6 +84,8 @@ public class HomeFragment extends Fragment {
         btnViewAllNodes = view.findViewById(R.id.btn_view_all_nodes);
         rvStrategyGroups = view.findViewById(R.id.rv_strategy_groups);
         waveformSpeed = view.findViewById(R.id.waveform_speed);
+        tvHomeRouteSummary = view.findViewById(R.id.tv_home_route_summary);
+        btnViewRouteRules = view.findViewById(R.id.btn_view_route_rules);
 
         profileManager = ProfileManager.getInstance(requireContext());
 
@@ -101,6 +105,13 @@ public class HomeFragment extends Fragment {
                 ((MainActivity) getActivity()).navigateToTab(1);
             }
         });
+        if (btnViewRouteRules != null) {
+            btnViewRouteRules.setOnClickListener(v -> {
+                if (getActivity() instanceof MainActivity) {
+                    ((MainActivity) getActivity()).navigateToTab(3);
+                }
+            });
+        }
 
         profileChangeListener = this::refreshData;
         profileManager.addListener(profileChangeListener);
@@ -140,6 +151,9 @@ public class HomeFragment extends Fragment {
             tvActiveNodeInfo.setText("已激活: " + active.name + "（未连接）");
         } else {
             tvActiveNodeInfo.setText("请先添加配置方案");
+        }
+        if (tvHomeRouteSummary != null) {
+            tvHomeRouteSummary.setText(profileManager.getRouteRulesSummary());
         }
     }
 

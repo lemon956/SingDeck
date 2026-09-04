@@ -3,14 +3,19 @@ package io.singdeck.app;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
 import android.net.IpPrefix;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.ProxyInfo;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
+import android.os.PowerManager;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
@@ -139,6 +144,8 @@ public class SingDeckVpnService extends VpnService
     private volatile boolean systemProxyEnabled;
     private volatile boolean autoProbePaused;
     private ScheduledExecutorService autoProbeScheduler;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private PowerManager.WakeLock wakeLock;
 
     public static boolean isVpnRunning() {
         return STATE_RUNNING.equals(serviceState);
@@ -419,6 +426,8 @@ public class SingDeckVpnService extends VpnService
             updateState(STATE_RUNNING, "");
             startStatusClient();
             startAutoProbeScheduler();
+            registerNetworkCallback();
+            acquireWakeLock();
             completeOperation(request.operationId, "");
             notifyRunning("sing-box " + LibboxRuntime.getCoreVersion());
             Log.i(TAG, "sing-box service started with Android TUN");
@@ -503,6 +512,8 @@ public class SingDeckVpnService extends VpnService
         updateState(STATE_RUNNING, "");
         startStatusClient();
         startAutoProbeScheduler();
+        registerNetworkCallback();
+        acquireWakeLock();
         notifyRunning("重载失败，已恢复之前的配置");
     }
 
@@ -722,6 +733,7 @@ public class SingDeckVpnService extends VpnService
         if (newTun == null) {
             throw new Exception("Android 无法建立 VPN TUN 接口");
         }
+        applyUnderlyingNetworks();
 
         synchronized (tunLock) {
             ParcelFileDescriptor oldTun = tunFileDescriptor;
@@ -979,6 +991,9 @@ public class SingDeckVpnService extends VpnService
             platformInterface.close();
             platformInterface = null;
         }
+
+        unregisterNetworkCallback();
+        releaseWakeLock();
     }
 
     @Override
@@ -1221,6 +1236,96 @@ public class SingDeckVpnService extends VpnService
             }
         } catch (Throwable error) {
             Log.w(TAG, "Scheduled Inspector tick failed");
+        }
+    }
+
+    private void applyUnderlyingNetworks() {
+        try {
+            setUnderlyingNetworks(null);
+            Log.d(TAG, "Applied underlying networks (system default)");
+        } catch (Exception exception) {
+            Log.w(TAG, "Unable to set underlying networks", exception);
+        }
+    }
+
+    private synchronized void registerNetworkCallback() {
+        if (networkCallback != null) {
+            return;
+        }
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                networkCallback = new ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(Network network) {
+                        Log.d(TAG, "Default network available/changed: " + network);
+                        applyUnderlyingNetworks();
+                    }
+
+                    @Override
+                    public void onLost(Network network) {
+                        Log.d(TAG, "Default network lost: " + network);
+                        applyUnderlyingNetworks();
+                    }
+
+                    @Override
+                    public void onCapabilitiesChanged(Network network, NetworkCapabilities networkCapabilities) {
+                        applyUnderlyingNetworks();
+                    }
+                };
+                cm.registerDefaultNetworkCallback(networkCallback);
+                Log.i(TAG, "Registered default network callback for VPN handover");
+            }
+        } catch (Exception exception) {
+            Log.w(TAG, "Failed to register default network callback", exception);
+        }
+    }
+
+    private synchronized void unregisterNetworkCallback() {
+        if (networkCallback != null) {
+            try {
+                ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) {
+                    cm.unregisterNetworkCallback(networkCallback);
+                }
+                Log.d(TAG, "Unregistered default network callback");
+            } catch (Exception exception) {
+                Log.w(TAG, "Failed to unregister network callback", exception);
+            }
+            networkCallback = null;
+        }
+    }
+
+    private synchronized void acquireWakeLock() {
+        if (wakeLock == null) {
+            try {
+                PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                if (pm != null) {
+                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "singdeck:vpn_service");
+                    wakeLock.setReferenceCounted(false);
+                }
+            } catch (Exception exception) {
+                Log.w(TAG, "Failed to create wake lock", exception);
+            }
+        }
+        if (wakeLock != null && !wakeLock.isHeld()) {
+            try {
+                wakeLock.acquire();
+                Log.i(TAG, "Acquired partial WakeLock for VPN keepalive");
+            } catch (Exception exception) {
+                Log.w(TAG, "Failed to acquire wake lock", exception);
+            }
+        }
+    }
+
+    private synchronized void releaseWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) {
+            try {
+                wakeLock.release();
+                Log.i(TAG, "Released partial WakeLock");
+            } catch (Exception exception) {
+                Log.w(TAG, "Failed to release wake lock", exception);
+            }
         }
     }
 

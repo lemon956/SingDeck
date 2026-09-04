@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/card_connection"
+    android:layout_width="match_parent"
+    android:layout_height="52dp"
+    android:layout_marginBottom="4dp"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingStart="14dp"
+    android:paddingEnd="14dp"
+    android:background="@drawable/bg_card_dark"
+    android:clickable="true"
+    android:focusable="true">
+
+    <!-- 1. Target Host -->
+    <TextView
+        android:id="@+id/tv_conn_host"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="2.2"
+        android:text="api.github.com:443"
+        android:textColor="@color/text_primary"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:singleLine="true"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+    <!-- 2. Protocol Badge -->
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="0.8">
+
+        <TextView
+            android:id="@+id/tv_conn_network"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="TCP"
+            android:textColor="@color/text_secondary"
+            android:textSize="9sp"
+            android:textStyle="bold"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:background="@drawable/bg_badge_idle" />
+    </LinearLayout>
+
+    <!-- 3. Source IP / Port -->
+    <TextView
+        android:id="@+id/tv_conn_source"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1.6"
+        android:text="172.19.0.1:54321"
+        android:textColor="@color/text_muted"
+        android:textSize="11sp"
+        android:singleLine="true"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+    <!-- 4. Rule / Chain -->
+    <TextView
+        android:id="@+id/tv_conn_chain"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="2.2"
+        android:text="PROXY ➔ 香港 01"
+        android:textColor="@color/status_cyan"
+        android:textSize="11sp"
+        android:textStyle="bold"
+        android:singleLine="true"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+    <!-- 5. Outbound -->
+    <TextView
+        android:id="@+id/tv_conn_outbound"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1.6"
+        android:text="香港 01 - IEPL"
+        android:textColor="@color/colorPrimaryLight"
+        android:textSize="11sp"
+        android:singleLine="true"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+    <!-- 6. Traffic Stats -->
+    <TextView
+        android:id="@+id/tv_conn_traffic"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1.8"
+        android:gravity="end"
+        android:text="↓ 128 KB  ↑ 12 KB"
+        android:textColor="@color/text_muted"
+        android:textSize="11sp"
+        android:singleLine="true"
+        android:maxLines="1" />
+
+    <!-- 7. Close Connection Action Button (48dp Touch Target) -->
+    <FrameLayout
+        android:layout_width="52dp"
+        android:layout_height="match_parent">
+
+        <ImageButton
+            android:id="@+id/btn_conn_close_inline"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="center"
+            android:src="@android:drawable/ic_menu_close_clear_cancel"
+            app:tint="@color/status_red"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="关闭此连接"
+            android:tooltipText="关闭此连接" />
+    </FrameLayout>
+</LinearLayout>

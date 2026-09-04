@@ -58,6 +58,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import io.singdeck.app.R;
+import io.singdeck.app.ui.TabletLayoutPolicy;
 import io.singdeck.app.SingDeckVpnService;
 import io.singdeck.app.manager.InspectorRepository;
 import io.singdeck.app.manager.GeminiLocationInspector;
@@ -220,17 +221,8 @@ public class ProxiesFragment extends Fragment {
         profileChangeListener = this::updateGroupData;
         profileManager.addListener(profileChangeListener);
         updateGroupData();
-        if (getResources().getConfiguration().smallestScreenWidthDp >= 600) {
-            inspectorSideHost.setVisibility(View.VISIBLE);
-            inspectorPanel = inflater.inflate(
-                    R.layout.panel_proxies_inspector,
-                    inspectorSideHost,
-                    false
-            );
-            inspectorSideHost.addView(inspectorPanel);
-            inspectorPanel.findViewById(R.id.btn_close_inspector).setVisibility(View.GONE);
-            bindInspectorPanel(inspectorPanel, false);
-        }
+        setupInspectorView(inflater);
+        updateLayoutManager();
         runtimeHandler.post(runtimePoller);
         return view;
     }
@@ -271,12 +263,70 @@ public class ProxiesFragment extends Fragment {
         }
     };
 
+    public boolean isSideInspectorSupported() {
+        if (!isAdded()) {
+            return false;
+        }
+        int screenWidthDp = getResources().getConfiguration().screenWidthDp;
+        return TabletLayoutPolicy.isSideInspectorSupported(screenWidthDp);
+    }
+
+    public void setupInspectorView(@Nullable LayoutInflater inflater) {
+        if (!isAdded() || inspectorSideHost == null) {
+            return;
+        }
+        if (isSideInspectorSupported()) {
+            inspectorSideHost.setVisibility(View.VISIBLE);
+            if (inspectorPanel == null) {
+                LayoutInflater inf = inflater != null ? inflater : LayoutInflater.from(requireContext());
+                inspectorPanel = inf.inflate(
+                        R.layout.panel_proxies_inspector,
+                        inspectorSideHost,
+                        false
+                );
+                inspectorSideHost.removeAllViews();
+                inspectorSideHost.addView(inspectorPanel);
+            }
+            View close = inspectorPanel.findViewById(R.id.btn_close_inspector);
+            if (close != null) {
+                close.setVisibility(View.GONE);
+            }
+            bindInspectorPanel(inspectorPanel, false);
+        } else {
+            inspectorSideHost.setVisibility(View.GONE);
+            if (inspectorSheet == null) {
+                inspectorSideHost.removeAllViews();
+                inspectorPanel = null;
+            }
+        }
+    }
+
+    public int calculateSpanCount() {
+        if (!isGridLayout || !isAdded()) {
+            return 1;
+        }
+        int screenWidthDp = getResources().getConfiguration().screenWidthDp;
+        int orientation = getResources().getConfiguration().orientation;
+        return TabletLayoutPolicy.calculateSpanCount(screenWidthDp, orientation, isGridLayout);
+    }
+
     private void updateLayoutManager() {
-        if (isGridLayout) {
-            rvNodesGrid.setLayoutManager(new GridLayoutManager(requireContext(), 2));
+        if (!isAdded() || rvNodesGrid == null) {
+            return;
+        }
+        int spans = calculateSpanCount();
+        if (spans > 1) {
+            rvNodesGrid.setLayoutManager(new GridLayoutManager(requireContext(), spans));
         } else {
             rvNodesGrid.setLayoutManager(new LinearLayoutManager(requireContext()));
         }
+    }
+
+    @Override
+    public void onConfigurationChanged(@NonNull android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        setupInspectorView(null);
+        updateLayoutManager();
     }
 
     private void updateGroupData() {
@@ -649,7 +699,7 @@ public class ProxiesFragment extends Fragment {
         if (!isAdded()) {
             return;
         }
-        if (getResources().getConfiguration().smallestScreenWidthDp >= 600) {
+        if (isSideInspectorSupported()) {
             inspectorSideHost.setVisibility(View.VISIBLE);
             if (inspectorPanel != null) {
                 bindInspectorPanel(inspectorPanel, false);

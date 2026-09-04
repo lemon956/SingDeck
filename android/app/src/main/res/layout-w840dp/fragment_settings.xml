@@ -1,0 +1,516 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:background="@color/bg_dark">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="20dp"
+        android:baselineAligned="false">
+
+        <!-- Left Column: Normal Settings & Profiles Management -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:paddingEnd="10dp">
+
+            <!-- 1. Profiles & Import Management Card -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="18dp"
+                android:background="@drawable/bg_card_dark">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="配置方案与订阅 (Profiles)"
+                        android:textColor="@color/text_primary"
+                        android:textSize="15sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="支持通用格式"
+                        android:textColor="@color/status_cyan"
+                        android:textSize="10sp"
+                        android:paddingStart="6dp"
+                        android:paddingEnd="6dp"
+                        android:paddingTop="2dp"
+                        android:paddingBottom="2dp"
+                        android:background="@drawable/bg_badge_engine" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:text="支持 Sing-box JSON、Clash YAML、订阅 URL 及通用节点链接"
+                    android:textColor="@color/text_muted"
+                    android:textSize="11sp" />
+
+                <!-- Import Action Grid (Row 1) -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btn_quick_import_clipboard"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:minHeight="48dp"
+                        android:layout_weight="1"
+                        android:text="⚡ 剪贴板导入"
+                        android:textColor="@color/status_cyan"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        android:background="@drawable/bg_btn_secondary" />
+
+                    <Button
+                        android:id="@+id/btn_scan_qr"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:minHeight="48dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:text="📷 相机扫码"
+                        android:textColor="@color/status_cyan"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        android:background="@drawable/bg_btn_secondary" />
+                </LinearLayout>
+
+                <!-- Import Action Grid (Row 2) -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btn_scan_gallery"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:minHeight="48dp"
+                        android:layout_weight="1"
+                        android:text="🖼️ 相册识别"
+                        android:textColor="@color/text_primary"
+                        android:textSize="12sp"
+                        android:background="@drawable/bg_btn_secondary" />
+
+                    <Button
+                        android:id="@+id/btn_import_local_file"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:minHeight="48dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:text="📁 本地文件"
+                        android:textColor="@color/text_primary"
+                        android:textSize="12sp"
+                        android:background="@drawable/bg_btn_secondary" />
+                </LinearLayout>
+
+                <!-- Full Width Create Button -->
+                <Button
+                    android:id="@+id/btn_add_profile"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:minHeight="48dp"
+                    android:layout_marginTop="8dp"
+                    android:text="➕ 手动新建 Sing-box 配置"
+                    android:textColor="@color/text_primary"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:background="@drawable/bg_btn_primary" />
+
+                <!-- Profiles List Inside Card -->
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/rv_profiles"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:nestedScrollingEnabled="false" />
+            </LinearLayout>
+
+            <!-- 2. Sing-box Native Route Rules Card -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:orientation="vertical"
+                android:padding="18dp"
+                android:background="@drawable/bg_card_dark">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Sing-box 路由分流 (Route Rules)"
+                        android:textColor="@color/text_primary"
+                        android:textSize="15sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="默认生效"
+                        android:textColor="@color/status_green"
+                        android:textSize="10sp"
+                        android:textStyle="bold"
+                        android:paddingStart="6dp"
+                        android:paddingEnd="6dp"
+                        android:paddingTop="2dp"
+                        android:paddingBottom="2dp"
+                        android:background="@drawable/bg_badge_running" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/tv_route_rules_summary"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="全自动遵循当前 Sing-box 配置文件内置 route 路由规则"
+                    android:textColor="@color/status_cyan"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="• DNS 防污染分流: 系统 DNS 智能安全解析\n• 智能国内直连: GeoSite(cn) / GeoIP(cn) / 局域网私网直连\n• 广告威胁拦截: category-ads-all 智能阻断\n• 节点出站策略: 国外及目标流量由策略组分配出站"
+                    android:textColor="@color/text_muted"
+                    android:textSize="11sp"
+                    android:lineSpacingExtra="3dp" />
+
+                <Button
+                    android:id="@+id/btn_edit_active_route"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:minHeight="48dp"
+                    android:layout_marginTop="12dp"
+                    android:text="🔍 查看 / 修改当前配置完整 JSON 规则"
+                    android:textColor="@color/text_primary"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:background="@drawable/bg_btn_secondary" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Right Column: HarmonyOS Tuning, Split Tunneling, Danger Zone & Core Info -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:paddingStart="10dp">
+
+            <!-- 3. HarmonyOS / Huawei Background Optimization Guide Card (华为后台保活) -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="18dp"
+                android:background="@drawable/bg_card_dark">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="HarmonyOS 后台保活指引"
+                        android:textColor="@color/text_primary"
+                        android:textSize="15sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="MatePad 适配"
+                        android:textColor="@color/status_cyan"
+                        android:textSize="10sp"
+                        android:paddingStart="6dp"
+                        android:paddingEnd="6dp"
+                        android:paddingTop="2dp"
+                        android:paddingBottom="2dp"
+                        android:background="@drawable/bg_badge_engine" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="华为系统省电与保活设置，确保熄屏与休眠时 VPN 稳定运行:"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="• 电池优化白名单: 加入后系统休眠不会强制查杀 VPN 核心\n• 应用启动管理: 设为“手动管理”，开启允许自启/关联启动/后台活动\n• Wi-Fi 休眠策略: 系统 WLAN 高级设置中开启“在休眠状态下保持 WLAN 连接”"
+                    android:textColor="@color/text_muted"
+                    android:textSize="11sp"
+                    android:lineSpacingExtra="3dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btn_ignore_battery"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:minHeight="48dp"
+                        android:layout_weight="1"
+                        android:text="⚙️ 申请忽略电池优化"
+                        android:textColor="@color/status_cyan"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        android:background="@drawable/bg_btn_secondary" />
+
+                    <Button
+                        android:id="@+id/btn_huawei_launch_settings"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:minHeight="48dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:text="📱 系统启动管理"
+                        android:textColor="@color/text_primary"
+                        android:textSize="12sp"
+                        android:background="@drawable/bg_btn_secondary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- 4. Optional Per-App Split Tunneling Card -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:orientation="vertical"
+                android:padding="18dp"
+                android:background="@drawable/bg_card_dark">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="应用层分流 (可选扩展)"
+                    android:textColor="@color/text_primary"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:text="设置特定 Android 应用包名是否进入 VPN 通道"
+                    android:textColor="@color/text_muted"
+                    android:textSize="11sp" />
+
+                <RadioGroup
+                    android:id="@+id/rg_split_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:orientation="horizontal">
+
+                    <RadioButton
+                        android:id="@+id/rb_split_all"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="全局应用"
+                        android:checked="true"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp" />
+
+                    <RadioButton
+                        android:id="@+id/rb_split_whitelist"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="白名单应用"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp" />
+
+                    <RadioButton
+                        android:id="@+id/rb_split_blacklist"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="黑名单应用"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="12sp" />
+                </RadioGroup>
+
+                <Button
+                    android:id="@+id/btn_pick_apps"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:minHeight="48dp"
+                    android:layout_marginTop="10dp"
+                    android:text="📱 选择分流应用清单 (0 个已选)"
+                    android:textColor="@color/status_cyan"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:background="@drawable/bg_btn_secondary" />
+            </LinearLayout>
+
+            <!-- 5. Danger Zone & Backup Archive Card (明确分区为危险操作区) -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:orientation="vertical"
+                android:padding="18dp"
+                android:background="@drawable/bg_card_dark">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="配置备份与恢复 (Archive)"
+                        android:textColor="@color/text_primary"
+                        android:textSize="15sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="高级/危险分区"
+                        android:textColor="@color/status_amber"
+                        android:textSize="10sp"
+                        android:textStyle="bold"
+                        android:paddingStart="6dp"
+                        android:paddingEnd="6dp"
+                        android:paddingTop="2dp"
+                        android:paddingBottom="2dp"
+                        android:background="@drawable/bg_badge_idle" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:text="导出全部配置为 JSON 归档文件；还原或替换将覆盖现有本地配置"
+                    android:textColor="@color/text_muted"
+                    android:textSize="11sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/btn_backup_all"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:minHeight="48dp"
+                        android:layout_weight="1"
+                        android:text="📦 备份全量配置"
+                        android:textColor="@color/text_primary"
+                        android:textSize="12sp"
+                        android:background="@drawable/bg_btn_secondary" />
+
+                    <Button
+                        android:id="@+id/btn_restore_backup"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:minHeight="48dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:text="📥 还原配置备份"
+                        android:textColor="@color/status_amber"
+                        android:textSize="12sp"
+                        android:background="@drawable/bg_btn_secondary" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- 6. Engine Core & Capability Declaration Card (About) -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:layout_marginBottom="24dp"
+                android:orientation="vertical"
+                android:padding="18dp"
+                android:background="@drawable/bg_card_dark">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="核心架构与依赖声明 (Core Engine)"
+                    android:textColor="@color/text_primary"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:orientation="vertical"
+                    android:padding="12dp"
+                    android:background="@drawable/bg_input_field">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Powered by sing-box 1.14.0"
+                        android:textColor="@color/status_cyan"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="• 内核架构: arm64-v8a libbox Embedded Runtime\n• 路由内核: Sing-box Native Route Rules Engine\n• 客户端版本: SingDeck Pro v1.0 (Pure Native Android)"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="11sp"
+                        android:lineSpacingExtra="2dp" />
+                </LinearLayout>
+            </LinearLayout>
+
+        </LinearLayout>
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

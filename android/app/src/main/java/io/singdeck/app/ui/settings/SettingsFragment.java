@@ -191,6 +191,15 @@ public class SettingsFragment extends Fragment {
             }
         });
 
+        View btnIgnoreBattery = view.findViewById(R.id.btn_ignore_battery);
+        if (btnIgnoreBattery != null) {
+            btnIgnoreBattery.setOnClickListener(v -> requestIgnoreBatteryOptimizations());
+        }
+        View btnHuaweiLaunch = view.findViewById(R.id.btn_huawei_launch_settings);
+        if (btnHuaweiLaunch != null) {
+            btnHuaweiLaunch.setOnClickListener(v -> openHuaweiLaunchSettings());
+        }
+
         initSplitTunneling();
         profileChangeListener = this::updateList;
         profileManager.addListener(profileChangeListener);
@@ -282,11 +291,59 @@ public class SettingsFragment extends Fragment {
     private void launchCameraScanner() {
         ScanOptions options = new ScanOptions();
         options.setCaptureActivity(io.singdeck.app.ui.scanner.PortraitCaptureActivity.class);
-        options.setOrientationLocked(true);
+        options.setOrientationLocked(false);
         options.setPrompt("请将订阅或节点二维码对准正方形取景框");
         options.setBeepEnabled(true);
         options.setBarcodeImageEnabled(false);
         barcodeLauncher.launch(options);
+    }
+
+    private void requestIgnoreBatteryOptimizations() {
+        android.os.PowerManager pm = (android.os.PowerManager) requireContext().getSystemService(Context.POWER_SERVICE);
+        if (pm != null && pm.isIgnoringBatteryOptimizations(requireContext().getPackageName())) {
+            toast("当前已加入电池优化白名单（已忽略优化）", false);
+            return;
+        }
+        try {
+            Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            intent.setData(Uri.parse("package:" + requireContext().getPackageName()));
+            startActivity(intent);
+        } catch (Exception e) {
+            try {
+                Intent intent = new Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+                startActivity(intent);
+            } catch (Exception e2) {
+                toast("请前往系统设置 -> 应用与服务 -> 电池优化 中添加白名单", true);
+            }
+        }
+    }
+
+    private void openHuaweiLaunchSettings() {
+        try {
+            Intent intent = new Intent();
+            intent.setComponent(new android.content.ComponentName(
+                    "com.huawei.systemmanager",
+                    "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
+            ));
+            startActivity(intent);
+        } catch (Exception e1) {
+            try {
+                Intent intent = new Intent();
+                intent.setComponent(new android.content.ComponentName(
+                        "com.huawei.systemmanager",
+                        "com.huawei.systemmanager.optimize.bootstart.BootStartActivity"
+                ));
+                startActivity(intent);
+            } catch (Exception e2) {
+                try {
+                    Intent intent = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                    intent.setData(Uri.parse("package:" + requireContext().getPackageName()));
+                    startActivity(intent);
+                } catch (Exception e3) {
+                    toast("未能打开系统管理，请在系统设置中搜索“应用启动管理”", true);
+                }
+            }
+        }
     }
 
     private void decodeGalleryQr(Uri uri) {

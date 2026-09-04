@@ -215,6 +215,8 @@
                 android:id="@+id/btn_view_all_nodes"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:gravity="center"
                 android:text="策略管理 ➔"
                 android:textColor="@color/status_cyan"
                 android:textSize="12sp"

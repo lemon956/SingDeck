@@ -21,6 +21,7 @@ public class ConnectionAdapter extends RecyclerView.Adapter<ConnectionAdapter.Vi
 
     public interface OnConnectionClickListener {
         void onConnectionClick(ConnectionItem item);
+        default void onCloseConnection(ConnectionItem item) {}
     }
 
     public ConnectionAdapter(OnConnectionClickListener listener) {
@@ -51,6 +52,16 @@ public class ConnectionAdapter extends RecyclerView.Adapter<ConnectionAdapter.Vi
         String chain = item.chain != null && !item.chain.isEmpty() ? item.chain : (item.outbound != null ? item.outbound : "DIRECT");
         holder.tvConnChain.setText(chain);
 
+        if (holder.tvConnSource != null) {
+            String src = item.source != null && !item.source.isEmpty() ? item.source : "--";
+            holder.tvConnSource.setText(src);
+        }
+
+        if (holder.tvConnOutbound != null) {
+            String out = item.outbound != null && !item.outbound.isEmpty() ? item.outbound : "--";
+            holder.tvConnOutbound.setText(out);
+        }
+
         holder.tvConnTraffic.setText(
                 "↓ " + formatBytes(item.downloadBytes) + "  ↑ " + formatBytes(item.uploadBytes)
         );
@@ -60,6 +71,12 @@ public class ConnectionAdapter extends RecyclerView.Adapter<ConnectionAdapter.Vi
         holder.itemView.setOnClickListener(v -> {
             if (listener != null) listener.onConnectionClick(item);
         });
+
+        if (holder.btnConnCloseInline != null) {
+            holder.btnConnCloseInline.setOnClickListener(v -> {
+                if (listener != null) listener.onCloseConnection(item);
+            });
+        }
     }
 
     @Override
@@ -85,6 +102,9 @@ public class ConnectionAdapter extends RecyclerView.Adapter<ConnectionAdapter.Vi
         TextView tvConnNetwork;
         TextView tvConnChain;
         TextView tvConnTraffic;
+        TextView tvConnSource;
+        TextView tvConnOutbound;
+        View btnConnCloseInline;
 
         ViewHolder(View itemView) {
             super(itemView);
@@ -92,6 +112,9 @@ public class ConnectionAdapter extends RecyclerView.Adapter<ConnectionAdapter.Vi
             tvConnNetwork = itemView.findViewById(R.id.tv_conn_network);
             tvConnChain = itemView.findViewById(R.id.tv_conn_chain);
             tvConnTraffic = itemView.findViewById(R.id.tv_conn_traffic);
+            tvConnSource = itemView.findViewById(R.id.tv_conn_source);
+            tvConnOutbound = itemView.findViewById(R.id.tv_conn_outbound);
+            btnConnCloseInline = itemView.findViewById(R.id.btn_conn_close_inline);
         }
     }
 }
