@@ -11,7 +11,7 @@ Android 版 SingDeck 在卓易通中只能直接查询其 Android 环境可见�
 
 ## 鸿蒙兼容版安装包
 
-推送 `vMAJOR.MINOR.PATCH-android` 格式的 tag（例如 `v0.3.10-android`）会触发 Release workflow，单独生成 Android ARM64 鸿蒙兼容版，并使用仓库配置的正式 Android 签名。Release 同时提供采集脚本、本文档和 `SHA256SUMS`。
+推送 `vMAJOR.MINOR.PATCH-android` 格式的 tag（例如 `v0.3.11-android`）会触发 Release workflow，单独生成 Android ARM64 鸿蒙兼容版，并使用仓库配置的正式 Android 签名。Release 同时提供采集脚本、本文档和 `SHA256SUMS`。
 
 - 应用名：**SingDeck 鸿蒙兼容版**。
 - 包名：`io.singdeck.app.harmony`，可与普通版和“SingDeck 清单测试”共存。

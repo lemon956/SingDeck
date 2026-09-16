@@ -78,6 +78,9 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # 显式指定工具包，避免 action 默认安装旧 tools。
+          packages: platform-tools
 
       - name: Install Android platform
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
