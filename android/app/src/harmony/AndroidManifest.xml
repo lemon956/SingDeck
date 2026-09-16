@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <!-- 使用完整类名，让独立 applicationId 下的服务声明和静态检查保持一致。 -->
+        <service
+            android:name="io.singdeck.app.SingDeckVpnService"
+            android:foregroundServiceType="specialUse"
+            tools:replace="android:foregroundServiceType" />
+        <service
+            android:name="io.singdeck.app.SingDeckTileService"
+            android:label="@string/app_name"
+            tools:replace="android:label" />
+    </application>
+</manifest>

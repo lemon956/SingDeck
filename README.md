@@ -17,6 +17,10 @@ SingDeck is a local-first, single-controller sing-box dashboard. The web app tal
 - Client-side subscription parsing for common `ss://`, `trojan://`, and `vless://` links.
 - Advanced tools for route simulation, selector graph edges, Linux pasted-output diagnostics, and API compatibility shaping.
 
+## Android / HarmonyOS app inventory
+
+The Android app can import a HarmonyOS app inventory collected through HDC on your computer, then merge, search, and cache it alongside Android apps. See the [HarmonyOS inventory guide (Chinese)](docs/harmony-app-inventory.md).
+
 ## Roadmap
 
 The following directions have been explored but are not implemented yet. Priorities may change.

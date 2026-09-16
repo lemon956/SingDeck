@@ -4,6 +4,7 @@ def singdeckVersionCode = Integer.parseInt(
     project.findProperty('singdeckVersionCode')?.toString() ?: '1'
 )
 def singdeckVersionName = project.findProperty('singdeckVersionName')?.toString() ?: '1.0'
+def singdeckHarmonyCompat = project.findProperty('singdeckHarmonyCompat')?.toString()?.toBoolean() ?: false
 
 android {
     namespace = "io.singdeck.app"
@@ -24,6 +25,17 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+    if (singdeckHarmonyCompat) {
+        buildTypes.configureEach {
+            applicationIdSuffix '.harmony'
+        }
+        ['debug', 'release'].each { buildType ->
+            sourceSets.getByName(buildType) {
+                res.srcDir 'src/harmony/res'
+                manifest.srcFile 'src/harmony/AndroidManifest.xml'
+            }
         }
     }
     buildFeatures {

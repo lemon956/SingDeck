@@ -168,6 +168,9 @@ public class SettingsFragment extends Fragment {
         rbSplitWhitelist = view.findViewById(R.id.rb_split_whitelist);
         rbSplitBlacklist = view.findViewById(R.id.rb_split_blacklist);
         btnPickApps = view.findViewById(R.id.btn_pick_apps);
+        view.findViewById(R.id.btn_app_inventory).setOnClickListener(clicked ->
+                AppPickerBottomSheet.newInventoryInstance()
+                        .show(getParentFragmentManager(), "app_inventory"));
 
         profileManager = ProfileManager.getInstance(requireContext());
         splitTunnelManager = SplitTunnelManager.getInstance(requireContext());

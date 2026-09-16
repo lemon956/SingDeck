@@ -387,6 +387,16 @@
                     android:textSize="12sp"
                     android:textStyle="bold"
                     android:background="@drawable/bg_btn_secondary" />
+
+                <Button
+                    android:id="@+id/btn_app_inventory"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="10dp"
+                    android:text="手机应用清单 · 导入鸿蒙应用"
+                    android:textColor="@color/status_cyan"
+                    android:textSize="12sp"
+                    android:background="@drawable/bg_btn_secondary" />
             </LinearLayout>
 
             <!-- 5. Danger Zone & Backup Archive Card (明确分区为危险操作区) -->

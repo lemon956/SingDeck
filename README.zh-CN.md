@@ -17,6 +17,10 @@ SingDeck 是一个本地优先、单 sing-box 控制器的 Web 面板。前端�
 - 前端解析常见 `ss://`、`trojan://`、`vless://` 订阅链接。
 - 高级工具：路由模拟、selector 图边、Linux 粘贴输出诊断和 API 兼容处理。
 
+## Android / 鸿蒙应用清单
+
+Android 版支持导入电脑通过 HDC 采集的鸿蒙应用清单，与 Android 应用合并查看、搜索和本地缓存。使用步骤见[鸿蒙手机应用清单](docs/harmony-app-inventory.md)。
+
 ## 路线图
 
 以下方向已经过探索，但尚未实现，优先级可能调整。
