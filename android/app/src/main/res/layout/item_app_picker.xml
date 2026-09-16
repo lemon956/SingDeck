@@ -46,15 +46,6 @@
             android:textSize="11sp"
             android:ellipsize="end"
             android:maxLines="1" />
-        <TextView
-            android:id="@+id/tv_app_source"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textColor="@color/status_cyan"
-            android:textSize="11sp"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:visibility="gone" />
     </LinearLayout>
 
     <CheckBox

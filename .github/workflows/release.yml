@@ -104,9 +104,6 @@ jobs:
       - name: Verify frontend
         run: pnpm check
 
-      - name: Verify HarmonyOS inventory exporter
-        run: python3 -B -m unittest discover -s scripts -p 'test_export_harmony_apps.py' -v
-
       - name: Restore libbox
         id: libbox-cache
         uses: actions/cache@v4
@@ -133,20 +130,8 @@ jobs:
         run: |
           cd android
           ./gradlew --no-daemon :app:assembleRelease :app:lintRelease \
-            -PsingdeckHarmonyCompat=false \
             -PsingdeckVersionName="${{ steps.android-version.outputs.name }}" \
             -PsingdeckVersionCode="${{ steps.android-version.outputs.code }}"
-          # 两次构建共用 Gradle 输出路径，先保存普通版，避免被兼容版覆盖。
-          cp app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/singdeck-standard-unsigned.apk"
-
-      - name: Build HarmonyOS compatible APK
-        run: |
-          cd android
-          ./gradlew --no-daemon :app:assembleRelease :app:lintRelease \
-            -PsingdeckHarmonyCompat=true \
-            -PsingdeckVersionName="${{ steps.android-version.outputs.name }}-harmony" \
-            -PsingdeckVersionCode="${{ steps.android-version.outputs.code }}"
-          cp app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/singdeck-harmony-unsigned.apk"
 
       - name: Decode Android signing key
         env:
@@ -157,7 +142,7 @@ jobs:
           printf '%s' "$ANDROID_KEYSTORE_BASE64" \
             | base64 --decode > "$RUNNER_TEMP/singdeck-release.jks"
 
-      - name: Sign and verify both Android APKs
+      - name: Sign and verify Android release APK
         env:
           VERSION_NAME: ${{ steps.android-version.outputs.name }}
           VERSION_CODE: ${{ steps.android-version.outputs.code }}
@@ -166,42 +151,31 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         shell: bash
         run: |
+          unsigned_apk="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          aligned_apk="$RUNNER_TEMP/singdeck-release-aligned.apk"
+          release_apk="release-artifacts/singdeck-android-arm64-${GITHUB_REF_NAME}.apk"
           build_tools="$ANDROID_HOME/build-tools/36.0.0"
           mkdir -p release-artifacts
-          for variant in standard harmony; do
-            unsigned_apk="$RUNNER_TEMP/singdeck-${variant}-unsigned.apk"
-            aligned_apk="$RUNNER_TEMP/singdeck-${variant}-aligned.apk"
-            release_apk="release-artifacts/singdeck-android-arm64-${GITHUB_REF_NAME}.apk"
-            expected_package="io.singdeck.app"
-            expected_label="SingDeck"
-            expected_version="$VERSION_NAME"
-            if [[ "$variant" == harmony ]]; then
-              release_apk="release-artifacts/singdeck-android-arm64-${GITHUB_REF_NAME}-harmony.apk"
-              expected_package="io.singdeck.app.harmony"
-              expected_label="SingDeck 鸿蒙兼容版"
-              expected_version+="-harmony"
-            fi
 
-            [[ -f "$unsigned_apk" ]] || {
-              echo "::error::Android release build did not produce $unsigned_apk"
-              exit 1
-            }
-            "$build_tools/zipalign" -f -P 16 4 "$unsigned_apk" "$aligned_apk"
-            "$build_tools/apksigner" sign \
-              --ks "$RUNNER_TEMP/singdeck-release.jks" \
-              --ks-key-alias "$ANDROID_KEY_ALIAS" \
-              --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
-              --key-pass env:ANDROID_KEY_PASSWORD \
-              --v4-signing-enabled false \
-              --out "$release_apk" \
-              "$aligned_apk"
-            "$build_tools/zipalign" -c -P 16 4 "$release_apk"
-            "$build_tools/apksigner" verify --verbose --print-certs "$release_apk"
-            badging="$("$build_tools/aapt" dump badging "$release_apk")"
-            grep -Fq "package: name='$expected_package' versionCode='$VERSION_CODE' versionName='$expected_version'" <<< "$badging"
-            grep -Fq "application-label:'$expected_label'" <<< "$badging"
-            grep -Fq "native-code: 'arm64-v8a'" <<< "$badging"
-          done
+          [[ -f "$unsigned_apk" ]] || {
+            echo "::error::Android release build did not produce $unsigned_apk"
+            exit 1
+          }
+          "$build_tools/zipalign" -f -P 16 4 "$unsigned_apk" "$aligned_apk"
+          "$build_tools/apksigner" sign \
+            --ks "$RUNNER_TEMP/singdeck-release.jks" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --v4-signing-enabled false \
+            --out "$release_apk" \
+            "$aligned_apk"
+          "$build_tools/zipalign" -c -P 16 4 "$release_apk"
+          "$build_tools/apksigner" verify --verbose --print-certs "$release_apk"
+          badging="$("$build_tools/aapt" dump badging "$release_apk")"
+          grep -Fq "package: name='io.singdeck.app' versionCode='$VERSION_CODE' versionName='$VERSION_NAME'" <<< "$badging"
+          grep -Fq "application-label:'SingDeck'" <<< "$badging"
+          grep -Fq "native-code: 'arm64-v8a'" <<< "$badging"
 
       - name: Remove Android signing key
         if: always()
@@ -211,8 +185,6 @@ jobs:
         run: |
           tag_name="${GITHUB_REF_NAME//\//-}"
           mkdir -p release-artifacts
-          cp scripts/export-harmony-apps.py release-artifacts/
-          cp docs/harmony-app-inventory.md release-artifacts/
           web_dir="singdeck-web-${tag_name}"
           mkdir -p "release-staging/${web_dir}"
           cp -R dist/. "release-staging/${web_dir}/"
@@ -227,12 +199,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           release_files=(release-artifacts/*)
-          # 中文放在展示名称中，避免 GitHub 改写文件名后与 SHA256SUMS 不一致。
-          for index in "${!release_files[@]}"; do
-            if [[ "${release_files[$index]}" == *-harmony.apk ]]; then
-              release_files[$index]+="#SingDeck 鸿蒙兼容版.apk"
-            fi
-          done
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${release_files[@]}" --clobber
           else

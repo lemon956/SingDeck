@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">SingDeck 鸿蒙兼容版</string>
-    <string name="title_activity_main">SingDeck 鸿蒙兼容版</string>
-    <string name="package_name">io.singdeck.app.harmony</string>
-    <string name="custom_url_scheme">io.singdeck.app.harmony</string>
-</resources>
