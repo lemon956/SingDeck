@@ -177,7 +177,7 @@ jobs:
           expected_package="io.singdeck.app"
           expected_label="SingDeck"
           if [[ "$HARMONY_COMPAT" == true ]]; then
-            release_apk="release-artifacts/singdeck-android-arm64-${GITHUB_REF_NAME}-鸿蒙兼容版.apk"
+            release_apk="release-artifacts/singdeck-android-arm64-${GITHUB_REF_NAME}-harmony.apk"
             expected_package="io.singdeck.app.harmony"
             expected_label="SingDeck 鸿蒙兼容版"
           fi
@@ -235,16 +235,32 @@ jobs:
         run: |
           release_title="$GITHUB_REF_NAME"
           release_args=()
+          release_files=(release-artifacts/*)
           if [[ "$HARMONY_COMPAT" == true ]]; then
             release_title="$GITHUB_REF_NAME · 鸿蒙兼容版"
             release_args+=(--latest=false)
+            # 中文放在展示名称中，避免 GitHub 改写文件名后与 SHA256SUMS 不一致。
+            for index in "${!release_files[@]}"; do
+              if [[ "${release_files[$index]}" == *-harmony.apk ]]; then
+                release_files[$index]+="#SingDeck 鸿蒙兼容版.apk"
+              fi
+            done
           fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release-artifacts/* --clobber
+            gh release upload "$GITHUB_REF_NAME" "${release_files[@]}" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" release-artifacts/* \
+            gh release create "$GITHUB_REF_NAME" "${release_files[@]}" \
               --title "$release_title" \
               --generate-notes \
               --verify-tag \
               "${release_args[@]}"
           fi
+
+      - name: Verify published Android assets
+        if: steps.android-version.outputs.harmony == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --dir "$RUNNER_TEMP/singdeck-published-assets"
+          cd "$RUNNER_TEMP/singdeck-published-assets"
+          sha256sum --check SHA256SUMS
