@@ -11,7 +11,12 @@ Android 版 SingDeck 在卓易通中只能直接查询其 Android 环境可见�
 
 ## 鸿蒙兼容版安装包
 
-推送 `vMAJOR.MINOR.PATCH-android` 格式的 tag（例如 `v0.3.12-android`）会触发 Release workflow，单独生成 Android ARM64 鸿蒙兼容版，并使用仓库配置的正式 Android 签名。Release 同时提供采集脚本、本文档和 `SHA256SUMS`，发布后会重新下载附件校验。
+推送普通 `vMAJOR.MINOR.PATCH` 格式的 tag（例如 `v0.3.13`）会触发 Release workflow，在同一个 Release 中同时生成两个使用正式 Android 签名的 ARM64 APK：
+
+- 普通版：`singdeck-android-arm64-v0.3.13.apk`。
+- 鸿蒙兼容版：`singdeck-android-arm64-v0.3.13-harmony.apk`。
+
+同一 Release 还提供原有 Web、Linux helper、systemd 发行文件，以及鸿蒙清单采集脚本、本文档和 `SHA256SUMS`。发布后会重新下载所有附件校验。
 
 - 应用名：**SingDeck 鸿蒙兼容版**。
 - Release 下载项显示为 **SingDeck 鸿蒙兼容版.apk**；实际文件名使用 `-harmony.apk` 后缀，确保 GitHub 附件名与校验和中的文件名一致。
@@ -20,8 +25,6 @@ Android 版 SingDeck 在卓易通中只能直接查询其 Android 环境可见�
 - 该版本仍是通过卓易通运行的 Android APK；鸿蒙应用清单采用电脑采集后手动导入的方式。
 
 若此前安装过使用本地调试签名、相同包名的“鸿蒙兼容版”，请先保留配置备份和原清单文件，再卸载本地包并安装远程签名版。不同签名的 APK 不能直接覆盖安装。
-
-普通 `vMAJOR.MINOR.PATCH` tag 继续生成原有完整发行包。鸿蒙兼容版使用独立 Release，并且不会成为普通发行渠道的 Latest 版本。
 
 构建时使用已有 Gradle 参数机制，增加 `-PsingdeckHarmonyCompat=true` 即可启用独立包名及名称；版本仍由 `singdeckVersionName` 和 `singdeckVersionCode` 指定。
 

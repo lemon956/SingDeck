@@ -25,8 +25,8 @@ jobs:
         id: android-version
         shell: bash
         run: |
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-android)?$ ]]; then
-            echo "::error::Release tag must use vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-android"
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::Release tag must use vMAJOR.MINOR.PATCH"
             exit 1
           fi
 
@@ -45,14 +45,8 @@ jobs:
           fi
 
           version_name="${GITHUB_REF_NAME#v}"
-          harmony=false
-          if [[ "$GITHUB_REF_NAME" == *-android ]]; then
-            harmony=true
-            version_name="${version_name%-android}-harmony"
-          fi
           echo "name=$version_name" >> "$GITHUB_OUTPUT"
           echo "code=$version_code" >> "$GITHUB_OUTPUT"
-          echo "harmony=$harmony" >> "$GITHUB_OUTPUT"
 
       - name: Validate Android signing secrets
         env:
@@ -84,7 +78,6 @@ jobs:
           cache: pnpm
 
       - name: Setup Rust
-        if: steps.android-version.outputs.harmony != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup JDK 17
@@ -109,12 +102,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify frontend
-        if: steps.android-version.outputs.harmony != 'true'
         run: pnpm check
-
-      - name: Verify Android source contract
-        if: steps.android-version.outputs.harmony == 'true'
-        run: pnpm exec vitest run src/core/androidLibboxIntegration.test.ts
 
       - name: Verify HarmonyOS inventory exporter
         run: python3 -B -m unittest discover -s scripts -p 'test_export_harmony_apps.py' -v
@@ -133,26 +121,32 @@ jobs:
         run: SINGDECK_ANDROID_SDK_DIR="$ANDROID_HOME" scripts/build-android-libbox.sh
 
       - name: Verify Android app
-        env:
-          ORG_GRADLE_PROJECT_singdeckHarmonyCompat: ${{ steps.android-version.outputs.harmony }}
         run: scripts/check-android.sh
 
       - name: Verify helper
-        if: steps.android-version.outputs.harmony != 'true'
         run: pnpm helper:test
 
       - name: Build helper
-        if: steps.android-version.outputs.harmony != 'true'
         run: cargo build --release --manifest-path helper/Cargo.toml
 
       - name: Build Android release APK
-        env:
-          ORG_GRADLE_PROJECT_singdeckHarmonyCompat: ${{ steps.android-version.outputs.harmony }}
         run: |
           cd android
           ./gradlew --no-daemon :app:assembleRelease :app:lintRelease \
+            -PsingdeckHarmonyCompat=false \
             -PsingdeckVersionName="${{ steps.android-version.outputs.name }}" \
             -PsingdeckVersionCode="${{ steps.android-version.outputs.code }}"
+          # 两次构建共用 Gradle 输出路径，先保存普通版，避免被兼容版覆盖。
+          cp app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/singdeck-standard-unsigned.apk"
+
+      - name: Build HarmonyOS compatible APK
+        run: |
+          cd android
+          ./gradlew --no-daemon :app:assembleRelease :app:lintRelease \
+            -PsingdeckHarmonyCompat=true \
+            -PsingdeckVersionName="${{ steps.android-version.outputs.name }}-harmony" \
+            -PsingdeckVersionCode="${{ steps.android-version.outputs.code }}"
+          cp app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/singdeck-harmony-unsigned.apk"
 
       - name: Decode Android signing key
         env:
@@ -163,101 +157,92 @@ jobs:
           printf '%s' "$ANDROID_KEYSTORE_BASE64" \
             | base64 --decode > "$RUNNER_TEMP/singdeck-release.jks"
 
-      - name: Sign and verify Android release APK
+      - name: Sign and verify both Android APKs
         env:
-          HARMONY_COMPAT: ${{ steps.android-version.outputs.harmony }}
+          VERSION_NAME: ${{ steps.android-version.outputs.name }}
+          VERSION_CODE: ${{ steps.android-version.outputs.code }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         shell: bash
         run: |
-          unsigned_apk="android/app/build/outputs/apk/release/app-release-unsigned.apk"
-          aligned_apk="$RUNNER_TEMP/singdeck-release-aligned.apk"
-          release_apk="release-artifacts/singdeck-android-arm64-${GITHUB_REF_NAME}.apk"
-          expected_package="io.singdeck.app"
-          expected_label="SingDeck"
-          if [[ "$HARMONY_COMPAT" == true ]]; then
-            release_apk="release-artifacts/singdeck-android-arm64-${GITHUB_REF_NAME}-harmony.apk"
-            expected_package="io.singdeck.app.harmony"
-            expected_label="SingDeck 鸿蒙兼容版"
-          fi
           build_tools="$ANDROID_HOME/build-tools/36.0.0"
-
-          [[ -f "$unsigned_apk" ]] || {
-            echo "::error::Android release build did not produce $unsigned_apk"
-            exit 1
-          }
           mkdir -p release-artifacts
-          "$build_tools/zipalign" -f -P 16 4 "$unsigned_apk" "$aligned_apk"
-          "$build_tools/apksigner" sign \
-            --ks "$RUNNER_TEMP/singdeck-release.jks" \
-            --ks-key-alias "$ANDROID_KEY_ALIAS" \
-            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
-            --key-pass env:ANDROID_KEY_PASSWORD \
-            --v4-signing-enabled false \
-            --out "$release_apk" \
-            "$aligned_apk"
-          "$build_tools/zipalign" -c -P 16 4 "$release_apk"
-          "$build_tools/apksigner" verify --verbose --print-certs "$release_apk"
-          badging="$("$build_tools/aapt" dump badging "$release_apk")"
-          grep -Fq "package: name='$expected_package'" <<< "$badging"
-          grep -Fq "application-label:'$expected_label'" <<< "$badging"
-          grep -Fq "native-code: 'arm64-v8a'" <<< "$badging"
+          for variant in standard harmony; do
+            unsigned_apk="$RUNNER_TEMP/singdeck-${variant}-unsigned.apk"
+            aligned_apk="$RUNNER_TEMP/singdeck-${variant}-aligned.apk"
+            release_apk="release-artifacts/singdeck-android-arm64-${GITHUB_REF_NAME}.apk"
+            expected_package="io.singdeck.app"
+            expected_label="SingDeck"
+            expected_version="$VERSION_NAME"
+            if [[ "$variant" == harmony ]]; then
+              release_apk="release-artifacts/singdeck-android-arm64-${GITHUB_REF_NAME}-harmony.apk"
+              expected_package="io.singdeck.app.harmony"
+              expected_label="SingDeck 鸿蒙兼容版"
+              expected_version+="-harmony"
+            fi
+
+            [[ -f "$unsigned_apk" ]] || {
+              echo "::error::Android release build did not produce $unsigned_apk"
+              exit 1
+            }
+            "$build_tools/zipalign" -f -P 16 4 "$unsigned_apk" "$aligned_apk"
+            "$build_tools/apksigner" sign \
+              --ks "$RUNNER_TEMP/singdeck-release.jks" \
+              --ks-key-alias "$ANDROID_KEY_ALIAS" \
+              --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+              --key-pass env:ANDROID_KEY_PASSWORD \
+              --v4-signing-enabled false \
+              --out "$release_apk" \
+              "$aligned_apk"
+            "$build_tools/zipalign" -c -P 16 4 "$release_apk"
+            "$build_tools/apksigner" verify --verbose --print-certs "$release_apk"
+            badging="$("$build_tools/aapt" dump badging "$release_apk")"
+            grep -Fq "package: name='$expected_package' versionCode='$VERSION_CODE' versionName='$expected_version'" <<< "$badging"
+            grep -Fq "application-label:'$expected_label'" <<< "$badging"
+            grep -Fq "native-code: 'arm64-v8a'" <<< "$badging"
+          done
 
       - name: Remove Android signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/singdeck-release.jks"
 
       - name: Package release assets
-        env:
-          HARMONY_COMPAT: ${{ steps.android-version.outputs.harmony }}
         run: |
           tag_name="${GITHUB_REF_NAME//\//-}"
           mkdir -p release-artifacts
-          if [[ "$HARMONY_COMPAT" == true ]]; then
-            cp scripts/export-harmony-apps.py release-artifacts/
-            cp docs/harmony-app-inventory.md release-artifacts/
-          else
-            web_dir="singdeck-web-${tag_name}"
-            mkdir -p "release-staging/${web_dir}"
-            cp -R dist/. "release-staging/${web_dir}/"
-            tar -czf "release-artifacts/${web_dir}.tar.gz" -C release-staging "${web_dir}"
-            tar -czf "release-artifacts/singdeck-systemd-${tag_name}.tar.gz" -C deploy systemd
-            cp helper/target/release/singdeck-helper "release-artifacts/singdeck-helper-linux-x86_64-${tag_name}"
-            rm -rf release-staging
-          fi
+          cp scripts/export-harmony-apps.py release-artifacts/
+          cp docs/harmony-app-inventory.md release-artifacts/
+          web_dir="singdeck-web-${tag_name}"
+          mkdir -p "release-staging/${web_dir}"
+          cp -R dist/. "release-staging/${web_dir}/"
+          tar -czf "release-artifacts/${web_dir}.tar.gz" -C release-staging "${web_dir}"
+          tar -czf "release-artifacts/singdeck-systemd-${tag_name}.tar.gz" -C deploy systemd
+          cp helper/target/release/singdeck-helper "release-artifacts/singdeck-helper-linux-x86_64-${tag_name}"
+          rm -rf release-staging
           (cd release-artifacts && sha256sum * > SHA256SUMS)
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          HARMONY_COMPAT: ${{ steps.android-version.outputs.harmony }}
         run: |
-          release_title="$GITHUB_REF_NAME"
-          release_args=()
           release_files=(release-artifacts/*)
-          if [[ "$HARMONY_COMPAT" == true ]]; then
-            release_title="$GITHUB_REF_NAME · 鸿蒙兼容版"
-            release_args+=(--latest=false)
-            # 中文放在展示名称中，避免 GitHub 改写文件名后与 SHA256SUMS 不一致。
-            for index in "${!release_files[@]}"; do
-              if [[ "${release_files[$index]}" == *-harmony.apk ]]; then
-                release_files[$index]+="#SingDeck 鸿蒙兼容版.apk"
-              fi
-            done
-          fi
+          # 中文放在展示名称中，避免 GitHub 改写文件名后与 SHA256SUMS 不一致。
+          for index in "${!release_files[@]}"; do
+            if [[ "${release_files[$index]}" == *-harmony.apk ]]; then
+              release_files[$index]+="#SingDeck 鸿蒙兼容版.apk"
+            fi
+          done
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${release_files[@]}" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "${release_files[@]}" \
-              --title "$release_title" \
+              --title "$GITHUB_REF_NAME" \
               --generate-notes \
-              --verify-tag \
-              "${release_args[@]}"
+              --verify-tag
           fi
 
-      - name: Verify published Android assets
-        if: steps.android-version.outputs.harmony == 'true'
+      - name: Verify published release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
