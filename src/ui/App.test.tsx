@@ -56,7 +56,18 @@ function setupProxyWorkspace() {
   localStorage.clear();
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => new Response(JSON.stringify({ nodes: [] }), { status: 200 }))
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const scoresMatch = url.match(/\/api\/v1\/groups\/([^/]+)\/scores(?:[?#]|$)/);
+      if (scoresMatch) {
+        const group = decodeURIComponent(scoresMatch[1]);
+        return jsonResponse(useHelperStore.getState().scoresByGroup[group] ?? { group, nodes: [] });
+      }
+      if (url.endsWith('/api/v1/traffic')) {
+        return jsonResponse(useHelperStore.getState().traffic ?? { providers: [] });
+      }
+      return jsonResponse({ nodes: [] });
+    })
   );
   vi.stubGlobal(
     'ResizeObserver',
