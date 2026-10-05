@@ -5,7 +5,10 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
 };
 
 use aes::Aes128;
@@ -26,16 +29,36 @@ const NEWSSID_HOMEPAGE: &str = "https://qe.newssid.com/#/dashboard";
 const NEWSSID_ORIGIN: &str = "https://qe.newssid.com";
 const NEWSSID_HOST: &str = "qe.newssid.com";
 const NEWSSID_API_ORIGINS: &[&str] = &[NEWSSID_ORIGIN];
-const NEWSSID_SUBSCRIBE_PATHS: &[&str] = &["/api/v1/access/getSubscribe"];
-const NEWSSID_USER_PATHS: &[&str] = &["/api/v1/access/info"];
-const NEWSSID_AUTH_STORAGE_KEYS: &[&str] = &["auth_data", "cookie_auth_data", "token"];
+const NEWSSID_AUTH_STORAGE_KEYS: &[&str] = &["pu:auth", "auth_data", "cookie_auth_data", "token"];
 const NEWSSID_AUTH_COOKIE_NAMES: &[&str] = &["auth_data", "auth"];
+const NEWSSID_SUBSCRIBE_PATHS: &[&str] = &[
+    "/api/v1/access/getSubscribe",
+    "/api/v1/user/getSubscribe",
+    "/api/v1/user/getStat",
+    "/api/v1/user/stat",
+    "/api/v1/user/traffic",
+];
+const NEWSSID_USER_PATHS: &[&str] = &[
+    "/api/v1/access/info",
+    "/api/v1/user/info",
+    "/api/v1/user/getUserInfo",
+    "/api/v1/user/profile",
+];
 const YUYAN_HOMEPAGE: &str = "https://yuyan.co/#/dashboard";
 const YUYAN_ORIGIN: &str = "https://yuyan.co";
 const YUYAN_HOST: &str = "yuyan.co";
-const YUYAN_API_ORIGINS: &[&str] = &[YUYAN_ORIGIN];
-const YUYAN_AUTH_STORAGE_KEYS: &[&str] =
-    &["ACCESS_TOKEN", "token", "auth_data", "authorization", "access_token"];
+// Keep the legacy panel and scope each login/cookie lookup to its own domain.
+const YUYAN_SITES: &[(&str, &str)] = &[
+    (YUYAN_ORIGIN, YUYAN_HOST),
+    ("https://new4.yuyan.online", "new4.yuyan.online"),
+];
+const YUYAN_AUTH_STORAGE_KEYS: &[&str] = &[
+    "ACCESS_TOKEN",
+    "token",
+    "auth_data",
+    "authorization",
+    "access_token",
+];
 const YUYAN_AUTH_COOKIE_NAMES: &[&str] = &["token", "auth_data"];
 const V2BOARD_SUBSCRIBE_PATHS: &[&str] = &[
     "/api/v1/user/getSubscribe",
@@ -48,6 +71,8 @@ const V2BOARD_USER_PATHS: &[&str] = &[
     "/api/v1/user/getUserInfo",
     "/api/v1/user/profile",
 ];
+
+static CHROME_COPY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -148,7 +173,10 @@ async fn fetch_newssid(http: &Client, profile: &Path, fetched_at: &str) -> Traff
         // failure vs cookies-read-but-no-cf_clearance vs present-but-rejected.
         let cookie_diag = match &cookie_result {
             Ok(value) if value.contains("cf_clearance") => "cf_clearance present".to_string(),
-            Ok(value) => format!("cookies read but no cf_clearance (names: {})", cookie_names(value)),
+            Ok(value) => format!(
+                "cookies read but no cf_clearance (names: {})",
+                cookie_names(value)
+            ),
             Err(error) => format!("cookie read failed: {error}"),
         };
         // Match the user's real Chrome version: Cloudflare binds cf_clearance to
@@ -222,50 +250,68 @@ fn read_newssid_auth(profile: &Path) -> Result<String> {
 }
 
 async fn fetch_yuyan(http: &Client, profile: &Path, fetched_at: &str) -> TrafficSnapshot {
-    let result: Result<TrafficSnapshot> = async {
-        // yuyan.co is a plain V2board (no Cloudflare challenge); auth is a Bearer
-        // token kept in localStorage, not a session cookie. Cookies are optional.
-        let cookie = read_chrome_cookie_header(profile, YUYAN_HOST).ok();
-        let auth = read_yuyan_auth(profile)?;
-        let user_agent = chrome_profile_user_agent(profile);
-        let subscribe = fetch_first_provider_api_text(
-            http,
-            YUYAN_API_ORIGINS,
-            V2BOARD_SUBSCRIBE_PATHS,
-            Some(auth.as_str()),
-            cookie.as_deref(),
-            &user_agent,
-        )
-        .await?;
-        let user = fetch_optional_provider_api_text(
-            http,
-            YUYAN_API_ORIGINS,
-            V2BOARD_USER_PATHS,
-            Some(auth.as_str()),
-            cookie.as_deref(),
-            &user_agent,
-        )
-        .await;
-
-        parse_v2board_traffic(
-            "yuyan",
-            "雨燕云",
-            YUYAN_HOMEPAGE,
-            &subscribe,
-            user.as_deref(),
-            fetched_at,
-        )
-    }
-    .await;
-
+    let result = fetch_yuyan_from_sites(http, profile, YUYAN_SITES, fetched_at).await;
     finalize_provider("yuyan", "雨燕云", YUYAN_HOMEPAGE, fetched_at, result)
 }
 
-fn read_yuyan_auth(profile: &Path) -> Result<String> {
+async fn fetch_yuyan_from_sites(
+    http: &Client,
+    profile: &Path,
+    sites: &[(&str, &str)],
+    fetched_at: &str,
+) -> Result<TrafficSnapshot> {
+    let user_agent = chrome_profile_user_agent(profile);
+    let mut errors = Vec::new();
+    for &(origin, host) in sites {
+        let result: Result<TrafficSnapshot> = async {
+            // Tokens and optional Cloudflare cookies belong to this site only.
+            let auth = read_yuyan_auth(profile, origin, host)?;
+            let cookie = read_chrome_cookie_header(profile, host).ok();
+            let subscribe = fetch_first_provider_api_text(
+                http,
+                &[origin],
+                V2BOARD_SUBSCRIBE_PATHS,
+                Some(auth.as_str()),
+                cookie.as_deref(),
+                &user_agent,
+            )
+            .await?;
+            let user = fetch_optional_provider_api_text(
+                http,
+                &[origin],
+                V2BOARD_USER_PATHS,
+                Some(auth.as_str()),
+                cookie.as_deref(),
+                &user_agent,
+            )
+            .await;
+            let homepage = format!("{origin}/#/dashboard");
+            parse_v2board_traffic(
+                "yuyan",
+                "雨燕云",
+                &homepage,
+                &subscribe,
+                user.as_deref(),
+                fetched_at,
+            )
+        }
+        .await;
+        match result {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(error) => errors.push(format!("{origin}: {error}")),
+        }
+    }
+    Err(anyhow!(
+        "all provider domains failed: {}",
+        errors.join("; ")
+    ))
+}
+
+fn read_yuyan_auth(profile: &Path, origin: &str, host: &str) -> Result<String> {
     let mut errors = Vec::new();
 
     for key in YUYAN_AUTH_STORAGE_KEYS {
-        match read_chrome_local_storage(profile, YUYAN_ORIGIN, key) {
+        match read_chrome_local_storage(profile, origin, key) {
             Ok(value) => {
                 if let Some(auth) = normalize_provider_auth(&value) {
                     return Ok(bearer_token(&auth));
@@ -277,7 +323,7 @@ fn read_yuyan_auth(profile: &Path) -> Result<String> {
     }
 
     for name in YUYAN_AUTH_COOKIE_NAMES {
-        match read_chrome_cookie(profile, YUYAN_HOST, name) {
+        match read_chrome_cookie(profile, host, name) {
             Ok(value) => {
                 if let Some(auth) = normalize_provider_auth(&value) {
                     return Ok(bearer_token(&auth));
@@ -289,7 +335,7 @@ fn read_yuyan_auth(profile: &Path) -> Result<String> {
     }
 
     Err(anyhow!(
-        "Chrome {YUYAN_HOST} auth unavailable: {}",
+        "Chrome {host} auth unavailable: {}",
         errors.join("; ")
     ))
 }
@@ -435,8 +481,9 @@ async fn fetch_provider_api_text(
     // Mimic a real Chrome XHR so Cloudflare-fronted providers don't flag the
     // request as a bot (Chrome UA without client-hints / sec-fetch headers).
     let major = chrome_major_from_user_agent(user_agent).unwrap_or("124");
-    let sec_ch_ua =
-        format!("\"Google Chrome\";v=\"{major}\", \"Chromium\";v=\"{major}\", \"Not)A;Brand\";v=\"24\"");
+    let sec_ch_ua = format!(
+        "\"Google Chrome\";v=\"{major}\", \"Chromium\";v=\"{major}\", \"Not)A;Brand\";v=\"24\""
+    );
     let mut request = http
         .get(format!("{origin}{path}"))
         .header(header::ACCEPT, "application/json, text/plain, */*")
@@ -507,7 +554,13 @@ fn traffic_last_success() -> &'static Mutex<HashMap<String, TrafficSnapshot>> {
     TRAFFIC_LAST_SUCCESS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn finalize_provider(id: &str, name: &str, homepage: &str, fetched_at: &str, result: Result<TrafficSnapshot>) -> TrafficSnapshot {
+fn finalize_provider(
+    id: &str,
+    name: &str,
+    homepage: &str,
+    fetched_at: &str,
+    result: Result<TrafficSnapshot>,
+) -> TrafficSnapshot {
     match result {
         Ok(snapshot) => {
             if let Ok(mut cache) = traffic_last_success().lock() {
@@ -527,7 +580,9 @@ fn finalize_provider(id: &str, name: &str, homepage: &str, fetched_at: &str, res
                     stale.fetched_at = fetched_at.to_string();
                     stale.last_successful_at = Some(last_successful_at);
                     stale.stale = true;
-                    stale.error = Some(format!("sync failed, showing last successful data: {error}"));
+                    stale.error = Some(format!(
+                        "sync failed, showing last successful data: {error}"
+                    ));
                     return stale;
                 }
             }
@@ -671,7 +726,11 @@ pub fn read_chrome_cookie_header(profile: &Path, host_key: &str) -> Result<Strin
             // Skip an individual cookie that won't decrypt instead of dropping the
             // whole header. Otherwise one bad sibling cookie (e.g. __cf_bm) would
             // take cf_clearance / auth_data down with it and break the request.
-            match decrypt_chrome_linux_cookie_with_secrets(&actual_host_key, &encrypted_value, secrets) {
+            match decrypt_chrome_linux_cookie_with_secrets(
+                &actual_host_key,
+                &encrypted_value,
+                secrets,
+            ) {
                 Ok(value) => value,
                 Err(error) => {
                     eprintln!("singdeck-helper: skipping cookie {name} for {host_key}: {error}");
@@ -766,9 +825,10 @@ fn find_local_storage_leveldb(profile: &Path) -> Result<PathBuf> {
 
 fn copy_local_storage_leveldb(source: &Path) -> Result<PathBuf> {
     let copy_path = env::temp_dir().join(format!(
-        "singdeck-local-storage-{}-{}",
+        "singdeck-local-storage-{}-{}-{}",
         std::process::id(),
-        crate::now_ms()
+        crate::now_ms(),
+        CHROME_COPY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&copy_path)?;
     for entry in fs::read_dir(source)? {
@@ -804,9 +864,10 @@ fn open_cookies_db(path: &Path) -> Result<Connection> {
 
 fn open_copied_cookies_db(path: &Path) -> Result<Connection> {
     let copy_path = env::temp_dir().join(format!(
-        "singdeck-cookies-{}-{}.sqlite",
+        "singdeck-cookies-{}-{}-{}.sqlite",
         std::process::id(),
-        crate::now_ms()
+        crate::now_ms(),
+        CHROME_COPY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     fs::copy(path, &copy_path)?;
     // Chrome's Cookies DB is WAL-mode: recently-set cookies (e.g. a just-refreshed
@@ -1095,7 +1156,9 @@ fn build_snapshot(
 fn v2board_reset_at(reset_day: Option<i64>, fetched_at: &str) -> Option<i64> {
     let days = reset_day?;
     let fetched = DateTime::parse_from_rfc3339(fetched_at).ok()?;
-    let reset_date = fetched.date_naive().checked_add_signed(ChronoDuration::days(days))?;
+    let reset_date = fetched
+        .date_naive()
+        .checked_add_signed(ChronoDuration::days(days))?;
     let reset_time = reset_date.and_hms_opt(0, 0, 0)?;
     fetched
         .offset()
@@ -1124,6 +1187,294 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn profile_with_local_storage(entries: &[(&str, &str, &str)]) -> tempfile::TempDir {
+        let profile = tempfile::tempdir().unwrap();
+        let storage = profile.path().join("Local Storage/leveldb");
+        fs::create_dir_all(&storage).unwrap();
+        let mut db = DB::open(
+            &storage,
+            LevelDbOptions {
+                create_if_missing: true,
+                ..LevelDbOptions::default()
+            },
+        )
+        .unwrap();
+        for &(origin, key, raw) in entries {
+            let mut value = vec![1];
+            value.extend_from_slice(raw.as_bytes());
+            db.put(&chrome_local_storage_key(origin, key), &value)
+                .unwrap();
+        }
+        db.flush().unwrap();
+        profile
+    }
+
+    fn add_profile_cookies(profile: &Path, entries: &[(&str, &str, &str)]) {
+        let db = Connection::open(profile.join("Cookies")).unwrap();
+        db.execute(
+            "CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB)",
+            [],
+        )
+        .unwrap();
+        for &(host, name, value) in entries {
+            db.execute(
+                "INSERT INTO cookies VALUES (?1, ?2, ?3, x'')",
+                params![host, name, value],
+            )
+            .unwrap();
+        }
+    }
+
+    async fn provider_test_server(
+        status: &'static str,
+        body: &'static str,
+        request_count: usize,
+    ) -> (
+        String,
+        Arc<StdMutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = [0u8; 4096];
+                let size = stream.read(&mut buffer).await.unwrap();
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buffer[..size]).to_string());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (origin, requests, server)
+    }
+
+    #[test]
+    fn reads_newssid_pu_auth_without_bearer_prefix() {
+        let profile = profile_with_local_storage(&[
+            (NEWSSID_ORIGIN, "pu:auth", "current-raw-token"),
+            (NEWSSID_ORIGIN, "auth_data", "legacy-token"),
+        ]);
+        assert_eq!(
+            read_newssid_auth(profile.path()).unwrap(),
+            "current-raw-token"
+        );
+    }
+
+    #[test]
+    fn reads_newssid_legacy_auth_when_pu_auth_is_absent() {
+        let profile = profile_with_local_storage(&[(
+            NEWSSID_ORIGIN,
+            "auth_data",
+            r#"{"site":"SS-ID","value":"legacy-token"}"#,
+        )]);
+        assert_eq!(read_newssid_auth(profile.path()).unwrap(), "legacy-token");
+    }
+
+    #[test]
+    fn concurrent_profile_reads_keep_each_profiles_auth_separate() {
+        let profiles: Vec<_> = (0..4)
+            .map(|i| {
+                let token = format!("profile-{i}-token");
+                (
+                    profile_with_local_storage(&[(NEWSSID_ORIGIN, "token", &token)]),
+                    token,
+                )
+            })
+            .collect();
+        let barrier = Arc::new(std::sync::Barrier::new(profiles.len()));
+        std::thread::scope(|scope| {
+            for (profile, expected) in &profiles {
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..8 {
+                        assert_eq!(
+                            read_chrome_local_storage(profile.path(), NEWSSID_ORIGIN, "token")
+                                .unwrap(),
+                            *expected,
+                        );
+                    }
+                });
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn fetches_newssid_access_api_with_raw_auth() {
+        let (origin, requests, server) =
+            provider_test_server("200 OK", r#"{"data":{"u":1,"d":2,"transfer_enable":8}}"#, 1)
+                .await;
+        let profile = profile_with_local_storage(&[(NEWSSID_ORIGIN, "pu:auth", "raw-token")]);
+        let auth = read_newssid_auth(profile.path()).unwrap();
+        let client = Client::builder().no_proxy().build().unwrap();
+        fetch_first_provider_api_text(
+            &client,
+            &[&origin],
+            NEWSSID_SUBSCRIBE_PATHS,
+            Some(&auth),
+            None,
+            "test-agent/1.0",
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(requests[0].starts_with("GET /api/v1/access/getSubscribe "));
+        assert!(requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: raw-token"));
+    }
+
+    #[test]
+    fn reads_yuyan_auth_only_from_the_requested_domain() {
+        let profile = profile_with_local_storage(&[
+            (
+                YUYAN_ORIGIN,
+                "ACCESS_TOKEN",
+                r#"{"value":"Bearer old-token"}"#,
+            ),
+            (
+                "https://new4.yuyan.online",
+                "ACCESS_TOKEN",
+                r#"{"value":"Bearer new-token"}"#,
+            ),
+        ]);
+        assert_eq!(
+            read_yuyan_auth(profile.path(), YUYAN_ORIGIN, YUYAN_HOST).unwrap(),
+            "Bearer old-token",
+        );
+        assert_eq!(
+            read_yuyan_auth(
+                profile.path(),
+                "https://new4.yuyan.online",
+                "new4.yuyan.online"
+            )
+            .unwrap(),
+            "Bearer new-token",
+        );
+        assert!(read_yuyan_auth(profile.path(), "https://other.example", "other.example").is_err());
+    }
+
+    #[tokio::test]
+    async fn fetches_yuyan_with_only_a_legacy_domain_login() {
+        let (origin, requests, server) =
+            provider_test_server("200 OK", r#"{"data":{"u":1,"d":2,"transfer_enable":8}}"#, 2)
+                .await;
+        let profile = profile_with_local_storage(&[(&origin, "ACCESS_TOKEN", "legacy-token")]);
+        let client = Client::builder().no_proxy().build().unwrap();
+        let snapshot = fetch_yuyan_from_sites(
+            &client,
+            profile.path(),
+            &[
+                (&origin, "legacy.example"),
+                ("http://127.0.0.1:1", "new.example"),
+            ],
+            "2026-10-03T12:00:00+08:00",
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(snapshot.used_total_bytes, Some(3));
+        assert_eq!(snapshot.homepage, format!("{origin}/#/dashboard"));
+        assert!(requests.lock().unwrap().iter().all(|r| r
+            .to_ascii_lowercase()
+            .contains("authorization: bearer legacy-token")));
+    }
+
+    #[tokio::test]
+    async fn fetches_yuyan_with_only_an_alternate_domain_login() {
+        let (origin, requests, server) =
+            provider_test_server("200 OK", r#"{"data":{"u":1,"d":2,"transfer_enable":8}}"#, 2)
+                .await;
+        let profile = profile_with_local_storage(&[(&origin, "ACCESS_TOKEN", "alternate-token")]);
+        add_profile_cookies(
+            profile.path(),
+            &[
+                ("legacy.example", "cf_clearance", "legacy-cookie"),
+                ("new.example", "cf_clearance", "alternate-cookie"),
+            ],
+        );
+        let client = Client::builder().no_proxy().build().unwrap();
+        let snapshot = fetch_yuyan_from_sites(
+            &client,
+            profile.path(),
+            &[
+                ("http://127.0.0.1:1", "legacy.example"),
+                (&origin, "new.example"),
+            ],
+            "2026-10-03T12:00:00+08:00",
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(snapshot.used_total_bytes, Some(3));
+        assert_eq!(snapshot.homepage, format!("{origin}/#/dashboard"));
+        for request in requests.lock().unwrap().iter() {
+            let request = request.to_ascii_lowercase();
+            assert!(request.contains("authorization: bearer alternate-token"));
+            assert!(request.contains("cookie: cf_clearance=alternate-cookie"));
+            assert!(!request.contains("legacy-cookie"));
+        }
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_other_yuyan_domain_after_rejected_login() {
+        let (old_origin, old_requests, old_server) =
+            provider_test_server("403 Forbidden", r#"{"message":"Login expired"}"#, 4).await;
+        let (new_origin, new_requests, new_server) =
+            provider_test_server("200 OK", r#"{"data":{"u":1,"d":2,"transfer_enable":8}}"#, 2)
+                .await;
+        let profile = profile_with_local_storage(&[
+            (&old_origin, "ACCESS_TOKEN", "expired-token"),
+            (&new_origin, "ACCESS_TOKEN", "current-token"),
+        ]);
+        add_profile_cookies(
+            profile.path(),
+            &[
+                ("legacy.example", "cf_clearance", "old-cookie"),
+                ("new.example", "cf_clearance", "new-cookie"),
+            ],
+        );
+        let client = Client::builder().no_proxy().build().unwrap();
+        let snapshot = fetch_yuyan_from_sites(
+            &client,
+            profile.path(),
+            &[
+                (&old_origin, "legacy.example"),
+                (&new_origin, "new.example"),
+            ],
+            "2026-10-03T12:00:00+08:00",
+        )
+        .await
+        .unwrap();
+        old_server.await.unwrap();
+        new_server.await.unwrap();
+        assert_eq!(snapshot.homepage, format!("{new_origin}/#/dashboard"));
+        assert_eq!(snapshot.used_total_bytes, Some(3));
+        for request in old_requests.lock().unwrap().iter() {
+            let request = request.to_ascii_lowercase();
+            assert!(request.contains("authorization: bearer expired-token"));
+            assert!(request.contains("cookie: cf_clearance=old-cookie"));
+            assert!(!request.contains("current-token"));
+        }
+        for request in new_requests.lock().unwrap().iter() {
+            let request = request.to_ascii_lowercase();
+            assert!(request.contains("authorization: bearer current-token"));
+            assert!(request.contains("cookie: cf_clearance=new-cookie"));
+            assert!(!request.contains("old-cookie"));
+            assert!(!request.contains("expired-token"));
+        }
+    }
 
     #[test]
     fn parses_v2board_subscribe_and_user_json() {
@@ -1270,7 +1621,10 @@ mod tests {
         // yuyan.co localStorage ACCESS_TOKEN holds {"value":"Bearer <token>",...}.
         let raw = r#"{"value":"Bearer Ad6AMiv9zrNYppXrIG8ZV1iJW0g3wBMZjw02EV2U3e1269a6","time":1781245652306,"expire":1781267252306}"#;
         let token = normalize_provider_auth(raw).unwrap();
-        assert_eq!(token, "Bearer Ad6AMiv9zrNYppXrIG8ZV1iJW0g3wBMZjw02EV2U3e1269a6");
+        assert_eq!(
+            token,
+            "Bearer Ad6AMiv9zrNYppXrIG8ZV1iJW0g3wBMZjw02EV2U3e1269a6"
+        );
         // bearer_token leaves an already-prefixed token untouched.
         assert_eq!(bearer_token(&token), token);
     }
@@ -1289,7 +1643,13 @@ mod tests {
         .unwrap();
 
         // Success is cached and returned as-is.
-        let cached = finalize_provider(id, "Stale Test", "https://x/", "2026-06-12T13:00:00+08:00", Ok(ok));
+        let cached = finalize_provider(
+            id,
+            "Stale Test",
+            "https://x/",
+            "2026-06-12T13:00:00+08:00",
+            Ok(ok),
+        );
         assert_eq!(cached.error, None);
         assert!(!cached.stale);
 
@@ -1303,7 +1663,10 @@ mod tests {
         );
         assert!(stale.stale);
         assert_eq!(stale.used_total_bytes, Some(3));
-        assert_eq!(stale.last_successful_at.as_deref(), Some("2026-06-12T13:00:00+08:00"));
+        assert_eq!(
+            stale.last_successful_at.as_deref(),
+            Some("2026-06-12T13:00:00+08:00")
+        );
         assert_eq!(stale.fetched_at, "2026-06-12T13:30:00+08:00");
         assert!(stale.error.unwrap().contains("HTTP 403 Forbidden"));
 
@@ -1632,7 +1995,8 @@ mod tests {
         encrypted.extend_from_slice(&ciphertext);
 
         let decrypted =
-            decrypt_chrome_linux_cookie_with_secrets(host, &encrypted, &[b"peanuts".to_vec()]).unwrap();
+            decrypt_chrome_linux_cookie_with_secrets(host, &encrypted, &[b"peanuts".to_vec()])
+                .unwrap();
 
         assert_eq!(decrypted, "cf_clearance-token");
     }
